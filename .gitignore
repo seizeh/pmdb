@@ -1,0 +1,8 @@
+# Supabase CLI
+.branches
+.temp
+.env
+**/.env
+
+# OS
+.DS_Store
