@@ -26,6 +26,7 @@ supabase/
 | 20260608095600 | `start_direct_chat` RPC(1:1 방 find-or-create) + `v_pawing` / `v_pawmate` |
 | 20260608150932 | `media` Storage 버킷(public) + 본인 폴더 업로드 RLS |
 | 20260608151755 | `v_post_feed` 에 `image_url` 추가(게시글 사진) |
+| 20260609051500 | 알림 자동 생성 트리거(댓글/지원/지원수락/평가 → notifications) |
 
 > 위 이전(`20260603*`) 기반 스키마 마이그레이션은 Supabase 프로젝트에 이미 적용되어 있으며 본 저장소 범위 밖이다.
 
