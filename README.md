@@ -29,6 +29,7 @@ supabase/
 | 20260609051500 | 알림 자동 생성 트리거(댓글/지원/지원수락/평가 → notifications) |
 | 20260610104641 | 펫 등록 시 `user_type` → `pet_owner` 자동 승격 (P0001 게시글 작성 차단 수정) |
 | 20260610112605 | 지원 수락 시 나머지 지원자 자동 거절 (`tg_applications_on_accept` 보강) |
+| 20260610120125 | 아이디(`username`) 비공개화(`public_profiles`·컬럼권한에서 제거) + `login_user` 가 username 반환 + 가입 아이디 중복확인 RPC `check_username_available` |
 
 > 위 이전(`20260603*`) 기반 스키마 마이그레이션은 Supabase 프로젝트에 이미 적용되어 있으며 본 저장소 범위 밖이다.
 

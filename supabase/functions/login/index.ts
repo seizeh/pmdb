@@ -5,6 +5,7 @@
 //   클라이언트는 이 토큰을 모든 요청의 Authorization 으로 붙여 RLS(app.uid()) 통과.
 //   JWT 서명키는 함수 시크릿 JWT_SECRET (Supabase JWT Secret) 에서 읽는다.
 //   verify_jwt=false: 로그인 자체가 토큰 발급 단계.
+//   username 은 본인 화면 표시용으로만 응답에 포함(공개 프로필엔 노출하지 않음).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -89,7 +90,7 @@ Deno.serve(async (req: Request) => {
     console.error("login_user failed", error);
     return json({ error: "internal_error" }, 500);
   }
-  const rows = (data as Array<{ id: string; nickname: string; user_type: string }>) ?? [];
+  const rows = (data as Array<{ id: string; username: string; nickname: string; user_type: string }>) ?? [];
   if (rows.length === 0) {
     return json({ error: "invalid_credentials" }, 401);
   }
@@ -108,6 +109,6 @@ Deno.serve(async (req: Request) => {
   return json({
     ok: true,
     token,
-    user: { id: user.id, nickname: user.nickname, user_type: user.user_type },
+    user: { id: user.id, username: user.username, nickname: user.nickname, user_type: user.user_type },
   });
 });
