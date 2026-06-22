@@ -70,9 +70,11 @@ async function getUidFromJwt(req: Request, secret: string): Promise<string | nul
 }
 
 // Naver Reverse Geocoding → 행정동코드 + 라벨. 실패/해상 등은 null.
+// 엔드포인트는 NCP Maps 신 도메인(maps.apigw.ntruss.com) 사용.
+// 구 도메인(naveropenapi.apigw.ntruss.com)은 폐기되어 401(subscription required) 반환.
 async function reverseGeocode(lng: number, lat: number) {
   const url =
-    "https://naveropenapi.apigw.ntruss.com/map-reversegeocode/v2/gc" +
+    "https://maps.apigw.ntruss.com/map-reversegeocode/v2/gc" +
     `?coords=${lng},${lat}&output=json&orders=admcode,legalcode,addr`;
   let res: Response;
   try {
