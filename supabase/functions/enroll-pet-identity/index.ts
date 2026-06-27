@@ -21,6 +21,37 @@ const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY");
 
 const ENROLL_REAL_THRESHOLD = 0.70;
+const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 영상/이미지 멀티모달
+
+/// Gemini 구조화 출력 호출 + 429(한도) 재시도(backoff).
+async function geminiGenerate(parts: unknown[], schema: object): Promise<any> {
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const body = JSON.stringify({
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: schema,
+      temperature: 0,
+    },
+  });
+  for (let attempt = 0;; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": GEMINI_KEY! },
+      body,
+    });
+    if (res.status === 429 && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(`gemini ${res.status}: ${t.slice(0, 300)}`);
+    }
+    return await res.json();
+  }
+}
 
 function b64urlToBytes(s: string): Uint8Array {
   const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
@@ -115,28 +146,10 @@ async function verifyEnrollmentVideo(
 (3) 다음 지시 동작이 영상에서 실제로 수행됐는가 — 수행된 코드만 challenges_done 에 담아라: ${tasks}
 (4) (참고) 추정 품종 detected_breed(한국어, 확실치 않으면 "믹스") 와 주요 털색 coat_colors(예: ["white","tan"]).
 reason 한국어 80자 이내.`;
-  const url =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent";
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": GEMINI_KEY! },
-    body: JSON.stringify({
-      contents: [{
-        role: "user",
-        parts: [
-          { text: prompt },
-          { inline_data: { mime_type: videoMime, data: videoBase64 } },
-        ],
-      }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: ENROLL_SCHEMA,
-        temperature: 0,
-      },
-    }),
-  });
-  if (!res.ok) throw new Error(`gemini ${res.status}`);
-  const body = await res.json();
+  const body = await geminiGenerate([
+    { text: prompt },
+    { inline_data: { mime_type: videoMime, data: videoBase64 } },
+  ], ENROLL_SCHEMA);
   const txt = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   const v = JSON.parse(txt);
   return {
@@ -194,6 +207,7 @@ Deno.serve(async (req: Request) => {
   const videoMime = p.videoMime ?? "video/mp4";
   const frames = Array.isArray(p.frames) ? p.frames : [];
   const mimeType = p.mimeType ?? "image/jpeg";
+  const videoKb = Math.round((videoBase64.length * 3 / 4) / 1024); // 진단용 영상 크기
 
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
@@ -226,7 +240,12 @@ Deno.serve(async (req: Request) => {
     ai = await verifyEnrollmentVideo(videoBase64, videoMime, challenge);
   } catch (e) {
     console.error("gemini enroll failed", e);
-    return json({ enrolled: false, reason: "ai_unavailable" });
+    return json({
+      enrolled: false,
+      reason: "ai_unavailable",
+      detail: String(e).slice(0, 400), // 진단용(임시)
+      videoKb,
+    });
   }
   const real = Math.max(ai.dog_real, ai.cat_real);
   const fake = Math.max(ai.dog_fake, ai.cat_fake);

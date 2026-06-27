@@ -24,6 +24,7 @@ const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY");
 
 const AI_REAL_THRESHOLD = 0.70; // 라이브니스(실제 개/고양이) 하한
 const IDENTITY_PASS_THRESHOLD = 0.63; // 동일 개체 통과선(중간신뢰)
+const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 멀티이미지
 const TOKEN_TTL_MIN = 15;
 const REVERIFY_DAYS = 60;
 
@@ -158,20 +159,32 @@ async function matchIdentity(
   parts.push({ inline_data: { mime_type: shotMime, data: shotB64 } });
 
   const url =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent";
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": GEMINI_KEY! },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: MATCH_SCHEMA,
-        temperature: 0,
-      },
-    }),
+    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const reqBody = JSON.stringify({
+    contents: [{ role: "user", parts }],
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: MATCH_SCHEMA,
+      temperature: 0,
+    },
   });
-  if (!res.ok) throw new Error(`gemini ${res.status}`);
+  let res: Response;
+  for (let attempt = 0;; attempt++) {
+    res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": GEMINI_KEY! },
+      body: reqBody,
+    });
+    if (res.status === 429 && attempt < 2) {
+      await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      continue;
+    }
+    break;
+  }
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`gemini ${res.status}: ${t.slice(0, 300)}`);
+  }
   const body = await res.json();
   const txt = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   const v = JSON.parse(txt);
