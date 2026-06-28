@@ -13,6 +13,35 @@ import { corsHeaders, json } from "../_shared/cors.ts";
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const NAVER_CLIENT_ID = Deno.env.get("NAVER_CLIENT_ID");
 const NAVER_CLIENT_SECRET = Deno.env.get("NAVER_CLIENT_SECRET");
+// 역지오코딩(현재 위치 → 구/동)으로 검색어를 지역 한정한다(NCP Maps 키, 기존 공유).
+const NAVER_MAP_KEY_ID = Deno.env.get("NAVER_MAP_KEY_ID");
+const NAVER_MAP_KEY = Deno.env.get("NAVER_MAP_KEY");
+
+/// 좌표 → "시군구 읍면동" (지역검색어 한정용). 실패 시 null.
+async function reverseGeocodeArea(lng: number, lat: number): Promise<string | null> {
+  if (!NAVER_MAP_KEY_ID || !NAVER_MAP_KEY) return null;
+  const url =
+    "https://maps.apigw.ntruss.com/map-reversegeocode/v2/gc" +
+    `?coords=${lng},${lat}&output=json&orders=admcode,legalcode,addr`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "x-ncp-apigw-api-key-id": NAVER_MAP_KEY_ID,
+        "x-ncp-apigw-api-key": NAVER_MAP_KEY,
+      },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    if (body?.status?.code !== 0 || !Array.isArray(body.results)) return null;
+    const adm = body.results.find((r: any) => r.name === "admcode");
+    const a2 = adm?.region?.area2?.name ?? "";
+    const a3 = adm?.region?.area3?.name ?? "";
+    const area = [a2, a3].filter(Boolean).join(" ").trim();
+    return area || null;
+  } catch (_) {
+    return null;
+  }
+}
 
 function b64urlToBytes(s: string): Uint8Array {
   const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
@@ -76,9 +105,16 @@ Deno.serve(async (req: Request) => {
     return json({ error: "invalid_json" }, 400);
   }
 
+  // 지역검색은 위치 인자가 없어 "애견카페"만 던지면 전국 결과가 온다.
+  // 현재 위치를 역지오코딩해 "<구> <동> 애견카페"로 지역을 한정한다.
+  const lat = Number(p.lat), lng = Number(p.lng);
+  const area = (Number.isFinite(lat) && Number.isFinite(lng))
+    ? await reverseGeocodeArea(lng, lat)
+    : null;
+  const query = (area ? area + " " : "") + "애견카페";
   const url =
     "https://openapi.naver.com/v1/search/local.json?query=" +
-    encodeURIComponent("애견카페") + "&display=5&sort=comment";
+    encodeURIComponent(query) + "&display=5&sort=comment";
   let res: Response;
   try {
     res = await fetch(url, {
