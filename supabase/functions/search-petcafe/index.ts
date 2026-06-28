@@ -98,20 +98,26 @@ Deno.serve(async (req: Request) => {
   const uid = await getUidFromJwt(req, JWT_SECRET);
   if (!uid) return json({ error: "unauthorized" }, 401);
 
-  let p: { lat?: number; lng?: number };
+  let p: { lat?: number; lng?: number; query?: string };
   try {
     p = await req.json();
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
 
-  // 지역검색은 위치 인자가 없어 "애견카페"만 던지면 전국 결과가 온다.
-  // 현재 위치를 역지오코딩해 "<구> <동> 애견카페"로 지역을 한정한다.
   const lat = Number(p.lat), lng = Number(p.lng);
-  const area = (Number.isFinite(lat) && Number.isFinite(lng))
-    ? await reverseGeocodeArea(lng, lat)
-    : null;
-  const query = (area ? area + " " : "") + "애견카페";
+  const provided = (typeof p.query === "string") ? p.query.trim() : "";
+  // query 가 오면 이름 검색(입력 그대로, 위치 무관) / 없으면 현재 동네 애견카페.
+  // 후자는 위치 인자가 없는 지역검색 특성상 역지오코딩으로 지역을 한정한다.
+  let query: string;
+  if (provided) {
+    query = provided;
+  } else {
+    const area = (Number.isFinite(lat) && Number.isFinite(lng))
+      ? await reverseGeocodeArea(lng, lat)
+      : null;
+    query = (area ? area + " " : "") + "애견카페";
+  }
   const url =
     "https://openapi.naver.com/v1/search/local.json?query=" +
     encodeURIComponent(query) + "&display=5&sort=comment";
