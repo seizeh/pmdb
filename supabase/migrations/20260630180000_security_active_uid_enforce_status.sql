@@ -2,13 +2,14 @@
 --
 -- 배경: 기존 app.uid() 는 JWT sub 만 반환했다. login_user 는 이미 status='active' 만
 --   토큰을 발급하지만, "로그인 후 정지/차단(admin_set_user_status)" 된 사용자는 발급된
---   토큰(exp 최대 7일)으로 계속 접근 가능했다(매 요청 status 재확인 부재).
+--   토큰(exp 30일)으로 계속 접근 가능했다(매 요청 status 재확인 부재).
 --   is_admin() 과 동일하게 status 게이트를 넣어, 정지/차단이 app.uid 기반 모든
 --   RLS·RPC 에 즉시 반영되도록 한다.
 --
 --   · SECURITY DEFINER: users 를 RLS 우회로 읽어 정책 재귀 방지(is_admin 과 동일 패턴).
 --   · 비로그인(claims 없음)/비활성 → NULL 반환(anon 동작 유지).
---   · 함께 login Edge Function 토큰 exp 30일→7일 단축(유출 노출창 축소).
+--   · 토큰 exp 는 30일 유지(UX). 정지/차단·삭제는 본 게이트로 즉시 차단되므로 안전.
+--     잔여 위험(활성 사용자 토큰 유출 30일 유효)은 단기 access+refresh 흐름으로 후속 대응.
 create or replace function app.uid()
 returns uuid
 language sql
