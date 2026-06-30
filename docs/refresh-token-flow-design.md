@@ -87,8 +87,10 @@ $$;
 1. `login_user`로 비번 검증(이미 `status='active'`만).
 2. **클라 capability 감지**(요청 헤더/필드 예: `x-client-refresh: 1` 또는 앱 버전):
    - 지원 → access(exp 6~12h, `tv = users.token_version` 클레임 포함) + refresh 발급(새 family, `expires_at=now()+30d`, `absolute_expires_at=now()+90d`).
-   - 미지원(레거시 앱) → 기존 30일 access만(점진 제거 대상).
+   - 미지원(레거시 앱) → 기존 30일 access만, **단 `tv = users.token_version` 클레임은 항상 포함**(점진 제거 대상).
 3. 응답 `{ access_token, refresh_token?, expires_in, user }`.
+
+> ⚠️ **새로 찍는 모든 토큰(레거시 분기 포함)에 반드시 현재 `tv` 를 stamp**. §3의 "클레임 없음=0"은 *이미 발급된 과거 토큰* 구제용일 뿐이다. tv 가 한 번이라도 bump된 사용자(예: 비번변경으로 1)가 tv 없는 새 토큰을 받으면 `0 ≠ 1` 로 **로그인하자마자 전 요청 무효(즉시 잠김)** 된다.
 
 ### `refresh` (신규, verify_jwt=false) — **원자적 회전 + grace (핵심)**
 `POST { refresh_token }`
@@ -130,6 +132,7 @@ else:   -- 이미 revoked = 재시도(응답 유실) 또는 탈취
 - **`change_password`** 성공:
   - `token_version`++ → **모든 기존 access 즉시 무효**(타 기기 즉사).
   - **타 기기 refresh 회수**, 단 **현재 기기엔 응답으로 새 access+refresh 재발급**(현재 기기 로그아웃 방지 — UX 표준).
+  - ⚠️ **의존성**: 현재 기기 재발급은 refresh 원문 생성 + JWT 서명이 필요 → **`change_password` 가 엣지 함수 경로여야 한다**. 현재는 PLpgSQL RPC(`change_password(p_current,p_new)`)라, 엣지로 감싸 *비번검증(RPC 재사용) → token_version++ → 토큰 발급* 순으로 처리(롤아웃 1단계에 포함).
 - **삭제**: `on delete cascade` 로 토큰 자동 제거.
 
 ## 6. 앱(pmdart) 통합 — 기존 `accessToken` 콜백을 갱신 훅으로
@@ -158,8 +161,8 @@ accessToken: () async {
 ## 8. 보류(규모) 항목 + 도입 신호
 | 항목 | 도입 신호 |
 |---|---|
-| `pg_cron` 정리잡(만료/회수 토큰 삭제) | refresh_tokens 행 수·테이블 크기 증가 |
-| 사용자당 refresh cap·prune | 로그아웃 없는 반복 로그인으로 family 증식 |
+| `pg_cron` 정리잡(만료/회수 토큰 삭제) | **느슨한 상한: `refresh_tokens` 행 > 10만**(또는 테이블 수십 MB). grace 재발급·미로그아웃으로 행이 단조증가하므로 이 상한 돌파 전 도입 |
+| 사용자당 refresh cap·prune | **사용자당 활성 family > ~10**, 또는 위 정리잡과 함께 |
 | `logout_all` 제품 UI | "다른 기기 로그아웃" 기능 요구 |
 | 지터·세밀 레이트리밋 | refresh QPS 피크(≈10만 사용자) |
 | access 1h 단축 | 유출 우려↑ 또는 신뢰 확보 후(서버-only) |
@@ -179,6 +182,8 @@ refresh 호출량 ≈ `활성 사용자 × (활동시간 ÷ access수명)`. toke
 - [ ] **원자적 회전**(`UPDATE ... WHERE revoked_at IS NULL RETURNING`) + **grace 유예(30s)** — 빠지면 랜덤 로그아웃
 - [ ] grace 초과 재사용만 family 회수(진짜 탈취)
 - [ ] `users.token_version` ↔ access `tv` 클레임 비교(즉시 전역 무효화), 클레임 없음=0 하위호환
+- [ ] **새로 발급하는 모든 토큰(레거시 분기 포함)에 현재 `tv` stamp** — "클레임 없음=0"은 과거 토큰 구제용일 뿐(미stamp 시 bump된 사용자 재로그인 즉시 잠김)
+- [ ] **`change_password` 는 엣지 경로**(현기기 토큰 재발급에 JWT 서명 필요 — 현행 RPC를 엣지로 감쌈)
 - [ ] 정지/차단·비번변경 시 회수 연동(비번변경=타기기 회수+현기기 재발급)
 - [ ] `logout_all`·민감작업은 유효 access 필수(refresh 단독 불가)
 - [ ] `refresh`/`login` 기본 레이트리밋(반복 401 잠금)
