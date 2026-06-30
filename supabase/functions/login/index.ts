@@ -103,7 +103,7 @@ Deno.serve(async (req: Request) => {
     aud: "authenticated",
     iss: "supabase",
     iat: nowSec,
-    exp: nowSec + 60 * 60 * 24 * 30, // 30일
+    exp: nowSec + 60 * 60 * 24 * 7, // 7일 (유출 토큰 노출창 축소. 정지/차단 즉시반영은 app.uid 상태게이트로 보강)
   }, secret);
 
   return json({
