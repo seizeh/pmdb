@@ -103,7 +103,8 @@ Deno.serve(async (req: Request) => {
     aud: "authenticated",
     iss: "supabase",
     iat: nowSec,
-    exp: nowSec + 60 * 60 * 24 * 30, // 30일
+    exp: nowSec + 60 * 60 * 24 * 30, // 30일 (UX 유지). 정지/차단·삭제는 app.uid 상태게이트로 즉시 차단됨.
+    // 잔여 위험: 활성 사용자의 토큰 유출 시 30일 유효 → 완전 차단은 단기 access+refresh 토큰 흐름(후속).
   }, secret);
 
   return json({
