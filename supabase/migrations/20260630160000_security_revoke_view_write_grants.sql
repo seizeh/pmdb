@@ -27,5 +27,13 @@ grant select
      public.v_pawing, public.v_pawmate
   to anon, authenticated;
 
--- 부수: PostGIS 기준 테이블(좌표변환 SRID) 변조/TRUNCATE 차단(무결성·DoS 방어).
+-- 부수(⚠ NO-OP, 검증 결과): PostGIS spatial_ref_sys 는 supabase_admin 소유라
+-- postgres(마이그레이션 실행 롤) 권한으로는 revoke 가 실제로 적용되지 않는다
+-- (경고만 나고 anon 의 DML GRANT 는 그대로 유지됨). geometry_columns/geography_columns
+-- 도 동일(카탈로그 뷰, supabase_admin 소유).
+--   · spatial_ref_sys: RLS off + anon 쓰기 가능 상태로 남음 → 낮음~중간 위험
+--     (SRID 변조/삭제 시 ST_Transform 등 지오쿼리 무결성/DoS). 완전 차단은
+--     supabase_admin/Supabase 지원 필요(우리 롤로는 불가 — 알려진 한계).
+--   · geometry/geography_columns: 카탈로그 뷰라 런타임 쓰기는 사실상 실패(거의 무해).
+-- 아래 문은 best-effort 로 남기되 운영 효력 없음을 명시한다.
 revoke insert, update, delete, truncate on public.spatial_ref_sys from anon, authenticated;
