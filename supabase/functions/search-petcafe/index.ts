@@ -141,6 +141,14 @@ Deno.serve(async (req: Request) => {
   const body = await res.json();
   const items = (body.items as any[] ?? [])
     .map((it) => {
+      // 애견카페로 인정할 분류만 통과(화이트리스트). 검색어가 "애견카페"여도
+      // 네이버가 이름/후기 매칭으로 주택·부동산·일반 음식점 등 무관한 곳을 섞어
+      // 내려주는데, 그것까지 전부 pet_cafe 로 라벨링되던 문제를 막는다.
+      // 분류에 애견/애완/반려/펫 또는 '카페'가 들어간 곳만 남긴다.
+      const cat = String(it?.category ?? "");
+      const isPetPlace = /애견|애완|반려|펫/.test(cat);
+      const isCafe = cat.includes("카페");
+      if (!isPetPlace && !isCafe) return null;
       const coord = toWgs84(it.mapx, it.mapy);
       if (!coord) return null;
       return {
