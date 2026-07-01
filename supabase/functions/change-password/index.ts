@@ -26,6 +26,8 @@ Deno.serve(async (req: Request) => {
   const claims = tok ? await verifyAccess(tok, secret) : null;
   const uid = claims?.sub as string | undefined;
   if (!uid) return json({ error: "unauthorized" }, 401);
+  // 세션 epoch — change_password_svc 가 status+token_version 을 검증(전역 무효화된 토큰 차단).
+  const tv = (claims?.tv as number | undefined) ?? 0;
 
   let p: { current_password?: string; new_password?: string };
   try {
@@ -43,10 +45,11 @@ Deno.serve(async (req: Request) => {
   );
 
   const { error: cpErr } = await supabase.rpc("change_password_svc", {
-    p_user: uid, p_current: cur, p_new: next,
+    p_user: uid, p_current: cur, p_new: next, p_tv: tv,
   });
   if (cpErr) {
     const m = cpErr.message ?? "";
+    if (m.includes("not_authenticated")) return json({ error: "unauthorized" }, 401); // tv 불일치/정지
     if (m.includes("invalid_current")) return json({ error: "invalid_current" }, 401);
     if (m.includes("weak_password")) return json({ error: "weak_password" }, 400);
     console.error("change_password_svc failed", cpErr);

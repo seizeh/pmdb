@@ -190,3 +190,19 @@ refresh 호출량 ≈ `활성 사용자 × (활동시간 ÷ access수명)`. toke
 - [ ] `replaced_by` FK `on delete set null`(정리잡 FK위반 방지)
 - [ ] 앱: access+refresh 모두 secure storage, 단일비행 갱신, 401→강제 로그아웃
 - [ ] 롤아웃: capability 감지로 무중단, access 6~12h 시작→서버-only 1h 단축
+
+## 11. 1단계 구현 노트 (2026-07-01, 운영 배포·검증 완료)
+
+**구현/배포됨** (마이그레이션 `20260701090000`·`20260701100000`, 엣지 login v14·refresh v3·logout v1·change-password v3):
+- `users.token_version` + `app.uid()` tv 게이트, `app.refresh_tokens`, RPC(`rt_issue`/`rt_rotate` 원자회전+grace/`rt_revoke_family`/`rt_revoke_user`/`bump_token_version`/`change_password_svc`/`rate_limit_hit`) — 전부 service_role 전용.
+- **tv 게이트를 `change_password_svc` 에 내장**(status+token_version 검증) → 엣지 change-password 가 RPC 경로와 동일 보안(전역 무효화된 토큰 차단). 비번 정책은 `app._set_password` 코어로 단일화(레거시 `change_password` 도 이를 래핑 → 드리프트 제거).
+- **기본 레이트리밋**: login IP 20/분 + 계정 10/5분(크리덴셜 스터핑), refresh 토큰해시 20/분(grace 증폭 캡) + IP 120/분. 리미터 오류는 fail-open.
+- refresh 실패는 단일 코드 `invalid_refresh`(토큰 상태 구분 노출 방지), `verifyAccess` alg=="HS256" 확인, user_agent 300자 절단.
+
+**grace 창의 트레이드오프(수용)**: 정상 클라 회전 직후 30s 내에 공격자가 훔친 old 토큰을 쓰면 `reuse_revoked`가 아니라 `grace`로 유효 토큰을 받고 family 회수도 안 된다 → "빠른 공격자에게 유리한 30s 창". 모바일 응답 유실 오탐(랜덤 로그아웃) 방지를 우선한 의도된 타협. 완화책은 `refresh:tok` 레이트리밋(반복 남용 캡). grace를 줄이면 창은 작아지나 오탐↑.
+
+**배포 체크리스트(config.toml 부재 → 수동 관례 의존)**:
+- `login`/`refresh`/`logout`/`change-password` 는 반드시 **`--no-verify-jwt`** 로 배포(게이트웨이가 커스텀 토큰 없는 요청을 막지 않도록; 자체/수동 검증).
+- `app` 스키마 존재 전제(과거 out-of-band 생성). `refresh_tokens`/`rate_limits` 정리 `pg_cron` 은 규모 진입 시(§8).
+
+**후속(미구현)**: change-password 비원자성(2~4단계 단일 RPC화), 마이그레이션 기록 드리프트 정정(no-op), `pg_cron` 정리잡, phase 2 앱 연동.

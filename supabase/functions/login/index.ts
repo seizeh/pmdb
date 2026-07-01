@@ -11,7 +11,8 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import {
-  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientUa, randomToken, sha256Hex, signAccess,
+  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientIp, clientUa, randomToken,
+  rateLimited, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
 
 Deno.serve(async (req: Request) => {
@@ -38,6 +39,14 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+
+  // 기본 레이트리밋: IP 20/분 + 계정 10/5분(크리덴셜 스터핑 완화). 비번검증 전에 차단.
+  if (
+    await rateLimited(supabase, `login:ip:${clientIp(req)}`, 20, 60) ||
+    await rateLimited(supabase, `login:user:${username.toLowerCase()}`, 10, 300)
+  ) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   const { data, error } = await supabase.rpc("login_user", {
     p_username: username,

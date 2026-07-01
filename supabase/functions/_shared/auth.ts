@@ -47,6 +47,12 @@ export async function verifyAccess(
   const parts = token.split(".");
   if (parts.length !== 3) return null;
   const [h, p, s] = parts;
+  // alg 헤더 고정 확인(방어적 — alg-confusion/none 차단, 현재도 HMAC 고정이라 무해).
+  try {
+    if (JSON.parse(new TextDecoder().decode(b64urlToBytes(h))).alg !== "HS256") return null;
+  } catch {
+    return null;
+  }
   const key = await hmacKey(secret, ["verify"]);
   const ok = await crypto.subtle.verify(
     "HMAC", key, b64urlToBytes(s), new TextEncoder().encode(`${h}.${p}`));
@@ -71,6 +77,29 @@ export function bearer(req: Request): string | null {
 export function clientUa(req: Request): string | null {
   const ua = req.headers.get("user-agent");
   return ua ? ua.slice(0, 300) : null;
+}
+
+/// 레이트리밋 키용 클라이언트 IP(프록시 헤더). 없으면 'unknown'.
+export function clientIp(req: Request): string {
+  const xff = req.headers.get("x-forwarded-for");
+  if (xff) return xff.split(",")[0].trim();
+  return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+/// 레이트리밋 1회 소모. true=제한 초과(차단해야 함), false=허용.
+/// 리미터 자체 오류는 fail-open(가용성 우선 — 로그인/갱신을 막지 않음).
+// deno-lint-ignore no-explicit-any
+export async function rateLimited(
+  supabase: any, key: string, max: number, windowSeconds: number,
+): Promise<boolean> {
+  const { data, error } = await supabase.rpc("rate_limit_hit", {
+    p_key: key, p_max: max, p_window_seconds: windowSeconds,
+  });
+  if (error) {
+    console.error("rate_limit_hit failed", error);
+    return false;
+  }
+  return data === false;
 }
 
 /// refresh 토큰의 저장용 해시(원문은 저장 금지).
