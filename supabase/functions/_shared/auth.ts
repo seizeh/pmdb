@@ -1,0 +1,85 @@
+// 공용 인증 유틸 — 커스텀 HS256 JWT 서명/검증, sha256, 랜덤 refresh 토큰.
+// 서명키는 각 함수 시크릿 JWT_SECRET(Supabase JWT Secret). access 는 PostgREST 네이티브 검증.
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+
+function bytesToB64url(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function strToB64url(s: string): string {
+  return bytesToB64url(new TextEncoder().encode(s));
+}
+function b64urlToBytes(s: string): Uint8Array {
+  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
+  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function hmacKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey> {
+  return await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, usage);
+}
+
+/// access JWT 서명(HS256). role/aud=authenticated, iss=supabase, tv 클레임 포함.
+export async function signAccess(
+  sub: string, tv: number, ttlSec: number, secret: string,
+): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const header = strToB64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = strToB64url(JSON.stringify({
+    sub, role: "authenticated", aud: "authenticated", iss: "supabase",
+    iat: now, exp: now + ttlSec, tv,
+  }));
+  const data = `${header}.${payload}`;
+  const key = await hmacKey(secret, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return `${data}.${bytesToB64url(new Uint8Array(sig))}`;
+}
+
+/// access JWT 검증 → 클레임(만료/서명 확인). 실패 시 null.
+export async function verifyAccess(
+  token: string, secret: string,
+): Promise<Record<string, unknown> | null> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  const [h, p, s] = parts;
+  const key = await hmacKey(secret, ["verify"]);
+  const ok = await crypto.subtle.verify(
+    "HMAC", key, b64urlToBytes(s), new TextEncoder().encode(`${h}.${p}`));
+  if (!ok) return null;
+  try {
+    const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(p)));
+    if (typeof claims.exp === "number" && claims.exp < Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
+export function bearer(req: Request): string | null {
+  const m = (req.headers.get("Authorization") ?? "").match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
+}
+
+/// refresh 토큰의 저장용 해시(원문은 저장 금지).
+export async function sha256Hex(input: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/// 불투명 refresh 토큰 원문(256bit).
+export function randomToken(bytes = 32): string {
+  const b = new Uint8Array(bytes);
+  crypto.getRandomValues(b);
+  return bytesToB64url(b);
+}
+
+export const ACCESS_TTL_CAPABLE = 60 * 60 * 8; // 8h (refresh 지원 클라)
+export const ACCESS_TTL_LEGACY = 60 * 60 * 24 * 30; // 30d (레거시, 추후 축소)
+export const REFRESH_GRACE_SECONDS = 30;
