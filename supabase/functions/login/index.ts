@@ -1,60 +1,19 @@
 // ============================================================================
-// login — 아이디/비밀번호 로그인 → 커스텀 JWT 발급
-//   POST { username, password }
-//   login_user RPC(service_role) 로 비번 검증 → sub=user_id 인 HS256 JWT 서명.
-//   클라이언트는 이 토큰을 모든 요청의 Authorization 으로 붙여 RLS(app.uid()) 통과.
-//   JWT 서명키는 함수 시크릿 JWT_SECRET (Supabase JWT Secret) 에서 읽는다.
+// login — 아이디/비밀번호 로그인 → 커스텀 access JWT (+ capability 시 refresh) 발급
+//   POST { username, password }   [헤더 x-client-refresh: 1 → refresh 지원 클라]
+//   login_user RPC(service_role)로 비번 검증(이미 status='active'만).
+//   - 모든 토큰에 tv=users.token_version 클레임 stamp(레거시 분기 포함 — 필수).
+//   - x-client-refresh:1 → access 8h + refresh(불투명, 해시저장) 발급.
+//     미지원(레거시) → access 30일만(무중단). refresh 미지원 클라 하위호환.
 //   verify_jwt=false: 로그인 자체가 토큰 발급 단계.
-//   username 은 본인 화면 표시용으로만 응답에 포함(공개 프로필엔 노출하지 않음).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-
-const corsHeaders = {
-  "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
-
-// base64url 인코딩 (패딩 제거)
-function b64url(input: ArrayBuffer | string): string {
-  let bytes: Uint8Array;
-  if (typeof input === "string") {
-    bytes = new TextEncoder().encode(input);
-  } else {
-    bytes = new Uint8Array(input);
-  }
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-async function signJwt(
-  payload: Record<string, unknown>,
-  secret: string,
-): Promise<string> {
-  const header = { alg: "HS256", typ: "JWT" };
-  const encHeader = b64url(JSON.stringify(header));
-  const encPayload = b64url(JSON.stringify(payload));
-  const data = `${encHeader}.${encPayload}`;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
-  return `${data}.${b64url(sig)}`;
-}
+import { corsHeaders, json } from "../_shared/cors.ts";
+import {
+  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientIp, clientUa, randomToken,
+  rateLimited, sha256Hex, signAccess,
+} from "../_shared/auth.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -72,7 +31,6 @@ Deno.serve(async (req: Request) => {
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
-
   const username = (p.username ?? "").trim();
   const password = p.password ?? "";
   if (!username || !password) return json({ error: "missing_fields" }, 400);
@@ -81,6 +39,15 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+
+  // 기본 레이트리밋: 계정 10/5분(스푸핑 불가, 1차) + IP 20/분(보조, IP 식별 시만).
+  const ip = clientIp(req);
+  if (
+    await rateLimited(supabase, `login:user:${username.toLowerCase()}`, 10, 300) ||
+    (ip !== null && await rateLimited(supabase, `login:ip:${ip}`, 20, 60))
+  ) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   const { data, error } = await supabase.rpc("login_user", {
     p_username: username,
@@ -91,25 +58,45 @@ Deno.serve(async (req: Request) => {
     return json({ error: "internal_error" }, 500);
   }
   const rows = (data as Array<{ id: string; username: string; nickname: string; user_type: string }>) ?? [];
-  if (rows.length === 0) {
-    return json({ error: "invalid_credentials" }, 401);
-  }
+  if (rows.length === 0) return json({ error: "invalid_credentials" }, 401);
   const user = rows[0];
 
-  const nowSec = Math.floor(Date.now() / 1000);
-  const token = await signJwt({
-    sub: user.id,
-    role: "authenticated",
-    aud: "authenticated",
-    iss: "supabase",
-    iat: nowSec,
-    exp: nowSec + 60 * 60 * 24 * 30, // 30일 (UX 유지). 정지/차단·삭제는 app.uid 상태게이트로 즉시 차단됨.
-    // 잔여 위험: 활성 사용자의 토큰 유출 시 30일 유효 → 완전 차단은 단기 access+refresh 토큰 흐름(후속).
-  }, secret);
+  // 모든 토큰에 현재 token_version stamp(레거시 포함) — 미stamp 시 bump된 사용자 잠김.
+  // ⚠ 조회 실패 시 tv 를 0 으로 추측 stamp 하면 tv>0 사용자가 즉시 잠기므로, 실패는 500 으로.
+  const capable = req.headers.get("x-client-refresh") === "1";
+  let tv: number;
+  let refreshToken: string | undefined;
+  if (capable) {
+    // rt_issue 가 현재 token_version 을 반환 → 별도 조회 불필요(중복 제거).
+    refreshToken = randomToken();
+    const { data: tvData, error: rtErr } = await supabase.rpc("rt_issue", {
+      p_user: user.id,
+      p_token_hash: await sha256Hex(refreshToken),
+      p_user_agent: clientUa(req),
+    });
+    if (rtErr) {
+      console.error("rt_issue failed", rtErr);
+      return json({ error: "internal_error" }, 500);
+    }
+    tv = (tvData as number | null) ?? 0;
+  } else {
+    const { data: uRow, error: uErr } = await supabase
+      .from("users").select("token_version").eq("id", user.id).single();
+    if (uErr || !uRow) {
+      console.error("token_version fetch failed", uErr);
+      return json({ error: "internal_error" }, 500);
+    }
+    tv = (uRow.token_version as number | undefined) ?? 0;
+  }
+
+  const ttl = capable ? ACCESS_TTL_CAPABLE : ACCESS_TTL_LEGACY;
+  const token = await signAccess(user.id, tv, ttl, secret);
 
   return json({
     ok: true,
     token,
+    refresh_token: refreshToken, // 레거시면 undefined → 응답에서 생략
+    expires_in: ttl,
     user: { id: user.id, username: user.username, nickname: user.nickname, user_type: user.user_type },
   });
 });
