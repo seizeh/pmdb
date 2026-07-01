@@ -67,6 +67,12 @@ export function bearer(req: Request): string | null {
   return m ? m[1] : null;
 }
 
+/// refresh_tokens.user_agent 저장용 — 300자로 절단(저장 비대화/남용 방지). 없으면 null.
+export function clientUa(req: Request): string | null {
+  const ua = req.headers.get("user-agent");
+  return ua ? ua.slice(0, 300) : null;
+}
+
 /// refresh 토큰의 저장용 해시(원문은 저장 금지).
 export async function sha256Hex(input: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));

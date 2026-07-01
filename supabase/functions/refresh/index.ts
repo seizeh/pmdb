@@ -9,7 +9,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import {
-  ACCESS_TTL_CAPABLE, randomToken, REFRESH_GRACE_SECONDS, sha256Hex, signAccess,
+  ACCESS_TTL_CAPABLE, clientUa, randomToken, REFRESH_GRACE_SECONDS, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
 
 Deno.serve(async (req: Request) => {
@@ -37,7 +37,7 @@ Deno.serve(async (req: Request) => {
   const { data, error } = await supabase.rpc("rt_rotate", {
     p_old_hash: await sha256Hex(raw),
     p_new_hash: await sha256Hex(newRaw),
-    p_user_agent: req.headers.get("user-agent") ?? null,
+    p_user_agent: clientUa(req),
     p_grace_seconds: REFRESH_GRACE_SECONDS,
   });
   if (error) {

@@ -11,7 +11,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import {
-  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, randomToken, sha256Hex, signAccess,
+  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientUa, randomToken, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
 
 Deno.serve(async (req: Request) => {
@@ -52,23 +52,31 @@ Deno.serve(async (req: Request) => {
   const user = rows[0];
 
   // 모든 토큰에 현재 token_version stamp(레거시 포함) — 미stamp 시 bump된 사용자 잠김.
-  const { data: uRow } = await supabase
-    .from("users").select("token_version").eq("id", user.id).single();
-  const tv = (uRow?.token_version as number | undefined) ?? 0;
-
+  // ⚠ 조회 실패 시 tv 를 0 으로 추측 stamp 하면 tv>0 사용자가 즉시 잠기므로, 실패는 500 으로.
   const capable = req.headers.get("x-client-refresh") === "1";
+  let tv: number;
   let refreshToken: string | undefined;
   if (capable) {
+    // rt_issue 가 현재 token_version 을 반환 → 별도 조회 불필요(중복 제거).
     refreshToken = randomToken();
-    const { error: rtErr } = await supabase.rpc("rt_issue", {
+    const { data: tvData, error: rtErr } = await supabase.rpc("rt_issue", {
       p_user: user.id,
       p_token_hash: await sha256Hex(refreshToken),
-      p_user_agent: req.headers.get("user-agent") ?? null,
+      p_user_agent: clientUa(req),
     });
     if (rtErr) {
       console.error("rt_issue failed", rtErr);
       return json({ error: "internal_error" }, 500);
     }
+    tv = (tvData as number | null) ?? 0;
+  } else {
+    const { data: uRow, error: uErr } = await supabase
+      .from("users").select("token_version").eq("id", user.id).single();
+    if (uErr || !uRow) {
+      console.error("token_version fetch failed", uErr);
+      return json({ error: "internal_error" }, 500);
+    }
+    tv = (uRow.token_version as number | undefined) ?? 0;
   }
 
   const ttl = capable ? ACCESS_TTL_CAPABLE : ACCESS_TTL_LEGACY;
