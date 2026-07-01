@@ -35,10 +35,11 @@ Deno.serve(async (req: Request) => {
   );
 
   const oldHash = await sha256Hex(raw);
-  // 기본 레이트리밋: 토큰 해시 20/분(grace 증폭 캡) + IP 120/분(보조).
+  // 기본 레이트리밋: 토큰 해시 20/분(스푸핑 불가, grace 증폭 캡) + IP 120/분(보조, IP 식별 시만).
+  const ip = clientIp(req);
   if (
     await rateLimited(supabase, `refresh:tok:${oldHash}`, 20, 60) ||
-    await rateLimited(supabase, `refresh:ip:${clientIp(req)}`, 120, 60)
+    (ip !== null && await rateLimited(supabase, `refresh:ip:${ip}`, 120, 60))
   ) {
     return json({ error: "rate_limited" }, 429);
   }

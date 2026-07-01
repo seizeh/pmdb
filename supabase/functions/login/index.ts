@@ -40,10 +40,11 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
-  // 기본 레이트리밋: IP 20/분 + 계정 10/5분(크리덴셜 스터핑 완화). 비번검증 전에 차단.
+  // 기본 레이트리밋: 계정 10/5분(스푸핑 불가, 1차) + IP 20/분(보조, IP 식별 시만).
+  const ip = clientIp(req);
   if (
-    await rateLimited(supabase, `login:ip:${clientIp(req)}`, 20, 60) ||
-    await rateLimited(supabase, `login:user:${username.toLowerCase()}`, 10, 300)
+    await rateLimited(supabase, `login:user:${username.toLowerCase()}`, 10, 300) ||
+    (ip !== null && await rateLimited(supabase, `login:ip:${ip}`, 20, 60))
   ) {
     return json({ error: "rate_limited" }, 429);
   }

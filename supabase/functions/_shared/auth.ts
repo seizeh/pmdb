@@ -79,11 +79,15 @@ export function clientUa(req: Request): string | null {
   return ua ? ua.slice(0, 300) : null;
 }
 
-/// 레이트리밋 키용 클라이언트 IP(프록시 헤더). 없으면 'unknown'.
-export function clientIp(req: Request): string {
+/// 레이트리밋 키용 클라이언트 IP. 신뢰 프록시가 설정하는 헤더(cf-connecting-ip/x-real-ip)
+/// 우선 — x-forwarded-for leftmost 는 클라가 주입 가능(스푸핑 가능)이라 최후 폴백.
+/// 식별 불가 시 null → 호출부는 IP 버킷을 건너뛴다(전역 'unknown' 버킷 오작동 방지).
+/// ⚠ IP 제한은 보조 방어선일 뿐(스푸핑 가능). 1차 방어는 스푸핑 불가한 토큰해시·계정 버킷.
+export function clientIp(req: Request): string | null {
+  const trusted = req.headers.get("cf-connecting-ip") ?? req.headers.get("x-real-ip");
+  if (trusted) return trusted.trim();
   const xff = req.headers.get("x-forwarded-for");
-  if (xff) return xff.split(",")[0].trim();
-  return req.headers.get("x-real-ip") ?? "unknown";
+  return xff ? (xff.split(",")[0].trim() || null) : null;
 }
 
 /// 레이트리밋 1회 소모. true=제한 초과(차단해야 함), false=허용.

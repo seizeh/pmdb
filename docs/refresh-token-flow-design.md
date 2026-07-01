@@ -161,7 +161,7 @@ accessToken: () async {
 ## 8. 보류(규모) 항목 + 도입 신호
 | 항목 | 도입 신호 |
 |---|---|
-| `pg_cron` 정리잡(만료/회수 토큰 삭제) | **느슨한 상한: `refresh_tokens` 행 > 10만**(또는 테이블 수십 MB). grace 재발급·미로그아웃으로 행이 단조증가하므로 이 상한 돌파 전 도입 |
+| `pg_cron` 정리잡(만료/회수 토큰 + **`rate_limits`** 삭제) | **느슨한 상한: `refresh_tokens` 행 > 10만**(또는 테이블 수십 MB). grace 재발급·미로그아웃으로 행이 단조증가. `rate_limits` 는 rate_limit_hit 이 ~2% 확률로 기회적 정리하나(백스톱), 대량은 여기서 |
 | 사용자당 refresh cap·prune | **사용자당 활성 family > ~10**, 또는 위 정리잡과 함께 |
 | `logout_all` 제품 UI | "다른 기기 로그아웃" 기능 요구 |
 | 지터·세밀 레이트리밋 | refresh QPS 피크(≈10만 사용자) |
@@ -204,5 +204,9 @@ refresh 호출량 ≈ `활성 사용자 × (활동시간 ÷ access수명)`. toke
 **배포 체크리스트(config.toml 부재 → 수동 관례 의존)**:
 - `login`/`refresh`/`logout`/`change-password` 는 반드시 **`--no-verify-jwt`** 로 배포(게이트웨이가 커스텀 토큰 없는 요청을 막지 않도록; 자체/수동 검증).
 - `app` 스키마 존재 전제(과거 out-of-band 생성). `refresh_tokens`/`rate_limits` 정리 `pg_cron` 은 규모 진입 시(§8).
+
+**레이트리밋 후속 리뷰(A/B — phase1 블로커 아님)**:
+- (A) `app.rate_limits` 무한증가 → `rate_limit_hit` 이 ~2% 호출에서 만료행 기회적 삭제(백스톱). 대량 정리는 §8 `pg_cron`.
+- (B) **IP 제한은 보조·스푸핑 가능**: `x-forwarded-for` leftmost 는 클라 주입 가능. `clientIp` 은 신뢰 헤더(cf-connecting-ip/x-real-ip) 우선, 미상 시 null→IP 버킷 스킵(전역 'unknown' 버킷 방지). **1차 방어는 스푸핑 불가한 토큰해시·계정 버킷**. (C) 계정 버킷은 표적 락아웃 여지(10/5분, 수용된 절충).
 
 **후속(미구현)**: change-password 비원자성(2~4단계 단일 RPC화), 마이그레이션 기록 드리프트 정정(no-op), `pg_cron` 정리잡, phase 2 앱 연동.
