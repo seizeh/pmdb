@@ -69,13 +69,14 @@ Deno.serve(async (req: Request) => {
   if (capable) {
     // rt_issue 가 현재 token_version 을 반환 → 별도 조회 불필요(중복 제거).
     refreshToken = randomToken();
-    const { data: tvData, error: rtErr } = await supabase.rpc("rt_issue", {
+    // login_issue_refresh: 새 family 발급 + (다른 활성 세션이 있으면) 새기기 로그인 알림.
+    const { data: tvData, error: rtErr } = await supabase.rpc("login_issue_refresh", {
       p_user: user.id,
       p_token_hash: await sha256Hex(refreshToken),
       p_user_agent: clientUa(req),
     });
     if (rtErr) {
-      console.error("rt_issue failed", rtErr);
+      console.error("login_issue_refresh failed", rtErr);
       return json({ error: "internal_error" }, 500);
     }
     tv = (tvData as number | null) ?? 0;
