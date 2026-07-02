@@ -21,7 +21,7 @@
 
 ## 1. 개요
 
-- **테이블 수**: 34개 (`public` 스키마 BASE TABLE 기준. 이 중 `spatial_ref_sys`는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **33개**)
+- **테이블 수**: `public` 34개 (이 중 `spatial_ref_sys`는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **33개**) + `app` 스키마 내부 테이블 **3개**(refresh_tokens, rate_limits, push_config — §3.8)
 - **ENUM 타입**: 1개 (`facility_category`) — 대부분의 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리됨
 - **커스텀 시퀀스**: 없음 (모든 PK는 `gen_random_uuid()` 기본값의 UUID)
 - **모든 테이블 PK**: UUID (`review_category_counts`, `dong_centroids` 제외 — 각각 복합 PK / 자연키 PK)
@@ -948,6 +948,57 @@ AI 반려동물 사진 검증 기록. 실사/생성 이미지 판별 점수, 개
 ### public.spatial_ref_sys
 
 PostGIS 확장이 설치하는 좌표계(SRID) 참조 시스템 테이블. 애플리케이션 데이터가 아니므로 상세 생략 (PK: srid).
+
+## 3.8 `app` 스키마 테이블
+
+인증 인프라 전용 내부 테이블 3개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. RLS 없이 스키마 격리로 보호.
+
+### app.refresh_tokens
+
+refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문이 아닌 **해시(token_hash)** 만 저장.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | uuid | NO | `gen_random_uuid()` | PK |
+| user_id | uuid | NO | | FK → public.users.id (ON DELETE CASCADE) |
+| token_hash | text | NO | | 토큰 해시. UNIQUE |
+| family_id | uuid | NO | | 회전 체인(기기 세션) 식별자 — 재사용 감지 시 family 전체 회수 |
+| issued_at | timestamptz | NO | `now()` | |
+| expires_at | timestamptz | NO | | 슬라이딩 만료 (발급 +30일) |
+| absolute_expires_at | timestamptz | NO | | 절대 만료 (family 최초 발급 +90일) |
+| revoked_at | timestamptz | YES | | 회수 시각 (grace 30초 판정에 사용) |
+| replaced_by | uuid | YES | | 회전으로 대체한 토큰 id. FK → 자기참조 (ON DELETE SET NULL) |
+| user_agent | text | YES | | 발급 기기 식별 참고용 |
+
+- **인덱스**: `refresh_tokens_token_hash_key`(UNIQUE, token_hash), `refresh_tokens_family_idx`(family_id), `refresh_tokens_user_idx`(user_id)
+- 만료·오래 회수된 행은 pg_cron `auth-cleanup` 잡이 주기 삭제 (→ 아래 pg_cron 잡, §13 `20260701150000`)
+
+### app.rate_limits
+
+분 단위 버킷 레이트리밋 카운터 (`app.rate_limit_hit` 함수가 사용, login/refresh 등).
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| bucket | text | NO | | PK. 예: `login:<username>:<분>`, `login_ip:<ip>:<분>` |
+| count | integer | NO | `0` | 버킷 내 시도 횟수 |
+| expires_at | timestamptz | NO | | 버킷 만료 — `rate_limits_expires_idx` 인덱스, 기회적/크론 정리 대상 |
+
+### app.push_config
+
+푸시 발송 웹훅 설정 싱글턴 (트리거 `trg_notifications_push`·크론 `push-sweep`이 참조).
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | boolean | NO | `true` | PK + `CHECK (id)` — 항상 true 단일 행 강제(싱글턴) |
+| function_url | text | NO | | `send-push` Edge Function URL |
+| trigger_secret | text | NO | `encode(gen_random_bytes(24),'hex')` | `x-push-secret` 헤더 값 (send-push 의 `PUSH_TRIGGER_SECRET` 과 일치해야 함) |
+
+### pg_cron 스케줄 잡
+
+| 잡 이름 | 스케줄 | 동작 |
+|---|---|---|
+| `auth-cleanup` | `17 * * * *` (매시 17분) | `app.cleanup_auth()` — 만료/오래 회수된 refresh_tokens + 만료 rate_limits 삭제 |
+| `push-sweep` | `* * * * *` (매분) | `app.push_config`의 URL 로 `net.http_post` — pending 알림 재시도/누락 보완 스윕 (§8 트리거의 즉시 발사와 이중화) |
 
 ---
 

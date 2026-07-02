@@ -18,7 +18,7 @@ supabase/
 
 ## 문서
 
-- [docs/supabase-db.md](docs/supabase-db.md) — **DB 전체 레퍼런스** (2026-07-02 라이브 DB 기준): ENUM/테이블 33개/제약/인덱스, 뷰 6개, RPC 54개(+app 스키마 53개), 트리거 52개, RLS 정책 76개, 컬럼 권한, Storage, Realtime, 마이그레이션 이력 77건
+- [docs/supabase-db.md](docs/supabase-db.md) — **DB 전체 레퍼런스** (2026-07-02 라이브 DB 기준): ENUM/테이블 36개(public 33 + app 3)/제약/인덱스/pg_cron 잡, 뷰 6개, RPC 54개(+app 스키마 53개), 트리거 52개, RLS 정책 76개, 컬럼 권한, Storage, Realtime, 마이그레이션 이력 77건
 - [docs/supabase-api.md](docs/supabase-api.md) — **API(Edge Functions) 레퍼런스**: 함수 15개 전체의 요청/응답/내부 로직/시크릿/레이트리밋, 커스텀 JWT + refresh 토큰 수명주기, 배포 현황
 - [docs/refresh-token-flow-design.md](docs/refresh-token-flow-design.md) — refresh 토큰 설계 문서
 
