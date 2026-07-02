@@ -249,7 +249,7 @@
   - 200 실패 `{ pass: false, reason: "not_verified" | "mock_location" | "geocode_failed" | "region_mismatch"(+expected/got) | "pet_not_enrolled" | "ai_unavailable" | "not_real_pet"(+ai) | "identity_mismatch"(+ai) }`
   - 400 `invalid_json` / `missing_image` / `missing_pet` / `invalid_coords`
   - 401 `unauthorized`, 403 `forbidden`(보호자 아님), 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ⓪ `pet_guardians`에서 uid가 petId의 보호자인지 확인 ① `users`의 활동지역 인증 상태 확인 — `is_location_verified`, `last_verified_at`(60일 경과 시 만료 취급), `region_code` ② 모의위치 거절(+`record_photo_verification` 실패 기록) ③ 촬영 좌표를 네이버 역지오코딩 → 행정동 코드가 `users.region_code`와 일치해야 함 ④ `pet_identity_frames`에서 기준 프레임 목록 조회 + Storage `media` 버킷에서 다운로드(없으면 `pet_not_enrolled`) ⑤ **Gemini 2.5 Pro**(구조화 JSON 출력, temperature 0, 429 시 최대 2회 backoff 재시도)로 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 `identity_score` + 라이브니스(`is_real`, dog/cat_real/fake) 판정 ⑥ `is_real && real>fake`(라이브니스) AND `identity_score >= 0.63`(동일 개체) 통과 시 → 사진을 `media/<uid>/posts/<ts>.jpg`로 업로드 → `record_photo_verification` RPC(p_result='pass', p_ttl_min=15, p_pet_id, p_match_score, p_matched=true 등)가 **검증 토큰** 반환(게시글 작성 시 제출). 실패 경로도 각각 RPC로 기록.
+- **내부 로직**: ⓪ `pet_guardians`에서 uid가 petId의 보호자인지 확인 ① `users`의 활동지역 인증 상태 확인 — `is_location_verified`, `last_verified_at`(60일 경과 시 만료 취급), `region_code` ② 모의위치 거절(+`record_photo_verification` 실패 기록) ③ 촬영 좌표를 네이버 역지오코딩 → 행정동 코드가 `users.region_code`와 일치해야 함 ④ `pet_identity_frames`에서 기준 프레임 목록 조회 + Storage `media` 버킷에서 다운로드(없으면 `pet_not_enrolled`) ⑤ **Gemini 2.5 Pro**(구조화 JSON 출력, temperature 0, 429 시 최대 2회 backoff 재시도)로 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 `identity_score` + 라이브니스(`is_real`, dog/cat_real/fake) 판정 ⑥ `is_real && real>fake`(라이브니스) AND `identity_score >= 0.63`(동일 개체) 통과 시 → 사진을 `media/<uid>/posts/<ts>.jpg`로 업로드 → `record_photo_verification` RPC(p_result='pass', p_ttl_min=15, p_pet_id, p_match_score, p_matched=true 등)가 **검증 토큰** 반환(게시글 작성 시 제출). 실패 경로 중 `mock_location`/`geocode_failed`/`region_mismatch`/`not_real_pet`/`identity_mismatch`는 RPC로 실패 기록을 남기지만, `not_verified`/`pet_not_enrolled`/`ai_unavailable`은 기록 없이 반환한다.
 - **시크릿**: `JWT_SECRET`, `NAVER_MAP_KEY_ID`, `NAVER_MAP_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
 - **정책**: 지역 재인증 주기 60일(`REVERIFY_DAYS`), 검증 토큰 TTL 15분, 라이브니스 하한 0.70(상수 `AI_REAL_THRESHOLD` — 실제 판정은 `is_real && real>fake` 사용), 동일 개체 통과선 0.63.
 
@@ -257,7 +257,7 @@
 
 - **엔드포인트**: `POST /functions/v1/enroll-pet-identity` — verify_jwt=false(수동 검증)
 - **인증**: **커스텀 JWT Bearer**.
-- **요청 바디**: `{ petId: string(필수), challenge: string[](필수, 1개 이상 — pat_head|hold_paw|scratch_chin|stroke_back|hand_in_frame), videoBase64: string(필수), videoMime?: string(기본 'video/mp4'), frames: string[](필수, base64 3장 이상), mimeType?: string(기본 'image/jpeg') }`
+- **요청 바디**: `{ petId: string(필수), challenge: string[](필수, 1개 이상. 알려진 코드: pat_head|hold_paw|scratch_chin|stroke_back|hand_in_frame — 단 서버는 목록을 강제하지 않으며 미지 코드는 문자열 그대로 Gemini 프롬프트에 들어감), videoBase64: string(필수), videoMime?: string(기본 'video/mp4'), frames: string[](필수, base64 3장 이상), mimeType?: string(기본 'image/jpeg') }`
 - **응답**:
   - 200 성공 `{ enrolled: true, species, breed, colors, frameCount, frames: [url...], infoMatch: { species_kind, breed, color, warnings }, warnings, challengePassed: true }`
   - 400 `{ enrolled: false, reason: "missing_pet" | "no_video" | "too_few_frames" | "no_challenge" }` / `invalid_json`
@@ -310,7 +310,7 @@
 - **요청 바디**: `{ notification_id?: string }` — 없거나 JSON 파싱 실패 시 배치 모드(최대 100건).
 - **응답**:
   - 200 `{ ok: true, processed: n }` / `{ ok: true, sent: 0 }`(대상 없음) / `{ ok: true, skipped: "fcm_not_configured" }`(FCM 미설정 — pending 유지)
-  - 401 `unauthorized`, 405, 500 `bad_service_account` / `dispatch_failed`, 502 `oauth_failed`, 503 `not_configured`
+  - 401 `unauthorized`, 405, 500 `bad_service_account` / `dispatch_failed`, 502 `oauth_failed` (이때 이미 claim한 알림들은 `push_report`로 전부 `ok:false, error:"oauth_failed"` 실패 보고됨 — pending으로 남지 않음), 503 `not_configured`
 - **내부 로직**: ① `push_dispatch_batch(p_only_id, p_limit=100)` RPC로 pending 알림+대상 디바이스 토큰 클레임 ② `FCM_SERVICE_ACCOUNT`(Google 서비스계정 JSON)의 private_key로 RS256 JWT 서명 → Google OAuth2 토큰 교환(`firebase.messaging` scope, 함수 인스턴스 내 캐시) ③ 각 알림×토큰마다 **FCM HTTP v1** `projects/<id>/messages:send` 호출 — `notification`(제목/본문; 앱 종료 상태에서도 OS 표시) + `data`(type/notification_id/resource_type/resource_id — 탭 라우팅), android priority high / apns-priority 10 ④ `UNREGISTERED`/`INVALID_ARGUMENT`/404 응답 토큰은 dead 처리 ⑤ `push_report(p_results)` RPC로 sent/failed 반영 + 죽은 토큰 비활성화.
 - **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS 헤더에 `x-push-secret` 추가 허용(자체 정의).
 - **정책**: 배치 100건 제한. OAuth 토큰 캐시(만료 60초 전 갱신). FCM 미설정 시 pending 유지 후 skip.
@@ -356,7 +356,7 @@
 
 주요 드리프트/특이사항:
 
-1. **verify_jwt 드리프트 → 해결됨 (2026-07-02, `supabase/config.toml` 추가)**: 과거에는 config.toml이 없어 재배포 시 `--no-verify-jwt` 수동 관례에 의존했고, 실제로 send-phone-code / verify-phone-code / signup 3개가 원격에서 verify_jwt=**true**로 리셋되는 드리프트가 있었다(소스 주석/README 의도는 false). 현재는 `supabase/config.toml`이 함수별 verify_jwt를 명시해 `supabase functions deploy`가 결정론적으로 적용한다 — 값은 운영 원격 상태와 동일하게 고정(동작 변화 없음). 최종 정책: 전화인증/가입 3개는 **의도적으로 true**(publishable 키 요구를 얇은 남용 게이트로 유지 — 게이트웨이가 유효 JWT[legacy anon key 포함]를 Bearer로 요구; JWT 형식이 아닌 새 `sb_publishable_...` 키만 쓰는 클라이언트로 전환하려면 false + 내부 레이트리밋 의존으로 변경 필요), 나머지 12개는 false(커스텀 JWT 수동 검증; 특히 send-push는 pg_net이 apikey 없이 `x-push-secret`만으로 호출하므로 반드시 false).
+1. **verify_jwt 드리프트 → 해결됨 (2026-07-02, `supabase/config.toml` 추가)**: 과거에는 config.toml이 없어 재배포 시 `--no-verify-jwt` 수동 관례에 의존했고, 실제로 send-phone-code / verify-phone-code / signup 3개가 원격에서 verify_jwt=**true**로 리셋되는 드리프트가 있었다(소스 주석/README 의도는 false). 현재는 `supabase/config.toml`이 함수별 verify_jwt를 명시해 `supabase functions deploy`가 결정론적으로 적용한다 — 값은 운영 원격 상태와 동일하게 고정(동작 변화 없음). 최종 정책: 전화인증/가입 3개는 **의도적으로 true**(publishable 키 요구를 얇은 남용 게이트로 유지 — 게이트웨이가 유효 JWT[legacy anon key 포함]를 Bearer로 요구; JWT 형식이 아닌 새 `sb_publishable_...` 키만 쓰는 클라이언트로 전환하려면 false + 내부 레이트리밋 의존으로 변경 필요), 나머지 12개는 false(커스텀 JWT 수동 검증; 특히 send-push는 pg_net이 apikey 없이 `x-push-secret`만으로 호출하므로 반드시 false). 잔여 정리 대상: 세 함수의 소스 헤더 주석은 아직 "verify_jwt=false"라고 적혀 있어 config.toml/배포 상태(true)와 어긋난다 — 주석 갱신 필요.
 2. **배포 루트 불일치(entrypoint 경로)**: login/refresh/logout/change-password/reset-password/send-push/search-petcafe는 `source/functions/<slug>/index.ts`, 나머지는 `source/supabase/functions/<slug>/index.ts`로 기록돼 있다 — 배포 시 실행 위치(리포 루트 vs `supabase/` 디렉터리)가 달랐던 흔적. 동작에는 영향 없음.
 3. **README 문서 지연**: `/Users/seize_h/StudioProjects/pmdb/README.md`의 Edge Functions 표는 초기 4개(send-phone-code, verify-phone-code, signup, login)만 기재 — 이후 추가된 11개 함수와 시크릿(NAVER_*, GEMINI_API_KEY, PUSH_TRIGGER_SECRET, FCM_SERVICE_ACCOUNT 등)이 누락돼 있다.
 4. **JWT 검증 로직 중복**: `_shared/auth.ts`의 `verifyAccess`(alg 고정 확인 포함)와 별개로 6개 함수(verify-location, verify-post-photo, enroll-pet-identity, search-petcafe, resolve-region, sync-dong-centroids)가 자체 `getUidFromJwt`(alg 확인 없음)를 복제해 유지한다 — 통합 여지.
