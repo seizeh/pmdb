@@ -1,0 +1,59 @@
+# Supabase CLI 설정 — 함수별 verify_jwt 를 명시해 재배포 시 플래그 드리프트를 막는다.
+#
+# 배경(§6): config.toml 이 없으면 `supabase functions deploy` 가 기본값 verify_jwt=true 로
+# 리셋한다. 이 프로젝트는 커스텀 JWT 인증이라 게이트웨이의 JWT 검증은 무의미하고(앱 함수가
+# 내부에서 app.uid()/HMAC 로 자체 검증), 특히 send-push 는 pg_net(크론/트리거)이 apikey 없이
+# 호출하므로 verify_jwt=true 가 되면 게이트웨이에서 막혀 푸시가 깨진다. → 모두 명시로 고정.
+#
+# 값은 현재 운영 원격 상태와 동일(동작 변화 없음). 향후 `supabase functions deploy` 는 이 파일을
+# 읽어 각 함수 플래그를 결정론적으로 적용한다.
+project_id = "vyatppuxmpulqtxevfpk"
+
+# --- 커스텀 인증/서버 호출 함수: 게이트웨이 검증 없이 내부에서 인증 처리 → false ---
+[functions.login]
+verify_jwt = false
+
+[functions.refresh]
+verify_jwt = false
+
+[functions.logout]
+verify_jwt = false
+
+[functions.change-password]
+verify_jwt = false
+
+[functions.reset-password]
+verify_jwt = false
+
+# send-push: pg_net(크론/트리거)이 apikey 없이 x-push-secret 만으로 호출 → 반드시 false.
+[functions.send-push]
+verify_jwt = false
+
+[functions.verify-location]
+verify_jwt = false
+
+[functions.verify-post-photo]
+verify_jwt = false
+
+[functions.enroll-pet-identity]
+verify_jwt = false
+
+[functions.search-petcafe]
+verify_jwt = false
+
+[functions.sync-dong-centroids]
+verify_jwt = false
+
+[functions.resolve-region]
+verify_jwt = false
+
+# --- 전화 인증/가입(로그인 전): publishable 키 요구를 얇은 남용 게이트로 유지 → true ---
+# (SMS 발송 등. 완전 공개로 바꾸려면 false + 내부 레이트리밋 의존.)
+[functions.send-phone-code]
+verify_jwt = true
+
+[functions.verify-phone-code]
+verify_jwt = true
+
+[functions.signup]
+verify_jwt = true
