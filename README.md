@@ -10,10 +10,19 @@ PawMate 앱(`pmdart`)의 **Supabase 백엔드**(DB 마이그레이션 + Edge Fun
 
 ```
 supabase/
+  config.toml   # 함수별 verify_jwt 고정 (배포 드리프트 방지)
   migrations/   # DB 스키마/뷰/함수 변경 (적용 순서 = 파일명 타임스탬프)
   functions/    # Edge Functions (Deno)
-    _shared/    # 공용 모듈 (CORS, Solapi SMS)
+    _shared/    # 공용 모듈 (CORS, Solapi SMS, JWT/refresh)
 ```
+
+## 문서
+
+- [docs/supabase-db.md](docs/supabase-db.md) — **DB 전체 레퍼런스** (2026-07-02 라이브 DB 기준): ENUM/테이블 33개/제약/인덱스, 뷰 6개, RPC 54개(+app 스키마 53개), 트리거 52개, RLS 정책 76개, 컬럼 권한, Storage, Realtime, 마이그레이션 이력 77건
+- [docs/supabase-api.md](docs/supabase-api.md) — **API(Edge Functions) 레퍼런스**: 함수 15개 전체의 요청/응답/내부 로직/시크릿/레이트리밋, 커스텀 JWT + refresh 토큰 수명주기, 배포 현황
+- [docs/refresh-token-flow-design.md](docs/refresh-token-flow-design.md) — refresh 토큰 설계 문서
+
+> 아래의 마이그레이션/함수 표는 초기(2026-06-08~10) 분량만 담고 있다. 전체 최신 목록은 위 문서를 볼 것.
 
 ## 마이그레이션 (이 저장소에서 관리 시작한 분량)
 
