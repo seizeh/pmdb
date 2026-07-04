@@ -1,15 +1,15 @@
 // ============================================================================
-// enroll-pet-identity — 펫 신원 인증(무작위 임무 영상 → AI 검증 → 기준 프레임 저장) (0020)
-//   POST { petId, challenge[], videoBase64, videoMime?, frames[], mimeType? }
+// enroll-pet-identity — 펫 신원 인증(영상 → AI 검증 → 기준 프레임 저장) (0020, 미션 제거)
+//   POST { petId, videoBase64, videoMime?, frames[], mimeType? }
 //        Authorization: Bearer <login JWT>
 //
 //   ① 보호자 확인  ② pets 에서 등록 종/품종 읽기(클라 입력 불신)
-//   ③ Gemini(영상): 실제 살아있는 개/고양이 + 영상 내내 동일 개체 + 지시 임무 수행
-//      + (참고) 추정 품종/털색
+//   ③ Gemini(영상): 실제 살아있는 개/고양이 + 영상 내내 동일 개체 (+ 참고 품종/털색)
 //   ④ 등록정보 교차검증(종/품종=소프트 경고, 색=기록)
 //   ⑤ 통과: 프레임 N장만 media 업로드 + enroll_pet_identity RPC.  ★ 영상은 저장하지 않음
 //
 //   --no-verify-jwt 배포. 영상은 Gemini 인라인 전송 후 메모리에서 소멸(Storage/DB 미기록).
+//   ※ 동작 미션(challenge)은 AI 판별 오탐이 커서 제거. 스푸핑 차단은 실물·라이브 판별로 유지.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -103,14 +103,6 @@ async function getUidFromJwt(req: Request, secret: string): Promise<string | nul
 
 const clamp01 = (n: unknown) => Math.min(1, Math.max(0, Number(n) || 0));
 
-const CHALLENGE_DESC: Record<string, string> = {
-  pat_head: "사람 손이 반려동물의 머리를 쓰다듬는다",
-  hold_paw: "사람 손이 반려동물의 앞발을 잡는다",
-  scratch_chin: "사람 손이 반려동물의 턱·목을 만진다",
-  stroke_back: "사람 손이 반려동물의 등을 쓰다듬는다",
-  hand_in_frame: "사람 손과 반려동물이 같은 화면에 함께 있다",
-};
-
 const ENROLL_SCHEMA = {
   type: "object",
   properties: {
@@ -120,31 +112,22 @@ const ENROLL_SCHEMA = {
     dog_fake: { type: "number" },
     cat_fake: { type: "number" },
     consistent: { type: "boolean" },
-    challenges_done: { type: "array", items: { type: "string" } },
     detected_breed: { type: "string" },
     coat_colors: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
   },
   required: [
     "species", "dog_real", "cat_real", "dog_fake", "cat_fake",
-    "consistent", "challenges_done", "detected_breed", "coat_colors", "reason",
+    "consistent", "detected_breed", "coat_colors", "reason",
   ],
 };
 
-async function verifyEnrollmentVideo(
-  videoBase64: string,
-  videoMime: string,
-  challenge: string[],
-) {
-  const tasks = challenge
-    .map((c) => `${c}=${CHALLENGE_DESC[c] ?? c}`)
-    .join("; ");
+async function verifyEnrollmentVideo(videoBase64: string, videoMime: string) {
   const prompt =
     `이 영상은 반려동물 등록 인증용이다. 판단하라:
 (1) 실제 살아있는 개/고양이인가(화면 재촬영·인쇄물·일러스트·인형·AI 생성은 fake) — dog_real/cat_real/dog_fake/cat_fake(0~1).
-(2) 영상 내내 같은 개체인가 → consistent.
-(3) 다음 지시 동작이 영상에서 실제로 수행됐는가 — 수행된 코드만 challenges_done 에 담아라: ${tasks}
-(4) (참고) 추정 품종 detected_breed(한국어, 확실치 않으면 "믹스") 와 주요 털색 coat_colors(예: ["white","tan"]).
+(2) 영상 내내 같은 한 마리(동일 개체)인가 → consistent.
+(3) (참고) 추정 품종 detected_breed(한국어, 확실치 않으면 "믹스") 와 주요 털색 coat_colors(예: ["white","tan"]).
 reason 한국어 80자 이내.`;
   const body = await geminiGenerate([
     { text: prompt },
@@ -159,9 +142,6 @@ reason 한국어 80자 이내.`;
     dog_fake: clamp01(v.dog_fake),
     cat_fake: clamp01(v.cat_fake),
     consistent: v.consistent === true,
-    challenges_done: Array.isArray(v.challenges_done)
-      ? v.challenges_done.map((s: unknown) => String(s))
-      : [],
     detected_breed: String(v.detected_breed ?? "").slice(0, 50),
     coat_colors: Array.isArray(v.coat_colors)
       ? v.coat_colors.map((s: unknown) => String(s)).slice(0, 6)
@@ -190,7 +170,6 @@ Deno.serve(async (req: Request) => {
 
   let p: {
     petId?: string;
-    challenge?: string[];
     videoBase64?: string;
     videoMime?: string;
     frames?: string[];
@@ -202,17 +181,14 @@ Deno.serve(async (req: Request) => {
     return json({ error: "invalid_json" }, 400);
   }
   const petId = typeof p.petId === "string" ? p.petId : "";
-  const challenge = Array.isArray(p.challenge) ? p.challenge.map(String) : [];
   const videoBase64 = typeof p.videoBase64 === "string" ? p.videoBase64 : "";
   const videoMime = p.videoMime ?? "video/mp4";
   const frames = Array.isArray(p.frames) ? p.frames : [];
   const mimeType = p.mimeType ?? "image/jpeg";
-  const videoKb = Math.round((videoBase64.length * 3 / 4) / 1024); // 진단용 영상 크기
 
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
   if (frames.length < 3) return json({ enrolled: false, reason: "too_few_frames" }, 400);
-  if (challenge.length < 1) return json({ enrolled: false, reason: "no_challenge" }, 400);
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
@@ -234,18 +210,13 @@ Deno.serve(async (req: Request) => {
   const regType = (pet?.species_kind ?? "").toLowerCase(); // 'dog'|'cat'
   const regBreed = (pet?.species ?? "").trim();
 
-  // 2) Gemini 영상 판별
+  // 2) Gemini 영상 판별 (실물·라이브 + 동일 개체)
   let ai: Awaited<ReturnType<typeof verifyEnrollmentVideo>>;
   try {
-    ai = await verifyEnrollmentVideo(videoBase64, videoMime, challenge);
+    ai = await verifyEnrollmentVideo(videoBase64, videoMime);
   } catch (e) {
     console.error("gemini enroll failed", e);
-    return json({
-      enrolled: false,
-      reason: "ai_unavailable",
-      detail: String(e).slice(0, 400), // 진단용(임시)
-      videoKb,
-    });
+    return json({ enrolled: false, reason: "ai_unavailable" });
   }
   const real = Math.max(ai.dog_real, ai.cat_real);
   const fake = Math.max(ai.dog_fake, ai.cat_fake);
@@ -254,10 +225,6 @@ Deno.serve(async (req: Request) => {
   }
   if (!ai.consistent) {
     return json({ enrolled: false, reason: "not_consistent_pet", ai });
-  }
-  const missing = challenge.filter((c) => !ai.challenges_done.includes(c));
-  if (missing.length > 0) {
-    return json({ enrolled: false, reason: "challenge_failed", missing, ai });
   }
 
   const species = ai.dog_real >= ai.cat_real ? "dog" : "cat";
@@ -276,7 +243,7 @@ Deno.serve(async (req: Request) => {
   const paths: string[] = [];
   for (let i = 0; i < frames.length; i++) {
     const path = `${uid}/pet_identity/${petId}/${i}.jpg`;
-    const { error: upErr } = await admin.storage.from("media").uploadBinary(
+    const { error: upErr } = await admin.storage.from("media").upload(
       path,
       b64ToBytes(frames[i]),
       { contentType: mimeType, upsert: true },
@@ -312,6 +279,5 @@ Deno.serve(async (req: Request) => {
     frames: urls,
     infoMatch,
     warnings,
-    challengePassed: true,
   });
 });
