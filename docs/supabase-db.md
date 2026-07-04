@@ -763,13 +763,13 @@
 
 ### public.facility_cache
 
-외부 지도 API(카카오 등) 장소 검색 결과 캐시 (TTL: expires_at). FK 없음.
+외부 지도 API 장소 검색 결과 캐시 (TTL: expires_at). FK 없음. 지도 연동은 **네이버지도 API로 통일** — NCP Maps 지오코딩 + 네이버 지역검색(supabase-api.md `search-petcafe` 참조). `kakao_*` 컬럼명/기본값은 초기 설계의 레거시 명칭.
 
 | 컬럼 | 타입 | Null | 기본값 | 설명 |
 |---|---|---|---|---|
 | id | uuid | NO | gen_random_uuid() | PK |
-| kakao_place_id | varchar | NO | | 외부 장소 ID |
-| source_provider | varchar | NO | 'kakao' | 제공자 (kakao/naver/google) |
+| kakao_place_id | varchar | NO | | 외부 장소 ID (네이버 place id — 컬럼명은 레거시) |
+| source_provider | varchar | NO | 'kakao' | 제공자 — 현재 `'naver'`로 통일 (기본값 'kakao'는 레거시) |
 | name | varchar | NO | | 장소명 |
 | category | varchar | NO | | 카테고리 |
 | address | text | YES | | 주소 |
