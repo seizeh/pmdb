@@ -359,7 +359,7 @@ Deno.serve(async (req: Request) => {
 
   // 6) 통과: 사진 업로드 + 토큰 발급
   const path = `${uid}/posts/${Date.now()}.jpg`;
-  const { error: upErr } = await admin.storage.from("media").uploadBinary(
+  const { error: upErr } = await admin.storage.from("media").upload(
     path,
     b64ToBytes(imageBase64),
     { contentType: mimeType, upsert: false },
