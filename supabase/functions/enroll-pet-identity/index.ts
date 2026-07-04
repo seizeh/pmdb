@@ -185,7 +185,6 @@ Deno.serve(async (req: Request) => {
   const videoMime = p.videoMime ?? "video/mp4";
   const frames = Array.isArray(p.frames) ? p.frames : [];
   const mimeType = p.mimeType ?? "image/jpeg";
-  const videoKb = Math.round((videoBase64.length * 3 / 4) / 1024); // 진단용 영상 크기
 
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
@@ -217,12 +216,7 @@ Deno.serve(async (req: Request) => {
     ai = await verifyEnrollmentVideo(videoBase64, videoMime);
   } catch (e) {
     console.error("gemini enroll failed", e);
-    return json({
-      enrolled: false,
-      reason: "ai_unavailable",
-      detail: String(e).slice(0, 400), // 진단용(임시)
-      videoKb,
-    });
+    return json({ enrolled: false, reason: "ai_unavailable" });
   }
   const real = Math.max(ai.dog_real, ai.cat_real);
   const fake = Math.max(ai.dog_fake, ai.cat_fake);
@@ -249,33 +243,14 @@ Deno.serve(async (req: Request) => {
   const paths: string[] = [];
   for (let i = 0; i < frames.length; i++) {
     const path = `${uid}/pet_identity/${petId}/${i}.jpg`;
-    try {
-      const { error: upErr } = await admin.storage.from("media").upload(
-        path,
-        b64ToBytes(frames[i]),
-        { contentType: mimeType, upsert: true },
-      );
-      if (upErr) {
-        console.error("frame upload failed", upErr);
-        // 진단용(임시): 업로드 실패의 실제 사유를 응답에 노출.
-        return json({
-          error: "internal_error",
-          stage: "frame_upload",
-          detail: String((upErr as { message?: string }).message ?? upErr).slice(0, 400),
-          frameIndex: i,
-          frameCount: frames.length,
-          contentType: mimeType,
-        }, 500);
-      }
-    } catch (e) {
-      console.error("frame upload threw", e);
-      return json({
-        error: "internal_error",
-        stage: "frame_upload_throw",
-        detail: String(e).slice(0, 400),
-        frameIndex: i,
-        frameCount: frames.length,
-      }, 500);
+    const { error: upErr } = await admin.storage.from("media").upload(
+      path,
+      b64ToBytes(frames[i]),
+      { contentType: mimeType, upsert: true },
+    );
+    if (upErr) {
+      console.error("frame upload failed", upErr);
+      return json({ error: "internal_error" }, 500);
     }
     paths.push(path);
     urls.push(admin.storage.from("media").getPublicUrl(path).data.publicUrl);
@@ -292,13 +267,7 @@ Deno.serve(async (req: Request) => {
   });
   if (rpcErr) {
     console.error("enroll_pet_identity rpc failed", rpcErr);
-    // 진단용(임시): RPC 실패의 실제 사유를 응답에 노출.
-    return json({
-      error: "internal_error",
-      stage: "enroll_rpc",
-      detail: String((rpcErr as { message?: string }).message ?? rpcErr).slice(0, 400),
-      frameCount: urls.length,
-    }, 500);
+    return json({ error: "internal_error" }, 500);
   }
 
   return json({
