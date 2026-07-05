@@ -5,7 +5,7 @@
 //
 //   ① 보호자 확인  ② pets 에서 등록 종/품종 읽기(클라 입력 불신)
 //   ③ Gemini(영상): 실제 살아있는 개/고양이 + 영상 내내 동일 개체 (+ 참고 품종/털색)
-//   ④ 등록정보 교차검증(종/품종=소프트 경고, 색=기록)
+//   ④ 등록정보 교차검증(종=하드 게이트(개↔고양이 불일치 거절), 품종=소프트 경고, 색=기록)
 //   ⑤ 통과: 프레임 N장만 media 업로드 + enroll_pet_identity RPC.  ★ 영상은 저장하지 않음
 //
 //   --no-verify-jwt 배포. 영상은 Gemini 인라인 전송 후 메모리에서 소멸(Storage/DB 미기록).
@@ -229,7 +229,13 @@ Deno.serve(async (req: Request) => {
 
   const species = ai.dog_real >= ai.cat_real ? "dog" : "cat";
 
-  // 2-1) 등록정보 교차검증(소프트 — 통과 여부에 영향 없음)
+  // 2-0) 종(개↔고양이) 하드 게이트 — 등록 종과 다르면 거절.
+  //   품종은 AI 오탐이 잦아 소프트로 두지만, 개↔고양이 불일치는 명백한 오등록/부정이므로 차단.
+  if (regType && regType !== species) {
+    return json({ enrolled: false, reason: "species_mismatch", ai });
+  }
+
+  // 2-1) 등록정보 교차검증(품종=소프트 경고, 색=기록. 종은 위 게이트로 이미 일치)
   const typeOk = !regType || regType === species;
   const breedOk = !regBreed || looseBreedMatch(regBreed, ai.detected_breed);
   const warnings: string[] = [];
