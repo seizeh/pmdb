@@ -1,8 +1,9 @@
 // ============================================================================
 // refresh — refresh 토큰 회전 → 새 access + refresh 쌍 발급
 //   POST { refresh_token }
-//   rt_rotate RPC(service_role)로 원자적 회전 + grace 유예(30s) 처리.
-//     rotated|grace → 새 쌍 발급 / invalid|expired|inactive|reuse_revoked → 401.
+//   rt_rotate RPC(service_role)로 원자적 회전 + grace 유예(30s) + 유실 복구 처리.
+//     rotated|grace|recovered → 새 쌍 발급 / invalid|expired|inactive|reuse_revoked → 401.
+//     recovered = 회전 응답 유실 후 구 토큰 재시도(후속 미사용 확인) — 세션 복구.
 //   verify_jwt=false: 만료된 access 를 갱신하는 단계이므로 access 검증 안 함.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -56,7 +57,10 @@ Deno.serve(async (req: Request) => {
     return json({ error: "internal_error" }, 500);
   }
   const row = (data as Array<{ result: string; user_id: string | null; token_version: number | null }>)?.[0];
-  if (!row || (row.result !== "rotated" && row.result !== "grace")) {
+  if (row?.result === "recovered") {
+    console.warn("refresh recovered lost rotation for", row.user_id); // 유실 빈도 모니터링용
+  }
+  if (!row || (row.result !== "rotated" && row.result !== "grace" && row.result !== "recovered")) {
     // 실패 사유는 서버 로그로만. 클라엔 일관된 단일 코드(토큰 상태 구분 노출 방지, logout 과 일관).
     console.warn("refresh rejected:", row?.result ?? "invalid");
     return json({ error: "invalid_refresh" }, 401);
