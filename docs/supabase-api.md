@@ -182,7 +182,7 @@
   - 401 `invalid_refresh` — invalid/expired/inactive/reuse_revoked를 **단일 코드로 통합**(토큰 상태 구분 비노출; 상세 사유는 서버 로그만)
   - 429 `rate_limited`
   - 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ① `oldHash = sha256(refresh_token)` ② 레이트리밋 — 토큰해시 `refresh:tok:<hash>` 20/분(스푸핑 불가, grace 증폭 캡) + IP `refresh:ip:<ip>` 120/분(보조) ③ 새 원문 생성 → `rt_rotate(p_old_hash, p_new_hash, p_user_agent, p_grace_seconds=30)` RPC — 원자적 회전(`UPDATE ... WHERE revoked_at IS NULL` 가드) + 30초 grace 유예 ④ 결과 `rotated|grace`면 `signAccess(user_id, token_version, 8h)` + 새 refresh 반환.
+- **내부 로직**: ① `oldHash = sha256(refresh_token)` ② 레이트리밋 — 토큰해시 `refresh:tok:<hash>` 20/분(스푸핑 불가, grace 증폭 캡) + IP `refresh:ip:<ip>` 120/분(보조) ③ 새 원문 생성 → `rt_rotate(p_old_hash, p_new_hash, p_user_agent, p_grace_seconds=30)` RPC — 원자적 회전(`UPDATE ... WHERE revoked_at IS NULL` 가드) + 30초 grace 유예 ④ 결과 `rotated|grace|recovered`면 `signAccess(user_id, token_version, 8h)` + 새 refresh 반환.
 - **시크릿**: `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
 - **정책**: 롤링 30일/절대 90일 만료(RPC측), grace 30초(응답 유실 재시도 구제), grace 초과 재사용 = family 전체 회수(탈취 대응).
 

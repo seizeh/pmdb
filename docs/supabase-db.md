@@ -1204,13 +1204,15 @@ public 스키마에 **54개**의 함수가 있다(PostGIS 확장 함수 제외, 
 - `rt_issue` 와 동일하되, **이미 살아있는 다른 refresh token 이 있으면** `security_login` 시스템 알림("새 기기에서 로그인되었어요")을 생성. token_version 반환.
 
 #### `rt_rotate(p_old_hash, p_new_hash, p_user_agent?, p_grace_seconds=30) → TABLE(result, user_id, token_version)`
-Refresh token 회전(재사용 감지 포함). 반환 `result` 값:
+Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` 값:
 1. 해시 미존재 → `'invalid'`.
 2. 사용자 비활성 → family 전체 revoke 후 `'inactive'`.
 3. 만료(절대/일반) → `'expired'`.
 4. 미회수 토큰이면 원자적으로 revoke 후 같은 family 로 새 토큰 발급, `replaced_by` 연결 → `'rotated'` + token_version.
-5. 이미 회수된 토큰이더라도 revoke 후 `p_grace_seconds`(기본 30초) 이내 재시도면 → `'grace'` 로 새 토큰 발급 (동시 요청 경합 허용).
-6. grace 초과 재사용 → **토큰 탈취 의심**으로 family 전체 revoke → `'reuse_revoked'`.
+5. revoked 인데 `replaced_by` 가 **없으면**(로그아웃/패밀리 회수로 죽은 토큰) grace 없이 → `'reuse_revoked'` (로그아웃 직후 재사용으로 세션 부활 방지).
+6. 회전으로 revoke 된 토큰의 `p_grace_seconds`(기본 30초) 이내 재시도 → `'grace'` 로 새 토큰 발급 (동시 요청 경합 허용).
+7. grace 초과라도 **후속 토큰(replaced_by)이 한 번도 회전되지 않았다면** 회전 응답 유실 재시도로 판정 — 미사용 후속을 revoke 하고 새 토큰 재발급 → `'recovered'` (세션 소실 버그 수정, 패밀리당 5회/일 `rate_limit_hit('rtrec:…')` 제한으로 핑퐁 악용 차단).
+8. 후속이 이미 사용됐거나 복구 한도 초과 → **토큰 탈취 의심**으로 family 전체 revoke → `'reuse_revoked'`.
 
 #### `rt_revoke_family(p_hash) → void` / `rt_revoke_user(p_user) → void`
 - 각각 해당 해시의 family 전체 / 해당 사용자의 전체 refresh token 을 revoke. (로그아웃/전체 로그아웃)
@@ -1661,3 +1663,4 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 | `20260702130000` | `drop_dup_device_token_index` | device_tokens.token 중복 유니크 인덱스(`device_tokens_token_uq`) 제거 — `device_tokens_token_key`만 유지. |
 | `20260709170000` | `withdraw_and_consents` | 회원 탈퇴(withdraw_account: 익명화+분리보관 30일 cron 파기) + 가입 약관 동의 기록(terms_agreed_at/marketing_opt_in). |
 | `20260710090000` | `argon2id_password_hashing` | 비밀번호 해싱 bcrypt→argon2id(엣지 해싱). get_login_user/update_password_hash/get_password_hash 추가, signup·reset·rotate 는 해시 수신으로 변경, 평문 RPC(login_user 등) 드롭. |
+| `20260710120000` | `rt_rotate_lost_rotation_recovery` | 세션 소실 버그 수정: 회전 응답 유실 재시도를 탈취와 구분해 복구('recovered'). grace 모호참조 수정, 로그아웃 토큰 grace 부활 차단. |
