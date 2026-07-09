@@ -1,13 +1,15 @@
 // ============================================================================
 // signup — 회원가입(계정 생성)
-//   POST { username, password, nickname, user_type, phone }
+//   POST { username, password, nickname, user_type, phone, marketing_opt_in? }
 //   전화 인증(verify-phone-code) 완료된 번호만 가입 가능.
-//   비밀번호 해싱 + users INSERT 는 SECURITY DEFINER 함수 signup_user 에서 처리.
+//   필수 약관 동의는 앱 가입 1단계에서 전부 받은 뒤 호출된다(terms_agreed_at 기록).
+//   비밀번호는 여기서 argon2id 해싱(_shared/passwords), INSERT 는 signup_user RPC.
 //   service_role 로만 RPC 호출(클라이언트는 publishable 키로 이 함수만 호출).
 //   verify_jwt=false: 로그인 전 단계. 남용은 전화 인증 선행 + 유니크 제약으로 방어.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { hashPassword } from "../_shared/passwords.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
@@ -42,6 +44,7 @@ Deno.serve(async (req: Request) => {
     nickname?: string;
     user_type?: string;
     phone?: string;
+    marketing_opt_in?: boolean;
   };
   try {
     p = await req.json();
@@ -79,10 +82,11 @@ Deno.serve(async (req: Request) => {
 
   const { data, error } = await supabase.rpc("signup_user", {
     p_username: username,
-    p_password: password,
+    p_password_hash: await hashPassword(password),
     p_nickname: nickname,
     p_user_type: userType,
     p_phone: phone,
+    p_marketing: p.marketing_opt_in === true,
   });
 
   if (error) {

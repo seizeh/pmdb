@@ -82,7 +82,7 @@
 
 1. `send-phone-code` `{ phone, purpose:'signup' }` → 6자리 코드 SMS 발송(5분 유효, 같은 번호+목적 60초 1회).
 2. `verify-phone-code` `{ phone, code, purpose:'signup' }` → 최신 미사용·미만료 코드 일치 시 `is_used=true`.
-3. `signup` `{ username, password, nickname, user_type, phone }` → `signup_user` RPC(SECURITY DEFINER, bcrypt 해싱 + users INSERT). 인증 안 된 번호면 `phone_not_verified`(403).
+3. `signup` `{ username, password, nickname, user_type, phone, marketing_opt_in? }` → 엣지에서 argon2id 해싱(_shared/passwords) 후 `signup_user` RPC(SECURITY DEFINER, users INSERT + 약관 동의 시각 기록). 인증 안 된 번호면 `phone_not_verified`(403).
 4. 이후 `login`으로 토큰 획득.
 
 ### 3.3 로그인 → 갱신 → 로그아웃
@@ -99,8 +99,8 @@
 
 ### 3.4 비밀번호 변경/재설정
 
-- **change-password** (로그인 상태): access JWT 검증 → `change_password_and_rotate` RPC **단일 트랜잭션**: 세션(status+tv) 검증 → 현재 비번 검증 → 갱신 → `token_version`++(모든 기존 access 즉사) + refresh 전량 회수 → **현재 기기용 새 family 발급**(현재 기기 로그아웃 방지). 응답으로 새 access+refresh 쌍 반환. 중간 실패 시 전체 롤백.
-- **reset-password** (비로그인, 비번 분실): `send-phone-code`/`verify-phone-code`를 `purpose:'password_reset'`으로 선행 → `reset-password { phone, new_password }` → `reset_password_user` RPC가 **30분 내 인증 완료된 번호**인지 확인 후 비번 갱신 + 전 세션 무효화(token_version bump + refresh 회수).
+- **change-password** (로그인 상태): access JWT 검증 → `get_password_hash` 로 현재 해시 조회, **엣지에서 현재 비번 검증**(argon2id/bcrypt 겸용) → 새 비번 argon2id 해싱 → `change_password_and_rotate(현재해시 CAS, 새해시, …)` RPC **단일 트랜잭션**: 세션(status+tv) 검증 → 해시 CAS 갱신 → `token_version`++(모든 기존 access 즉사) + refresh 전량 회수 → **현재 기기용 새 family 발급**(현재 기기 로그아웃 방지). 응답으로 새 access+refresh 쌍 반환. 중간 실패 시 전체 롤백.
+- **reset-password** (비로그인, 비번 분실): `send-phone-code`/`verify-phone-code`를 `purpose:'password_reset'`으로 선행 → `reset-password { phone, new_password }` → 엣지에서 argon2id 해싱 후 `reset_password_user` RPC가 **30분 내 인증 완료된 번호**인지 확인 후 해시 갱신 + 전 세션 무효화(token_version bump + refresh 회수).
 
 ### 3.5 정지/차단 연동
 
@@ -152,7 +152,7 @@
   - 403 `phone_not_verified`
   - 409 `username_taken` / `nickname_taken` / `phone_taken`
   - 500 `internal_error`
-- **내부 로직**: 입력 검증 후 `signup_user` RPC(SECURITY DEFINER) 호출 — 전화 인증 완료 확인, bcrypt 해싱, `users` INSERT. RPC가 raise한 커스텀 에러코드를 HTTP 코드로 매핑.
+- **내부 로직**: 입력 검증 → **argon2id 해싱(_shared/passwords, hash-wasm)** → `signup_user` RPC(SECURITY DEFINER) 호출 — 전화 인증 완료 확인, `users` INSERT(terms_agreed_at·마케팅 동의 기록). RPC가 raise한 커스텀 에러코드를 HTTP 코드로 매핑.
 - **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS/json 헬퍼를 파일 내 자체 정의(_shared 미사용).
 - **정책**: `verify-phone-code(purpose='signup')` 완료된 번호만 가입 가능.
 
@@ -167,7 +167,7 @@
   - 401 `invalid_credentials`
   - 429 `rate_limited`
   - 500 `server_misconfigured`(JWT_SECRET 미설정) / `internal_error`
-- **내부 로직**: ① 레이트리밋 — 계정 `login:user:<username소문자>` 10회/5분(1차) + IP `login:ip:<ip>` 20회/분(보조, IP 식별 시만) ② `login_user` RPC(service_role)로 비번 검증(status='active'만 반환) ③ capable이면 `randomToken()` 생성 → `login_issue_refresh` RPC(p_user, p_token_hash=sha256, p_user_agent) — 새 family 발급 + 다른 활성 세션 있으면 새 기기 로그인 알림, 현재 `token_version` 반환. 레거시면 `users.token_version` 직접 SELECT ④ `signAccess(uid, tv, ttl, JWT_SECRET)` — capable 8h / 레거시 30d. tv 조회 실패는 500(0으로 추측 stamp 시 tv>0 사용자 즉시 잠김 방지).
+- **내부 로직**: ① 레이트리밋 — 계정 `login:user:<username소문자>` 10회/5분(1차) + IP `login:ip:<ip>` 20회/분(보조, IP 식별 시만) ② `get_login_user` RPC(service_role)로 사용자·해시 조회(status='active'만) 후 **엣지에서 비번 검증**(argon2id/bcrypt 겸용, 미존재 계정은 더미 해싱으로 타이밍 균등화) — bcrypt(레거시) 성공 시 `update_password_hash`(CAS)로 argon2id 점진 재해싱 ③ capable이면 `randomToken()` 생성 → `login_issue_refresh` RPC(p_user, p_token_hash=sha256, p_user_agent) — 새 family 발급 + 다른 활성 세션 있으면 새 기기 로그인 알림, 현재 `token_version` 반환. 레거시면 `users.token_version` 직접 SELECT ④ `signAccess(uid, tv, ttl, JWT_SECRET)` — capable 8h / 레거시 30d. tv 조회 실패는 500(0으로 추측 stamp 시 tv>0 사용자 즉시 잠김 방지).
 - **시크릿**: `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
 - **정책**: 위 레이트리밋(리미터 오류 fail-open). 계정 버킷은 표적 락아웃 여지 있음(수용된 절충).
 
@@ -199,14 +199,14 @@
 ### change-password
 
 - **엔드포인트**: `POST /functions/v1/change-password` — verify_jwt=false(커스텀 JWT 수동 검증)
-- **인증**: **커스텀 JWT Bearer** (`_shared/auth.ts verifyAccess` — 서명+alg+exp 검증, `sub`→uid, `tv` 클레임 사용). refresh 지원 클라(phase 2) 전용; 레거시 앱은 기존 `change_password` RPC 직접 사용.
+- **인증**: **커스텀 JWT Bearer** (`_shared/auth.ts verifyAccess` — 서명+alg+exp 검증, `sub`→uid, `tv` 클레임 사용). refresh 지원 클라(phase 2) 전용(레거시 직접 RPC `change_password` 는 argon2id 전환 시 드롭).
 - **요청 바디**: `{ current_password: string(필수), new_password: string(필수) }`
 - **응답**:
   - 200 `{ ok: true, token, refresh_token, expires_in: 28800 }` — 현재 기기용 새 쌍
   - 400 `invalid_json` / `missing_fields` / `weak_password`
   - 401 `unauthorized`(JWT 무효 또는 RPC `not_authenticated` = tv 불일치/정지) / `invalid_current`
   - 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ① JWT 검증 → uid, tv ② 새 refresh 원문 생성 ③ `change_password_and_rotate(p_user, p_current, p_new, p_tv, p_new_token_hash, p_user_agent)` RPC — **단일 트랜잭션**: 세션(status+tv) 검증 → 비번 검증/갱신 → `token_version` bump + refresh 전량 회수 → 현재 기기용 새 family 발급. 새 tv 반환 ④ 새 tv로 access 서명해 새 쌍 응답.
+- **내부 로직**: ① JWT 검증 → uid, tv ② 새 refresh 원문 생성 ③ `get_password_hash` 조회 → 엣지에서 현재 비번 검증 → `change_password_and_rotate(p_user, p_current_hash, p_new_hash, p_tv, p_new_token_hash, p_user_agent)` RPC — **단일 트랜잭션**: 세션(status+tv) 검증 → 해시 CAS 갱신(불일치 = invalid_current 롤백) → `token_version` bump + refresh 전량 회수 → 현재 기기용 새 family 발급. 새 tv 반환 ④ 새 tv로 access 서명해 새 쌍 응답.
 - **시크릿**: `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
 - **정책**: 성공 시 다른 모든 기기 즉시 로그아웃(access는 tv 게이트로 즉사, refresh 회수), 현재 기기만 유지. 레이트리밋 없음(유효 access 필요가 게이트).
 
@@ -221,7 +221,7 @@
   - 403 `phone_not_verified`
   - 404 `user_not_found`
   - 500 `internal_error`
-- **내부 로직**: `reset_password_user(p_phone, p_new_password)` RPC — 30분 내 인증 이력 확인 → 비번 갱신 + 전 세션 무효화(token_version bump + refresh 회수). CORS/json/normalizePhone을 파일 내 자체 정의.
+- **내부 로직**: 엣지에서 argon2id 해싱 → `reset_password_user(p_phone, p_new_hash)` RPC — 30분 내 인증 이력 확인 → 해시 갱신 + 전 세션 무효화(token_version bump + refresh 회수). CORS/json/normalizePhone을 파일 내 자체 정의.
 - **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
 - **정책**: 인증 유효창 30분. 성공 시 모든 기기 로그아웃.
 

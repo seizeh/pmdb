@@ -1,7 +1,9 @@
 // ============================================================================
 // login — 아이디/비밀번호 로그인 → 커스텀 access JWT (+ capability 시 refresh) 발급
 //   POST { username, password }   [헤더 x-client-refresh: 1 → refresh 지원 클라]
-//   login_user RPC(service_role)로 비번 검증(이미 status='active'만).
+//   get_login_user RPC(service_role)로 사용자·해시 조회(status='active'만) 후
+//   여기서 argon2id/bcrypt 검증(_shared/passwords). bcrypt(레거시) 성공 시
+//   argon2id 로 점진 재해싱(update_password_hash, CAS — 실패해도 로그인은 진행).
 //   - 모든 토큰에 tv=users.token_version 클레임 stamp(레거시 분기 포함 — 필수).
 //   - x-client-refresh:1 → access 8h + refresh(불투명, 해시저장) 발급.
 //     미지원(레거시) → access 30일만(무중단). refresh 미지원 클라 하위호환.
@@ -14,6 +16,7 @@ import {
   ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientIp, clientUa, randomToken,
   rateLimited, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
+import { dummyVerify, hashPassword, isLegacyHash, verifyPassword } from "../_shared/passwords.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -49,17 +52,32 @@ Deno.serve(async (req: Request) => {
     return json({ error: "rate_limited" }, 429);
   }
 
-  const { data, error } = await supabase.rpc("login_user", {
-    p_username: username,
-    p_password: password,
-  });
+  const { data, error } = await supabase.rpc("get_login_user", { p_username: username });
   if (error) {
-    console.error("login_user failed", error);
+    console.error("get_login_user failed", error);
     return json({ error: "internal_error" }, 500);
   }
-  const rows = (data as Array<{ id: string; username: string; nickname: string; user_type: string }>) ?? [];
-  if (rows.length === 0) return json({ error: "invalid_credentials" }, 401);
+  const rows = (data as Array<{
+    id: string; username: string; nickname: string; user_type: string; password_hash: string;
+  }>) ?? [];
+  if (rows.length === 0) {
+    await dummyVerify(password); // 계정 미존재도 동일 비용 → 타이밍 열거 방지
+    return json({ error: "invalid_credentials" }, 401);
+  }
   const user = rows[0];
+  if (!(await verifyPassword(password, user.password_hash))) {
+    return json({ error: "invalid_credentials" }, 401);
+  }
+
+  // 레거시 bcrypt → argon2id 점진 재해싱(CAS). 실패해도 로그인은 정상 진행.
+  if (isLegacyHash(user.password_hash)) {
+    const { error: rhErr } = await supabase.rpc("update_password_hash", {
+      p_user: user.id,
+      p_old_hash: user.password_hash,
+      p_new_hash: await hashPassword(password),
+    });
+    if (rhErr) console.error("rehash failed (non-fatal)", rhErr);
+  }
 
   // 모든 토큰에 현재 token_version stamp(레거시 포함) — 미stamp 시 bump된 사용자 잠김.
   // ⚠ 조회 실패 시 tv 를 0 으로 추측 stamp 하면 tv>0 사용자가 즉시 잠기므로, 실패는 500 으로.
