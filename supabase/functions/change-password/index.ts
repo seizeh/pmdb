@@ -2,11 +2,12 @@
 // change-password — 비밀번호 변경 + 전 세션 무효화 + 현재 기기 재발급 (원자적)
 //   POST { current_password, new_password }   Authorization: Bearer <access JWT>
 //   1) access JWT 수동 검증 → uid (+tv 클레임)
-//   2) change_password_and_rotate(uid, cur, new, tv, new_hash) — 단일 트랜잭션:
-//      세션(status+tv) 검증 → 비번검증/갱신 → token_version bump + refresh 전량 회수
-//      → 현재 기기용 새 family 발급. 중간 실패 시 전체 롤백(부분상태 없음).
+//   2) get_password_hash 로 현재 해시 조회 → 여기서 현재 비번 검증(argon2id/bcrypt)
+//   3) change_password_and_rotate(uid, cur_hash(CAS), new_hash, tv, token_hash) —
+//      단일 트랜잭션: 세션(status+tv) 검증 → 해시 CAS 갱신 → token_version bump +
+//      refresh 전량 회수 → 현재 기기용 새 family 발급. 중간 실패 시 전체 롤백.
+//      (CAS: 검증~갱신 사이 다른 세션이 비번을 바꿨으면 invalid_current 로 롤백)
 //   verify_jwt=false: 커스텀 JWT 수동 검증(다른 함수와 동일 패턴).
-//   ※ refresh 지원 클라(phase 2) 전용. 레거시 앱은 기존 change_password RPC 사용.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -14,6 +15,7 @@ import { corsHeaders, json } from "../_shared/cors.ts";
 import {
   ACCESS_TTL_CAPABLE, bearer, clientUa, randomToken, sha256Hex, signAccess, verifyAccess,
 } from "../_shared/auth.ts";
+import { hashPassword, verifyPassword } from "../_shared/passwords.ts";
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -37,18 +39,30 @@ Deno.serve(async (req: Request) => {
   const cur = p.current_password ?? "";
   const next = p.new_password ?? "";
   if (!cur || !next) return json({ error: "missing_fields" }, 400);
+  if (next.length < 6) return json({ error: "weak_password" }, 400); // 구 app._set_password 정책 유지
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
+  // 현재 비번 검증 — 저장 해시를 가져와 여기서 확인(argon2id/bcrypt 겸용).
+  const { data: curHash, error: hErr } = await supabase.rpc("get_password_hash", { p_user: uid });
+  if (hErr) {
+    console.error("get_password_hash failed", hErr);
+    return json({ error: "internal_error" }, 500);
+  }
+  if (!curHash) return json({ error: "unauthorized" }, 401); // 미존재/비활성 계정
+  if (!(await verifyPassword(cur, curHash as string))) {
+    return json({ error: "invalid_current" }, 401);
+  }
+
   // 현재 기기용 새 refresh 원문을 여기서 생성(해시만 RPC 로) → 원자적으로 발급.
   const refreshToken = randomToken();
   const { data: tvData, error } = await supabase.rpc("change_password_and_rotate", {
     p_user: uid,
-    p_current: cur,
-    p_new: next,
+    p_current_hash: curHash,
+    p_new_hash: await hashPassword(next),
     p_tv: tv,
     p_new_token_hash: await sha256Hex(refreshToken),
     p_user_agent: clientUa(req),

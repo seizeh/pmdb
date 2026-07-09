@@ -1147,35 +1147,45 @@ public 스키마에 **54개**의 함수가 있다(PostGIS 확장 함수 제외, 
 
 ### 7.1. 인증·계정 (Auth)
 
-#### `signup_user(p_username, p_password, p_nickname, p_user_type, p_phone) → uuid` [SD][svc]
-회원가입. 로직:
+> **비밀번호 해싱 (20260710~)**: bcrypt(pgcrypto) → **argon2id** 로 전환. 해싱·검증은 엣지펑션
+> (`_shared/passwords.ts`, hash-wasm, m=19MiB/t=2/p=1)에서 수행하고 DB 는 해시 문자열만 다룬다 —
+> 평문 비밀번호가 SQL 계층에 도달하지 않는다. 기존 `$2a$…`(bcrypt) 해시는 접두사 분기로 계속
+> 검증되며, 로그인 성공 시 `update_password_hash`(CAS)로 argon2id 재해싱(점진 전환, 세션 유지).
+
+#### `signup_user(p_username, p_password_hash, p_nickname, p_user_type, p_phone, p_marketing=false) → uuid` [SD][svc]
+회원가입(해시는 signup 엣지가 argon2id 로 생성해 전달). 로직:
 1. `phone_verifications` 에 해당 전화의 `purpose='signup'`, `is_used=true`, 30분 이내 레코드가 없으면 `phone_not_verified`(P0001) 예외.
 2. username/nickname(소문자 비교)/phone 중복이면 각각 `username_taken`/`nickname_taken`/`phone_taken`(P0001).
-3. `extensions.crypt(p_password, gen_salt('bf', 12))` 로 bcrypt 해싱 후 `users` INSERT(`phone_verified=true`), 새 id 반환.
+3. `users` INSERT(`phone_verified=true`, `terms_agreed_at=now()`, 마케팅 동의 기록), 새 id 반환.
 - 부수효과: `trg_users_after_insert` 트리거가 알림 설정 기본행·고객센터 채팅방·대기 중 보호자 초대 연결을 자동 생성(§8 참조).
 
-#### `login_user(p_username, p_password) → TABLE(id, username, nickname, user_type)` [SD]
-- username(대소문자 무시) + `status='active'` + bcrypt 검증(`crypt(p_password, password_hash)`)이 맞는 행을 반환. 실패 시 0행.
-- EXECUTE: anon/authenticated 가능(로그인 진입점). 반환값을 바탕으로 서버가 JWT 발급.
+#### `get_login_user(p_username) → TABLE(id, username, nickname, user_type, password_hash)` [SD][svc]
+- username(대소문자 무시) + `status='active'` 행을 해시 포함 반환(0 또는 1행). **비번 검증은 login 엣지**가
+  수행(argon2id/bcrypt 겸용 + 계정 미존재 시 더미 해싱으로 타이밍 열거 방지) 후 JWT 발급.
+
+#### `update_password_hash(p_user, p_old_hash, p_new_hash) → boolean` [SD][svc]
+- 점진 재해싱용 CAS 갱신: `password_hash = p_old_hash` 일 때만 교체(동시 비번변경 레이스 방지). 세션 무효화 없음.
+
+#### `get_password_hash(p_user) → text` [SD][svc]
+- active 사용자의 현재 해시 반환 — change-password 엣지의 현재 비번 검증용.
 
 #### `check_username_available(p_username) → boolean` [SD]
 - `lower(username)` 중복이 없으면 true. 가입 폼의 아이디 중복확인용. anon 호출 가능.
 
 #### `reset_password_user(p_phone, p_new_password) → uuid` [SD][svc]
-비밀번호 재설정:
-1. 새 비밀번호 규칙 검사(8자 이상 + 영문 + 숫자) 실패 시 `invalid_password`(P0001).
-2. `phone_verifications` 에 `purpose='password_reset'`, `is_used=true`, 30분 이내 기록 필요 — 없으면 `phone_not_verified`(P0001).
-3. 전화번호로 사용자 조회, 없으면 `user_not_found`(P0001).
-4. bcrypt 재해싱 + `token_version+1`(모든 액세스토큰 무효화) + 미회수 refresh token 전부 revoke. 사용자 id 반환.
+비밀번호 재설정(새 비번 규칙 검사·argon2id 해싱은 reset-password 엣지에서):
+1. `phone_verifications` 에 `purpose='password_reset'`, `is_used=true`, 30분 이내 기록 필요 — 없으면 `phone_not_verified`(P0001).
+2. 전화번호로 사용자 조회, 없으면 `user_not_found`(P0001).
+3. 해시 갱신 + `token_version+1`(모든 액세스토큰 무효화) + 미회수 refresh token 전부 revoke. 사용자 id 반환.
+- 시그니처: `reset_password_user(p_phone, p_new_hash)`.
 
-#### `change_password(p_current, p_new) → void` [SD] (anon/auth 호출 가능)
-- `app.uid()` 없으면 `not_authenticated`(42501). `app._set_password()` 위임: 새 비번 6자 미만 `weak_password`(P0001), 현재 비번 불일치 `invalid_current`(P0001), bcrypt 갱신.
-
-#### `change_password_svc(p_user, p_current, p_new, p_tv) → void` [SD][svc]
-- 서버 컨텍스트용. `p_user` 가 active 이고 `token_version = p_tv` 인지 검증 후 `app._set_password()` 호출. 불일치 시 `not_authenticated`(42501).
-
-#### `change_password_and_rotate(p_user, p_current, p_new, p_tv, p_new_token_hash, p_user_agent?) → integer` [SD][svc]
-- 위 검증 + 비번 변경 후: `token_version+1`, 기존 refresh token 전부 revoke, **새 refresh token(해시) 즉시 발급**(30일/절대 90일). 새 token_version 반환. "비번 변경해도 현재 기기 세션은 유지" 흐름.
+#### `change_password_and_rotate(p_user, p_current_hash, p_new_hash, p_tv, p_new_token_hash, p_user_agent?) → integer` [SD][svc]
+- 세션 검증(active + `token_version = p_tv`, 불일치 시 `not_authenticated` 42501) 후 해시 CAS 갱신
+  (`password_hash = p_current_hash` 일 때만 — 0행이면 `invalid_current` P0001 로 전체 롤백),
+  `token_version+1`, 기존 refresh token 전부 revoke, **새 refresh token(해시) 즉시 발급**(30일/절대 90일).
+  새 token_version 반환. "비번 변경해도 현재 기기 세션은 유지" 흐름.
+  현재 비번 검증(및 6자 미만 `weak_password`)은 change-password 엣지가 수행.
+- 드롭됨(평문 경로 제거): `login_user`, `change_password`, `change_password_svc`, `app._set_password`.
 
 #### `bump_token_version(p_user) → integer` [SD][svc]
 - `token_version+1` 후 반환. 전체 강제 로그아웃 스위치.
@@ -1649,3 +1659,5 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 | `20260701180000` | `chat_message_notifications` | 채팅 푸시: 채팅 메시지 insert 시 수신자(발신자 제외 룸 멤버)에게 'chat_message' 알림 생성. |
 | `20260702120000` | `facility_all_categories` | 같은 업체(이름+주소 동일)의 전체 카테고리 조회 RPC — 시설 상세용. |
 | `20260702130000` | `drop_dup_device_token_index` | device_tokens.token 중복 유니크 인덱스(`device_tokens_token_uq`) 제거 — `device_tokens_token_key`만 유지. |
+| `20260709170000` | `withdraw_and_consents` | 회원 탈퇴(withdraw_account: 익명화+분리보관 30일 cron 파기) + 가입 약관 동의 기록(terms_agreed_at/marketing_opt_in). |
+| `20260710090000` | `argon2id_password_hashing` | 비밀번호 해싱 bcrypt→argon2id(엣지 해싱). get_login_user/update_password_hash/get_password_hash 추가, signup·reset·rotate 는 해시 수신으로 변경, 평문 RPC(login_user 등) 드롭. |

@@ -2,11 +2,13 @@
 // reset-password — 전화 OTP 인증 후 비밀번호 재설정
 //   POST { phone, new_password }
 //   전화 인증(verify-phone-code, purpose='password_reset')이 30분 내 완료된 번호만 허용.
-//   비번 갱신 + 전 세션 무효화(token_version bump + refresh 회수)는 reset_password_user RPC.
+//   새 비밀번호는 여기서 argon2id 해싱(_shared/passwords) 후 reset_password_user RPC 가
+//   갱신 + 전 세션 무효화(token_version bump + refresh 회수)를 원자 처리.
 //   verify_jwt=false: 로그인 전 단계. service_role 로만 RPC 호출.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { hashPassword } from "../_shared/passwords.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
@@ -54,7 +56,7 @@ Deno.serve(async (req: Request) => {
 
   const { error } = await supabase.rpc("reset_password_user", {
     p_phone: phone,
-    p_new_password: password,
+    p_new_hash: await hashPassword(password),
   });
 
   if (error) {
