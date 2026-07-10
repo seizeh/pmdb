@@ -1,8 +1,11 @@
 // ============================================================================
 // send-phone-code — 전화 인증번호(6자리·5분) 발급 + Solapi SMS 발송
 //   POST { phone: string, purpose?: 'signup' | 'password_reset' }
-//   흐름: rate limit(동일 번호 60초 1회) → 코드 생성 → phone_verifications INSERT
-//         → Solapi 발송. service_role 로만 DB 접근(RLS 정책 없음).
+//   흐름: 목적별 계정 존재 검증 → rate limit(동일 번호 60초 1회) → 코드 생성
+//         → phone_verifications INSERT → Solapi 발송. service_role 로만 DB 접근.
+//   가입: 이미 가입된 번호 차단(phone_taken) / 재설정: 미가입 번호 차단(user_not_found)
+//   — 불필요한 SMS 발송·오용 방지(같은 정보는 어차피 최종 단계에서 노출되므로
+//     계정 열거 위험이 새로 늘지 않음).
 //   verify_jwt=false: 가입/비번재설정은 로그인 전 단계라 JWT 없음. 남용은 자체 rate limit 으로 방어.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -47,6 +50,20 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+
+  // 0) 목적별 계정 존재 검증 — 가입된 번호에 가입용 문자를 보내지 않는다.
+  const { data: existing, error: exErr } = await supabase
+    .from("users").select("id").eq("phone", phone).limit(1).maybeSingle();
+  if (exErr) {
+    console.error("phone lookup failed", exErr);
+    return json({ error: "internal_error" }, 500);
+  }
+  if (purpose === "signup" && existing) {
+    return json({ error: "phone_taken" }, 409);
+  }
+  if (purpose === "password_reset" && !existing) {
+    return json({ error: "user_not_found" }, 404);
+  }
 
   // 1) rate limit: 동일 번호+목적 최근 60초 내 발급 이력 차단
   const since = new Date(Date.now() - RATE_LIMIT_SEC * 1000).toISOString();
