@@ -111,6 +111,17 @@ Deno.serve(async (req: Request) => {
   const ttl = capable ? ACCESS_TTL_CAPABLE : ACCESS_TTL_LEGACY;
   const token = await signAccess(user.id, tv, ttl, secret);
 
+  // 접속 로그(로그인 성공) — 개인정보 처리방침 §3(접속 로그·IP 3개월). IP 는 SHA-256 해시로만
+  // 저장하며, app.auth_logs 는 retention-purge 배치가 3개월 뒤 파기. 비치명: 실패해도 로그인 진행.
+  try {
+    await supabase.rpc("record_auth_log", {
+      p_user: user.id,
+      p_ip_hash: ip !== null ? await sha256Hex(ip) : null,
+    });
+  } catch (e) {
+    console.error("record_auth_log failed (non-fatal)", e);
+  }
+
   return json({
     ok: true,
     token,
