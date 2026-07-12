@@ -9,3 +9,7 @@
 
 # IDE
 .idea/
+
+# 백업 산출물·비밀 설정 (커밋 금지)
+scripts/backup.env
+backups/
