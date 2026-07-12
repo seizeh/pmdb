@@ -26,7 +26,7 @@ const AI_REAL_THRESHOLD = 0.70; // 라이브니스(실제 개/고양이) 하한
 const IDENTITY_PASS_THRESHOLD = 0.63; // 동일 개체 통과선(중간신뢰)
 const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 멀티이미지
 const TOKEN_TTL_MIN = 15;
-const REVERIFY_DAYS = 60;
+const REVERIFY_DAYS = 30; // 위치기반서비스 이용약관과 동일하게 유지할 것
 
 function b64urlToBytes(s: string): Uint8Array {
   const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
