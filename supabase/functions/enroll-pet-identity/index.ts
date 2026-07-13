@@ -150,6 +150,35 @@ reason 한국어 80자 이내.`;
   };
 }
 
+/// 인증 거절도 photo_verifications(purpose='pet_identity') 에 1행 기록 — 관리자
+/// 실패 조회(admin_photo_verification_failures)에 노출시키기 위함. 기존에는 실패 시
+/// 아무 기록이 없어 운영자가 원인을 볼 수 없었다. 기록 실패는 응답을 막지 않는다.
+/// 촬영 좌표(shot_*)는 넣지 않으므로 위치정보 확인자료 트리거는 발화하지 않는다.
+async function logEnrollFail(
+  admin: ReturnType<typeof createClient>,
+  uid: string,
+  petId: string,
+  reason: string,
+  ai?: Awaited<ReturnType<typeof verifyEnrollmentVideo>>,
+) {
+  const { error } = await admin.from("photo_verifications").insert({
+    user_id: uid,
+    pet_id: petId,
+    purpose: "pet_identity",
+    result: "fail",
+    fail_reason: reason,
+    expires_at: new Date().toISOString(), // 토큰 아님 — 즉시 만료
+    ai_species: ai?.species ?? null,
+    ai_dog_real: ai?.dog_real ?? 0,
+    ai_cat_real: ai?.cat_real ?? 0,
+    ai_dog_fake: ai?.dog_fake ?? 0,
+    ai_cat_fake: ai?.cat_fake ?? 0,
+    ai_pass: false,
+    ai_reason: ai?.reason ?? null,
+  });
+  if (error) console.error("logEnrollFail insert failed", error);
+}
+
 // 품종 느슨 비교(오경고 최소화) — 양쪽 소문자/공백제거 후 부분 포함이면 일치.
 function looseBreedMatch(reg: string, ai: string): boolean {
   const a = reg.toLowerCase().replace(/\s/g, "");
@@ -216,14 +245,17 @@ Deno.serve(async (req: Request) => {
     ai = await verifyEnrollmentVideo(videoBase64, videoMime);
   } catch (e) {
     console.error("gemini enroll failed", e);
+    await logEnrollFail(admin, uid, petId, "ai_unavailable");
     return json({ enrolled: false, reason: "ai_unavailable" });
   }
   const real = Math.max(ai.dog_real, ai.cat_real);
   const fake = Math.max(ai.dog_fake, ai.cat_fake);
   if (!(real >= ENROLL_REAL_THRESHOLD && real > fake)) {
+    await logEnrollFail(admin, uid, petId, "not_real_pet", ai);
     return json({ enrolled: false, reason: "not_real_pet", ai });
   }
   if (!ai.consistent) {
+    await logEnrollFail(admin, uid, petId, "not_consistent_pet", ai);
     return json({ enrolled: false, reason: "not_consistent_pet", ai });
   }
 
@@ -232,6 +264,7 @@ Deno.serve(async (req: Request) => {
   // 2-0) 종(개↔고양이) 하드 게이트 — 등록 종과 다르면 거절.
   //   품종은 AI 오탐이 잦아 소프트로 두지만, 개↔고양이 불일치는 명백한 오등록/부정이므로 차단.
   if (regType && regType !== species) {
+    await logEnrollFail(admin, uid, petId, "species_mismatch", ai);
     return json({ enrolled: false, reason: "species_mismatch", ai });
   }
 
