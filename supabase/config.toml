@@ -47,6 +47,9 @@ verify_jwt = false
 [functions.resolve-region]
 verify_jwt = false
 
+[functions.invite-guardian]
+verify_jwt = false
+
 # --- 전화 인증/가입(로그인 전): publishable 키 요구를 얇은 남용 게이트로 유지 → true ---
 # (SMS 발송 등. 완전 공개로 바꾸려면 false + 내부 레이트리밋 의존.)
 [functions.send-phone-code]

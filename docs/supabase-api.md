@@ -26,10 +26,11 @@
 | `enroll-pet-identity` | 펫 신원 등록 (임무 영상 → AI 검증 → 기준 프레임) | 커스텀 JWT Bearer | false | ACTIVE v8 |
 | `search-petcafe` | 애견카페 실시간 검색 (네이버 지역검색 프록시) | 커스텀 JWT Bearer | false | ACTIVE v9 |
 | `resolve-region` | 좌표 → 행정동 역지오코딩 (부수효과 없음) | 커스텀 JWT Bearer | false | ACTIVE v3 |
+| `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS) | 커스텀 JWT Bearer | false | ACTIVE v1 |
 | `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `send-push` | pending 알림 FCM(HTTP v1) 발송 | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
-총 15개 함수. 로컬 소스 15개 = 원격 배포 15개 (1:1 일치, 누락/고아 없음).
+총 16개 함수. 로컬 소스 16개 = 원격 배포 16개 (1:1 일치, 누락/고아 없음).
 
 참고: `supabase/functions/supabase/` 디렉터리는 **함수가 아니라** Supabase CLI가 남긴 `.temp/linked-project.json`(프로젝트 링크 캐시) 아티팩트다. `verify-phone-code/supabase/.temp/`에도 동일 아티팩트가 하나 더 있다(함수 폴더 안에서 CLI를 실행한 흔적).
 
