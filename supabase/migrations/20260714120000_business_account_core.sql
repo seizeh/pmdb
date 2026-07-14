@@ -25,7 +25,11 @@ $$;
 create index if not exists facilities_norm_name_trgm_gix
   on public.facilities using gin (app.norm_biz_text((name)::text) extensions.gin_trgm_ops);
 
--- 1) 업체 프로필 (0025 §2.1)
+-- 1) 업체 프로필 (0025 §2.1).
+--    코어 스키마(20260603, 저장소 밖)에 초기 설계의 구버전 business_profiles
+--    (id PK·business_type, 0행·미참조·뷰 없음)가 남아 있어 제거 후 재생성 —
+--    적용 시점에 0행·인바운드 FK 없음 확인함.
+drop table if exists public.business_profiles;
 create table public.business_profiles (
   user_id             uuid primary key references public.users(id) on delete cascade,
   business_reg_no     varchar(10) not null
@@ -114,6 +118,9 @@ insert into public.business_match_rules (rule_key, weight, enabled, params, note
 -- 3) 계정 전환 모드 (0025 §2.3)
 alter table public.users add column if not exists active_mode varchar not null default 'personal'
   check (active_mode in ('personal','business'));
+-- users 는 테이블 수준 SELECT 가 회수되어 있어(프라이버시) 본인 토글 표시용 컬럼만 개별 GRANT.
+-- 쓰기는 switch_account_mode RPC 전용(컬럼 UPDATE GRANT 없음).
+grant select (active_mode) on public.users to authenticated;
 
 -- 4) 알림 타입 확장 (+business_approved/business_rejected — 누락 시 알림이 조용히 안 생김)
 alter table public.notifications drop constraint notifications_notification_type_check;
