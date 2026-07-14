@@ -32,6 +32,10 @@ function normalizePhone(raw: string): string {
   return digits;
 }
 
+// 업체 여부는 user_type 이 아니라 business_profiles 로 분리(0025 §1.1).
+// 'business' 는 구버전 앱 호환용으로만 수신 — 'no_pet' 으로 매핑 저장하고, 강제 업데이트
+// 이후에만 목록에서 제거(0025 §1.7). 'pet_owner' 도 구버전 호환(신버전은 no_pet 고정,
+// 펫 등록 시 트리거 승격).
 const USER_TYPES = new Set(["pet_owner", "no_pet", "business"]);
 
 Deno.serve(async (req: Request) => {
@@ -71,6 +75,9 @@ Deno.serve(async (req: Request) => {
   if (!USER_TYPES.has(userType)) {
     return json({ error: "invalid_user_type" }, 400);
   }
+  // 전환기 매핑(0025 §1.7): 구버전 앱의 'business' 가입은 일반 계정으로 생성하고,
+  // 업체 인증은 로그인 후 apply-business 로만.
+  const effectiveUserType = userType === "business" ? "no_pet" : userType;
   if (!/^01\d{8,9}$/.test(phone)) {
     return json({ error: "invalid_phone" }, 400);
   }
@@ -84,7 +91,7 @@ Deno.serve(async (req: Request) => {
     p_username: username,
     p_password_hash: await hashPassword(password),
     p_nickname: nickname,
-    p_user_type: userType,
+    p_user_type: effectiveUserType,
     p_phone: phone,
     p_marketing: p.marketing_opt_in === true,
   });
