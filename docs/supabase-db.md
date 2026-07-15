@@ -1424,7 +1424,7 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 
 - `trg_pets_after_insert`: 펫 등록 시 `primary_guardian_id` 를 owner 보호자로 자동 등록 + 등록자 `user_type` 을 `pet_owner` 로 자동 승격.
 - `trg_pet_guardians_owner_self_remove` (BEFORE DELETE): 사용자 컨텍스트(`app.uid()` 존재)에서 owner 본인 행 직접 삭제 금지("먼저 소유권을 이전하세요") — 시스템(분양 이전)은 우회 가능.
-- `trg_pgi_resolve_invitee` (BEFORE INSERT, invites): `invitee_user_id` 가 없고 전화번호만 있으면 가입자 조회해 자동 연결.
+- `trg_pgi_resolve_invitee` (BEFORE INSERT, invites): `invitee_user_id` 가 없고 전화번호만 있으면 가입자 조회해 자동 연결. resolve 후 최종 invitee 가 inviter 본인이면 `self_invite` 예외(자기 초대 차단 — 직접 INSERT·service_role 포함 전 경로 백스톱).
 - `trg_notify_guardian_invite` (AFTER INSERT): `kind='invite'` 이고 수신자 확정 시 `guardian_invite` 알림("OO님이 △△의 공동보호자로 초대했어요").
 - `trg_pgi_respond` (BEFORE UPDATE): `pending→accepted` 시 — invite 면 초대받은 사람이, request 면 신청자가 보호자가 됨(미확정이면 예외). **그 사람이 해당 펫 글의 진행 중 약속 지원자면 수락 차단**(이해충돌 방지). `pet_guardians` 에 `co_guardian` 으로 INSERT(중복 무시), `responded_at` 세팅. `declined/expired` 도 responded_at 기록.
 
