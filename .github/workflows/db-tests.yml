@@ -1,0 +1,43 @@
+# DB 테스트 — 스키마 스냅샷을 supabase/postgres 컨테이너에 복원한 뒤
+# pgTAP 불변식 테스트(supabase/tests)를 실행한다.
+# 베이스 스키마가 마이그레이션 밖(out-of-band)이라 리플레이 대신 스냅샷을 쓴다
+# (갱신: ./scripts/dump_schema.sh — README 참고).
+name: DB Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pgtap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      db:
+        # 운영 DB 와 동일 메이저(Postgres 17) 이미지 — pgtap/postgis/pg_net 동봉.
+        image: supabase/postgres:17.6.1.121
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54322:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DB_URL: postgresql://postgres:postgres@localhost:54322/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: psql 설치
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      - name: 스키마 스냅샷 복원 (prelude → schema)
+        run: |
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/schema/prelude.sql
+          psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/schema/schema.sql
+
+      - name: pgTAP 테스트
+        run: ./scripts/run_db_tests.sh "$DB_URL"
