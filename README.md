@@ -55,6 +55,23 @@ supabase/
 - `SOLAPI_API_KEY`, `SOLAPI_API_SECRET`, `SOLAPI_SENDER` — SMS 발송
 - `JWT_SECRET` — Supabase 프로젝트의 JWT Secret (login 토큰 서명/검증용)
 
+## DB 테스트 (pgTAP)
+
+핵심 불변식(업체 소식 강제·자기초대 차단·팔로우 얼굴 분리·채팅 삭제 권한·retention
+파기 항목·공유 함수 재정의 회귀)을 pgTAP 으로 검증한다. 각 테스트는
+`begin … rollback` 자급자족(시드 포함)이라 어느 DB 에 돌려도 데이터가 남지 않는다.
+
+```bash
+# 로컬(운영 DB 대상 — 전부 롤백이라 안전) : scripts/backup.env 의 연결문자열 사용
+./scripts/run_db_tests.sh "$SUPABASE_DB_URL"
+```
+
+- CI: `.github/workflows/db-tests.yml` — supabase/postgres 컨테이너에 **스키마
+  스냅샷**(`supabase/schema/schema.sql`)을 복원해 실행. 베이스 스키마가
+  마이그레이션 밖에 있는 구조라 리플레이 대신 스냅샷을 쓴다.
+- 스냅샷 갱신: 스키마 변경 마이그레이션 적용 후 `./scripts/dump_schema.sh` 실행해
+  함께 커밋(안 하면 CI 가 구스키마로 돈다).
+
 ## 배포
 
 ```bash
