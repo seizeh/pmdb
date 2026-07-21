@@ -53,8 +53,17 @@ if [ -n "${BACKUP_PASSPHRASE:-}" ]; then
   pg_dump "${DUMP_ARGS[@]}" \
     | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 -c -o "$DB_FINAL" 3<<<"$BACKUP_PASSPHRASE"
   log "무결성 검증(복호화 → 아카이브 목차)"
-  gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 -d "$DB_FINAL" 3<<<"$BACKUP_PASSPHRASE" \
-    | pg_restore --list >/dev/null || die "덤프 무결성 검증 실패(암호화본 손상/절단)"
+  # ① 전체 복호화로 암호화본 손상·절단 검증(MDC 확인, 출력은 버림)
+  gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 -d "$DB_FINAL" 3<<<"$BACKUP_PASSPHRASE" >/dev/null 2>&1 \
+    || die "암호화본 복호화 실패(손상/절단)"
+  # ② 아카이브 목차 판독 — pg_restore 는 목차만 읽고 파이프를 닫으므로
+  #    gpg 쪽 EPIPE 는 정상 동작(pipefail 판정에서 제외하고 pg_restore 결과만 본다)
+  set +o pipefail
+  gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 -d "$DB_FINAL" 3<<<"$BACKUP_PASSPHRASE" 2>/dev/null \
+    | pg_restore --list >/dev/null
+  PG_RC=${PIPESTATUS[1]}
+  set -o pipefail
+  [ "$PG_RC" -eq 0 ] || die "덤프 무결성 검증 실패(아카이브 목차 판독 불가)"
 else
   log "⚠ BACKUP_PASSPHRASE 미설정 — 평문으로 저장됩니다(운영 시 암호화 권장)"
   DB_FINAL="$BACKUP_DIR/db_${STAMP}.dump"
