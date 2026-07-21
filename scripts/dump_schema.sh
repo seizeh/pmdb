@@ -22,7 +22,10 @@ mkdir -p "$(dirname "$OUT")"
 # 필터:
 #  · 'Dumped from/by' 주석·\restrict 토큰 — 실행마다 달라져 diff 소음
 #  · CREATE SCHEMA public — 새 DB 에 이미 존재해 복원이 실패한다(app 은 유지)
+#  · ALTER DEFAULT PRIVILEGES — 타 롤(supabase_admin 등) 기본권한은 비수퍼유저
+#    복원에서 permission denied. 객체별 GRANT 는 그대로 담기므로 테스트에 불필요.
 pg_dump "$SUPABASE_DB_URL" --schema-only --no-owner -n public -n app \
-  | grep -vE '^-- Dumped |^\\|^CREATE SCHEMA public;$' > "$OUT"
+  | grep -vE '^-- Dumped |^\\|^CREATE SCHEMA public;$|^ALTER DEFAULT PRIVILEGES ' \
+  > "$OUT"
 
 echo "written: $OUT ($(wc -l < "$OUT" | tr -d ' ') lines)"
