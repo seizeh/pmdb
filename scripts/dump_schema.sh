@@ -19,9 +19,10 @@ set -a; . "$SCRIPT_DIR/backup.env"; set +a
 [ -n "${SUPABASE_DB_URL:-}" ] || { echo "SUPABASE_DB_URL 미설정" >&2; exit 1; }
 
 mkdir -p "$(dirname "$OUT")"
-# 'Dumped from/by' 주석과 \restrict 토큰(백슬래시 시작 줄) 제거 —
-# 실행마다 달라져 diff 소음을 만들고, psql 이 아니면 해석도 안 된다.
+# 필터:
+#  · 'Dumped from/by' 주석·\restrict 토큰 — 실행마다 달라져 diff 소음
+#  · CREATE SCHEMA public — 새 DB 에 이미 존재해 복원이 실패한다(app 은 유지)
 pg_dump "$SUPABASE_DB_URL" --schema-only --no-owner -n public -n app \
-  | grep -vE '^-- Dumped |^\\' > "$OUT"
+  | grep -vE '^-- Dumped |^\\|^CREATE SCHEMA public;$' > "$OUT"
 
 echo "written: $OUT ($(wc -l < "$OUT" | tr -d ' ') lines)"
