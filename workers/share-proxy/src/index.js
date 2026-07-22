@@ -61,11 +61,11 @@ const LANDING = `<!doctype html>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
-         background:#faf7f2; color:#5a4e3a; display:flex; min-height:100vh;
+         background:#F5EFE3; color:#5A4E3A; display:flex; min-height:100vh;
          align-items:center; justify-content:center; text-align:center; padding:24px; }
-  .brand { font-size:15px; font-weight:800; color:#ac9466; letter-spacing:.5px; }
+  .brand { font-size:15px; font-weight:800; color:#AD9466; letter-spacing:.5px; }
   h1 { font-size:24px; font-weight:800; margin:14px 0 10px; }
-  p { font-size:14px; line-height:1.7; color:#8a8375; }
+  p { font-size:14px; line-height:1.7; color:#8C8273; }
 </style></head>
 <body><div>
   <div class="brand">PawMate</div>
