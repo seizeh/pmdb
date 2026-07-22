@@ -4938,7 +4938,10 @@ begin
       'facility', jsonb_build_object(
         'name', f.name, 'category', f.category, 'address', f.address,
         'phone', f.phone, 'is_open', f.is_open,
-        'avg_rating', f.avg_rating, 'review_count', f.review_count),
+        'avg_rating', f.avg_rating, 'review_count', f.review_count,
+        'photo_url', bp.photo_url,
+        'photo_align_y', coalesce(bp.photo_align_y, 0),
+        'business_hours', bp.business_hours),
       'reviews', coalesce((
         select jsonb_agg(jsonb_build_object(
                  'rating', r.rating, 'content', r.content,
@@ -4949,7 +4952,16 @@ begin
               where facility_id = f.id and visibility_status = 'visible'
               order by created_at desc limit 3) r), '[]'::jsonb))
     into v_out
-    from public.facilities f where f.id = v_link.ref_id;
+    from public.facilities f
+    left join lateral (
+      select b.photo_url, b.photo_align_y, b.business_hours
+        from public.business_profiles b
+       where b.status = 'approved'
+         and b.matched_facility_id = any(public.facility_sibling_ids(f.id))
+       order by b.reviewed_at nulls last
+       limit 1
+    ) bp on true
+    where f.id = v_link.ref_id;
     return coalesce(v_out, jsonb_build_object('status', 'not_found'));
   end if;
 
