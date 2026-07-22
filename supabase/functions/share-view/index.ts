@@ -7,6 +7,9 @@
 //   없이 보여주고, 설치 유도 버튼만 둔다. 후기 강요·가입 강제 없음.
 //   kind='care_report' 는 P1(미용 전후 사진)에서 열린다 — 지금은 안내만.
 //
+//   디자인은 앱과 같은 언어 — app_palette 라이트 값, 시설 상세 히어로 문법
+//   (라운드 18 + 하단 점진 블러 + 스크림 위 정보), 업종색 칩, ★ #FFB300.
+//
 //   verify_jwt=false 배포(공개 링크 — 게이트웨이 JWT 검증 없음). DB 접근은
 //   service_role 전용 public RPC(share_view_load/click)로만 — app 스키마는
 //   PostgREST 미노출이라 직접 못 읽고, RPC 가 검증·데이터·계측을 원자 처리한다.
@@ -24,12 +27,13 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const STORE_URL_IOS = Deno.env.get("STORE_URL_IOS") ?? "";
 const STORE_URL_ANDROID = Deno.env.get("STORE_URL_ANDROID") ?? "";
 
-const CATEGORY_LABELS: Record<string, string> = {
-  animal_hospital: "동물병원",
-  grooming: "미용",
-  pet_hotel: "위탁·호텔",
-  pet_sales: "분양",
-  pet_cafe: "애견카페",
+// 카테고리 라벨·색 — 앱 지도 칩(_facilityCats)과 동일.
+const CATEGORIES: Record<string, { label: string; color: string }> = {
+  animal_hospital: { label: "동물병원", color: "#EF5350" },
+  grooming: { label: "미용", color: "#AB47BC" },
+  pet_hotel: { label: "위탁·호텔", color: "#42A5F5" },
+  pet_sales: { label: "분양", color: "#66BB6A" },
+  pet_cafe: { label: "애견카페", color: "#FF9800" },
 };
 
 function esc(s: string): string {
@@ -49,6 +53,7 @@ function html(body: string, status = 200): Response {
 }
 
 /// 공통 페이지 골격 — 모바일 우선, 외부 리소스 없음(폰트·JS 미사용).
+/// 색은 앱 app_palette 라이트 값 그대로.
 function page(title: string, ogDesc: string, inner: string): string {
   return `<!doctype html>
 <html lang="ko"><head>
@@ -59,43 +64,78 @@ function page(title: string, ogDesc: string, inner: string): string {
 <meta property="og:type" content="website">
 <title>${esc(title)} — PawMate</title>
 <style>
-  :root { --brown:#5a4e3a; --gold:#ac9466; --bg:#faf7f2; --card:#ffffff; --muted:#8a8375; }
+  :root { --primary:#AD9466; --primary-dark:#5A4E3A; --primary-soft:#D9CBA8;
+          --cream:#F5EFE3; --surface:#FFFFFF; --surface-muted:#FAF6EC;
+          --border:#E5DDD0; --text:#5A4E3A; --text2:#8C8273; --text3:#B6AC9A;
+          --on-primary:#FFFBF1; --star:#FFB300; }
   * { margin:0; padding:0; box-sizing:border-box; }
   body { font-family:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
-         background:var(--bg); color:var(--brown); }
-  .wrap { max-width:480px; margin:0 auto; padding:24px 20px 40px; }
-  .brand { font-size:13px; font-weight:800; color:var(--gold); letter-spacing:.5px; margin-bottom:16px; }
-  .card { background:var(--card); border-radius:20px; padding:24px 20px; box-shadow:0 2px 12px rgba(90,78,58,.08); }
-  .hero { width:calc(100% + 40px); margin:-24px -20px 18px; height:200px; object-fit:cover;
-          border-radius:20px 20px 0 0; display:block; }
-  h1 { font-size:22px; font-weight:800; line-height:1.3; }
-  .tags { margin:10px 0 4px; }
-  .tag { display:inline-block; font-size:12px; font-weight:700; color:var(--gold);
-         border:1px solid var(--gold); border-radius:999px; padding:3px 10px; margin-right:6px; }
-  .rating { font-size:16px; font-weight:800; margin:12px 0 2px; }
-  .rating small { font-weight:400; color:var(--muted); }
-  .meta { font-size:14px; color:var(--muted); line-height:1.7; margin-top:10px; }
-  .review { border-top:1px solid #efe9de; padding:14px 0; }
-  .review .stars { color:var(--gold); font-size:13px; font-weight:700; }
-  .incent { font-size:11px; font-weight:600; color:var(--muted); border:1px solid #e2dccd;
-            border-radius:999px; padding:2px 8px; margin-left:8px; vertical-align:1px; }
-  .review p { font-size:14px; line-height:1.6; margin-top:6px; word-break:break-all; }
-  .rphotos { display:flex; gap:6px; margin-top:8px; }
+         background:var(--cream); color:var(--text); }
+  .wrap { max-width:480px; margin:0 auto; padding:20px 20px 40px; }
+  .brand { font-size:14px; font-weight:800; color:var(--primary); letter-spacing:.5px; margin-bottom:14px; }
+
+  /* 히어로 — 앱 시설 상세와 같은 문법: 라운드 18, 하단 점진 블러 + 스크림 위 정보 */
+  .hero { position:relative; border-radius:18px; overflow:hidden; height:230px; margin-bottom:14px; }
+  .hero > img.photo { width:100%; height:100%; object-fit:cover; display:block; }
+  .hero .blurband { position:absolute; inset:0;
+    backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    mask-image:linear-gradient(transparent 45%, black 88%);
+    -webkit-mask-image:linear-gradient(transparent 45%, black 88%); }
+  .hero .scrim { position:absolute; left:0; right:0; bottom:0; height:120px;
+    background:linear-gradient(transparent, rgba(0,0,0,.4)); }
+  .hero .info { position:absolute; left:16px; right:16px; bottom:14px; color:#fff; }
+  .hero .info h1 { font-size:22px; font-weight:800; line-height:1.25; margin-top:6px;
+    text-shadow:0 1px 8px rgba(0,0,0,.35); }
+
+  /* 히어로 없는 매장 — 이름 블록 */
+  .plainhead { padding:6px 2px 14px; }
+  .plainhead h1 { font-size:22px; font-weight:800; color:var(--text); line-height:1.25; margin-top:8px; }
+
+  /* 카테고리 칩 — 앱과 동일: 업종색 14% 배경 + 업종색 텍스트, 라운드 100 */
+  .chip { display:inline-block; font-size:12px; font-weight:700;
+          border-radius:100px; padding:4px 10px; margin-right:6px; }
+
+  /* 정보/후기 카드 — surface, radius 16, 0.5px 보더 (앱 카드 문법) */
+  .card { background:var(--surface); border-radius:16px; padding:16px;
+          border:.5px solid var(--border); margin-bottom:10px; }
+  .rating-row { display:flex; align-items:center; gap:6px; font-size:16px; font-weight:800; }
+  .rating-row .star { color:var(--star); font-size:17px; }
+  .rating-row small { font-weight:400; font-size:13px; color:var(--text2); }
+  .meta { font-size:14px; color:var(--text2); line-height:1.8; margin-top:8px; }
+
+  .section { font-size:13px; font-weight:700; color:var(--text2); margin:18px 2px 8px; }
+
+  /* 후기 카드 */
+  .review .stars { color:var(--star); font-size:13px; letter-spacing:1px; }
+  .incent { font-size:11px; font-weight:600; color:var(--text2);
+            border:1px solid var(--border); background:var(--surface-muted);
+            border-radius:100px; padding:2px 8px; margin-left:8px; vertical-align:1px; }
+  .review p { font-size:14px; line-height:1.6; margin-top:6px; color:var(--text);
+              word-break:break-all; }
+  .rphotos { display:flex; gap:6px; margin-top:10px; }
   .rphotos img { width:72px; height:72px; object-fit:cover; border-radius:10px; }
-  .section { font-size:14px; font-weight:800; margin:24px 0 8px; }
-  .cta { display:block; text-align:center; background:var(--brown); color:#fff; text-decoration:none;
-         font-size:16px; font-weight:800; border-radius:14px; padding:16px; margin-top:24px; }
-  .cta.sub { background:transparent; color:var(--muted); font-weight:400; font-size:13px; padding:10px; }
-  .notice { text-align:center; padding:48px 0 24px; }
-  .notice h1 { font-size:18px; }
-  .notice p { font-size:14px; color:var(--muted); margin-top:8px; line-height:1.6; }
+
+  /* 더 보기 줄 — 숨긴 콘텐츠가 있음을 정직하게 + 앱 전환 유인 */
+  .more { display:block; text-align:center; font-size:13.5px; font-weight:700;
+          color:var(--primary-dark); background:var(--surface-muted);
+          border:.5px solid var(--border); border-radius:14px; padding:13px;
+          text-decoration:none; margin-bottom:4px; }
+
+  .cta { display:block; text-align:center; background:var(--primary-dark); color:var(--on-primary);
+         text-decoration:none; font-size:15px; font-weight:800; border-radius:14px;
+         padding:16px; margin-top:14px; }
+  .cta.sub { background:transparent; color:var(--text3); font-weight:400; font-size:13px; padding:10px; }
+  .notice { text-align:center; padding:56px 16px 32px; background:var(--surface);
+            border-radius:16px; border:.5px solid var(--border); }
+  .notice h1 { font-size:18px; font-weight:800; }
+  .notice p { font-size:14px; color:var(--text2); margin-top:8px; line-height:1.6; }
 </style></head>
 <body><div class="wrap"><div class="brand">PawMate</div>${inner}</div></body></html>`;
 }
 
 function noticePage(title: string, msg: string, status: number): Response {
   return html(
-    page(title, msg, `<div class="card notice"><h1>${esc(title)}</h1><p>${esc(msg)}</p></div>`),
+    page(title, msg, `<div class="notice"><h1>${esc(title)}</h1><p>${esc(msg)}</p></div>`),
     status,
   );
 }
@@ -145,13 +185,50 @@ Deno.serve(async (req) => {
   }
 
   const fac = data.facility ?? {};
-  const catLabel = CATEGORY_LABELS[String(fac.category)] ?? String(fac.category ?? "");
+  const cat = CATEGORIES[String(fac.category)] ??
+    { label: String(fac.category ?? ""), color: "#AD9466" };
   const rating = Number(fac.avg_rating ?? 0);
   const reviewCount = Number(fac.review_count ?? 0);
   const name = String(fac.name ?? "매장");
   const ogDesc = rating > 0
-    ? `★${rating.toFixed(1)} · 후기 ${reviewCount}개 · ${catLabel}`
-    : `우리 동네 ${catLabel} — PawMate 에서 확인하세요`;
+    ? `★${rating.toFixed(1)} · 후기 ${reviewCount}개 · ${cat.label}`
+    : `우리 동네 ${cat.label} — PawMate 에서 확인하세요`;
+
+  // 업종색 칩 — 앱(시설 상세)과 동일: 업종색 14% 배경(#hex24 알파) + 업종색 텍스트.
+  // 사진(스크림) 위에서는 흰 반투명으로 가독 확보.
+  const chip = (onPhoto: boolean) =>
+    `<span class="chip" style="${
+      onPhoto
+        ? "background:rgba(255,255,255,.22);color:#fff"
+        : `background:${cat.color}24;color:${cat.color}`
+    }">${esc(cat.label)}</span>`;
+
+  // 히어로 — 대표 사진이 있으면 앱 히어로 문법(사진 + 하단 점진 블러 + 스크림 위 정보).
+  const photoUrl = fac.photo_url ? String(fac.photo_url) : null;
+  const alignPct = Math.round(((Number(fac.photo_align_y ?? 0) + 1) / 2) * 100);
+  const head = photoUrl
+    ? `<div class="hero">
+        <img class="photo" src="${esc(photoUrl)}" alt="" style="object-position:center ${alignPct}%">
+        <div class="blurband"></div><div class="scrim"></div>
+        <div class="info">${chip(true)}<h1>${esc(name)}</h1></div>
+      </div>`
+    : `<div class="plainhead">${chip(false)}<h1>${esc(name)}</h1></div>`;
+
+  const hours = fac.business_hours ? String(fac.business_hours) : null;
+  const infoCard = `
+  <div class="card">
+    ${
+    rating > 0
+      ? `<div class="rating-row"><span class="star">★</span>${rating.toFixed(1)}
+         <small>후기 ${reviewCount}개</small></div>`
+      : ""
+  }
+    <div class="meta" ${rating > 0 ? "" : 'style="margin-top:0"'}>
+      ${fac.address ? `📍 ${esc(String(fac.address))}<br>` : ""}
+      ${hours ? `🕐 ${esc(hours)}<br>` : ""}
+      ${fac.phone ? `📞 ${esc(String(fac.phone))}` : ""}
+    </div>
+  </div>`;
 
   const reviews: Array<{
     rating: number;
@@ -160,47 +237,34 @@ Deno.serve(async (req) => {
     photo_urls?: string[];
   }> = data.reviews ?? [];
   const reviewHtml = reviews.length === 0
-    ? `<p class="meta">아직 후기가 없어요. 첫 후기의 주인공이 되어 주세요!</p>`
+    ? `<div class="card"><p style="font-size:14px;color:var(--text2)">아직 후기가 없어요. 첫 후기의 주인공이 되어 주세요!</p></div>`
     : reviews.map((r) => {
       // 후기 사진 썸네일(최대 2장, 서버에서 제한) — 사진 후기가 가장 설득력 있다.
       const photos = (r.photo_urls ?? [])
         .map((u) => `<img src="${esc(String(u))}" alt="" loading="lazy">`)
         .join("");
       return `
-      <div class="review">
+      <div class="card review">
         <span class="stars">${starBar(Number(r.rating))}</span>${
-          r.has_incentive ? '<span class="incent">업체 혜택 받고 작성</span>' : ""
-        }
+        r.has_incentive ? '<span class="incent">업체 혜택 받고 작성</span>' : ""
+      }
         <p>${esc(String(r.content ?? "")).slice(0, 400)}</p>
         ${photos ? `<div class="rphotos">${photos}</div>` : ""}
       </div>`;
     }).join("");
 
-  // 인증 업체 대표 사진 히어로 — 지도 상세와 동일한 세로 초점(alignY -1~1 → 0~100%).
-  // 콜드스타트(후기 0개) 매장도 사진 한 장으로 명함 이상이 되게 (0028 §3).
-  const photoUrl = fac.photo_url ? String(fac.photo_url) : null;
-  const alignPct = Math.round(((Number(fac.photo_align_y ?? 0) + 1) / 2) * 100);
-  const heroHtml = photoUrl
-    ? `<img class="hero" src="${esc(photoUrl)}" alt="" style="object-position:center ${alignPct}%">`
+  // 더 보기 — 숨긴 후기가 있음을 정직하게 알리고 앱 전환 유인으로 쓴다.
+  const remaining = Math.max(0, reviewCount - reviews.length);
+  const moreHtml = remaining > 0
+    ? `<a class="more" href="?t=${token}&amp;go=store">후기 ${remaining}개 더 있어요 — 앱에서 모두 보기</a>`
     : "";
-  const hours = fac.business_hours ? String(fac.business_hours) : null;
 
   const inner = `
-  <div class="card">
-    ${heroHtml}
-    <h1>${esc(name)}</h1>
-    <div class="tags"><span class="tag">${esc(catLabel)}</span>${fac.is_open === false ? '<span class="tag">휴업</span>' : ""}</div>
-    ${rating > 0
-      ? `<div class="rating">★ ${rating.toFixed(1)} <small>· 후기 ${reviewCount}개</small></div>`
-      : ""}
-    <div class="meta">
-      ${fac.address ? `📍 ${esc(String(fac.address))}<br>` : ""}
-      ${hours ? `🕐 ${esc(hours)}<br>` : ""}
-      ${fac.phone ? `📞 ${esc(String(fac.phone))}` : ""}
-    </div>
-    <div class="section">방문 후기</div>
-    ${reviewHtml}
-  </div>
+  ${head}
+  ${infoCard}
+  <div class="section">방문 후기</div>
+  ${reviewHtml}
+  ${moreHtml}
   <a class="cta" href="?t=${token}&amp;go=store">PawMate 앱에서 동네 반려 소식 보기</a>
   <a class="cta sub" href="?t=${token}&amp;go=store">후기 작성도 앱에서 할 수 있어요</a>`;
 
