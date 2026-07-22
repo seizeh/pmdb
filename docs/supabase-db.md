@@ -1204,6 +1204,11 @@ public 스키마에 **54개**의 함수가 있다(PostGIS 확장 함수 제외, 
 #### `check_username_available(p_username) → boolean` [SD]
 - `lower(username)` 중복이 없으면 true. 가입 폼의 아이디 중복확인용. anon 호출 가능.
 
+#### `check_nickname_available(p_nickname) → boolean` [SD]
+- `lower(trim(p_nickname))` 중복이 없으면 true(호출자 본인 행은 제외 — 안 바꾸고 저장해도 통과).
+- 내정보 수정 폼의 실시간 선체크용 — 최종 판정은 `users_lower_nickname_uq` 가 한다(경합 시 23505).
+- authenticated 만 호출 가능(가입 시점 중복은 signup 엣지가 `nickname_taken` 으로 처리).
+
 #### `reset_password_user(p_phone, p_new_password) → uuid` [SD][svc]
 비밀번호 재설정(새 비번 규칙 검사·argon2id 해싱은 reset-password 엣지에서):
 1. `phone_verifications` 에 `purpose='password_reset'`, `is_used=true`, 30분 이내 기록 필요 — 없으면 `phone_not_verified`(P0001).
