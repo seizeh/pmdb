@@ -4945,9 +4945,12 @@ begin
       'reviews', coalesce((
         select jsonb_agg(jsonb_build_object(
                  'rating', r.rating, 'content', r.content,
-                 'has_incentive', r.has_incentive)
+                 'has_incentive', r.has_incentive,
+                 'photo_urls', r.photos)
                  order by r.created_at desc)
-        from (select rating, content, has_incentive, created_at
+        from (select rating, content, has_incentive, created_at,
+                     (select coalesce(jsonb_agg(u), '[]'::jsonb)
+                        from unnest(photo_urls[1:2]) u) as photos
               from public.facility_reviews
               where facility_id = f.id and visibility_status = 'visible'
               order by created_at desc limit 3) r), '[]'::jsonb))
