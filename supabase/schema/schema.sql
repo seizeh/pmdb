@@ -4947,13 +4947,16 @@ begin
                  'rating', r.rating, 'content', r.content,
                  'has_incentive', r.has_incentive,
                  'photo_urls', r.photos)
-                 order by r.created_at desc)
+                 order by r.has_photo desc, r.created_at desc)
         from (select rating, content, has_incentive, created_at,
+                     coalesce(array_length(photo_urls, 1), 0) > 0 as has_photo,
                      (select coalesce(jsonb_agg(u), '[]'::jsonb)
                         from unnest(photo_urls[1:2]) u) as photos
               from public.facility_reviews
               where facility_id = f.id and visibility_status = 'visible'
-              order by created_at desc limit 3) r), '[]'::jsonb))
+              order by coalesce(array_length(photo_urls, 1), 0) > 0 desc,
+                       created_at desc
+              limit 3) r), '[]'::jsonb))
     into v_out
     from public.facilities f
     left join lateral (
