@@ -3395,6 +3395,22 @@ $$;
 
 
 --
+-- Name: check_nickname_available(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.check_nickname_available(p_nickname text) RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  select not exists (
+    select 1 from public.users
+    where lower(nickname) = lower(trim(p_nickname))
+      and id is distinct from app.uid()
+  );
+$$;
+
+
+--
 -- Name: check_username_available(text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -9513,6 +9529,15 @@ GRANT ALL ON FUNCTION public.can_manage_post_applicants(p_post uuid) TO service_
 
 REVOKE ALL ON FUNCTION public.change_password_and_rotate(p_user uuid, p_current_hash text, p_new_hash text, p_tv integer, p_new_token_hash text, p_user_agent text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.change_password_and_rotate(p_user uuid, p_current_hash text, p_new_hash text, p_tv integer, p_new_token_hash text, p_user_agent text) TO service_role;
+
+
+--
+-- Name: FUNCTION check_nickname_available(p_nickname text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.check_nickname_available(p_nickname text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.check_nickname_available(p_nickname text) TO authenticated;
+GRANT ALL ON FUNCTION public.check_nickname_available(p_nickname text) TO service_role;
 
 
 --
