@@ -202,8 +202,47 @@ Deno.serve(async (req) => {
   if (data.status !== "ok") {
     return noticePage("링크를 찾을 수 없어요", "회수되었거나 존재하지 않는 링크예요.", 404);
   }
+  // ── 케어 리포트(P1 미용 전후 사진) — 사진이 주인공, 설치 CTA 는 "내 기록 받기" ──
+  if (data.kind === "care_report") {
+    const rp = data.report ?? {};
+    const petLabel = String(rp.pet_label ?? "우리 아이");
+    const bizName = rp.business_name ? String(rp.business_name) : null;
+    const note = rp.note ? String(rp.note) : null;
+    const photos: string[] = Array.isArray(rp.photos) ? rp.photos.map(String) : [];
+    const d = new Date(String(rp.created_at ?? ""));
+    const dateStr = isNaN(d.getTime())
+      ? ""
+      : `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${
+        String(d.getDate()).padStart(2, "0")
+      }`;
+    const photoHtml = photos.length === 0 ? "" : `<div class="rgrid" style="margin-top:12px">${
+      photos.map((u, i) =>
+        `<div class="rtile hasimg" ${
+          photos.length === 1 ? 'style="grid-column:1/-1;aspect-ratio:4/3"' : ""
+        }>
+          <img src="${esc(u)}" alt="" loading="lazy">
+          ${
+          photos.length === 2
+            ? `<div class="badges"><span class="badge">${i === 0 ? "전" : "후"}</span></div>`
+            : ""
+        }
+        </div>`
+      ).join("")
+    }</div>`;
+    const inner = `
+    <div class="titlebar" style="margin-top:4px"><b>${esc(petLabel)}의 미용 기록</b></div>
+    <div class="info-card">
+      ${bizName ? `<div class="verified">✓ ${esc(bizName)}에서 보냈어요</div>` : ""}
+      ${dateStr ? `<div class="irow"><span class="ic">🗓</span><span>${dateStr}</span></div>` : ""}
+      ${note ? `<div class="irow"><span class="ic">💬</span><span>${esc(note)}</span></div>` : ""}
+    </div>
+    ${photoHtml}
+    <a class="cta" href="?t=${token}&amp;go=store">PawMate 앱에서 ${esc(petLabel)} 기록 모아보기</a>
+    <a class="cta sub" href="?t=${token}&amp;go=store">가입하면 다음 기록은 자동으로 도착해요</a>`;
+    return html(page(`${petLabel}의 미용 기록`, `${bizName ?? "PawMate"} · 케어 리포트`, inner));
+  }
+
   if (data.kind !== "facility_preview") {
-    // care_report 등 P1 kind — 링크는 유효하나 뷰어 본문은 P1 에서.
     return noticePage("준비 중인 콘텐츠예요", "앱에서 곧 만나볼 수 있어요.", 200);
   }
 
