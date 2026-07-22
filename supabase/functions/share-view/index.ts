@@ -72,6 +72,8 @@ function page(title: string, ogDesc: string, inner: string): string {
   .meta { font-size:14px; color:var(--muted); line-height:1.7; margin-top:10px; }
   .review { border-top:1px solid #efe9de; padding:14px 0; }
   .review .stars { color:var(--gold); font-size:13px; font-weight:700; }
+  .incent { font-size:11px; font-weight:600; color:var(--muted); border:1px solid #e2dccd;
+            border-radius:999px; padding:2px 8px; margin-left:8px; vertical-align:1px; }
   .review p { font-size:14px; line-height:1.6; margin-top:6px; word-break:break-all; }
   .section { font-size:14px; font-weight:800; margin:24px 0 8px; }
   .cta { display:block; text-align:center; background:var(--brown); color:#fff; text-decoration:none;
@@ -144,12 +146,15 @@ Deno.serve(async (req) => {
     ? `★${rating.toFixed(1)} · 후기 ${reviewCount}개 · ${catLabel}`
     : `우리 동네 ${catLabel} — PawMate 에서 확인하세요`;
 
-  const reviews: Array<{ rating: number; content: string | null }> = data.reviews ?? [];
+  const reviews: Array<{ rating: number; content: string | null; has_incentive?: boolean }> =
+    data.reviews ?? [];
   const reviewHtml = reviews.length === 0
     ? `<p class="meta">아직 후기가 없어요. 첫 후기의 주인공이 되어 주세요!</p>`
     : reviews.map((r) => `
       <div class="review">
-        <span class="stars">${starBar(Number(r.rating))}</span>
+        <span class="stars">${starBar(Number(r.rating))}</span>${
+          r.has_incentive ? '<span class="incent">업체 혜택 받고 작성</span>' : ""
+        }
         <p>${esc(String(r.content ?? "")).slice(0, 400)}</p>
       </div>`).join("");
 

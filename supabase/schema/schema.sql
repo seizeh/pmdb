@@ -1767,6 +1767,26 @@ $$;
 
 
 --
+-- Name: tg_posts_block_trader(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_posts_block_trader() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if new.category in ('adoption', 'give_away') and exists (
+    select 1 from public.business_profiles b
+    where b.user_id = new.user_id and b.status = 'approved'
+  ) then
+    raise exception 'posts: 영업자 계정은 분양·입양 글을 작성할 수 없어요';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
 -- Name: tg_posts_check_write(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -2258,10 +2278,10 @@ $$;
 
 
 --
--- Name: add_facility_review(uuid, smallint, text, text[], text[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: add_facility_review(uuid, smallint, text, text[], text[], boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[] DEFAULT '{}'::text[], p_urls text[] DEFAULT '{}'::text[]) RETURNS uuid
+CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[] DEFAULT '{}'::text[], p_urls text[] DEFAULT '{}'::text[], p_has_incentive boolean DEFAULT false) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -2278,9 +2298,9 @@ begin
     raise exception 'own_facility' using errcode = 'P0001';
   end if;
   insert into public.facility_reviews
-    (facility_id, user_id, rating, content, photo_paths, photo_urls)
+    (facility_id, user_id, rating, content, photo_paths, photo_urls, has_incentive)
   values (p_facility, v_uid, p_rating, p_body,
-          coalesce(p_paths,'{}'), coalesce(p_urls,'{}'))
+          coalesce(p_paths,'{}'), coalesce(p_urls,'{}'), coalesce(p_has_incentive, false))
   returning id into v_id;
   return v_id;
 end $$;
@@ -3879,12 +3899,12 @@ $$;
 -- Name: facility_review_by_id(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer)
+CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
   select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no
+         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive
     from (
       select fr.*,
              row_number() over (
@@ -3904,12 +3924,12 @@ $$;
 -- Name: facility_reviews_of(uuid, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFAULT 20, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer)
+CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFAULT 20, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
   select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no
+         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive
     from (
       select fr.*,
              row_number() over (
@@ -4720,9 +4740,11 @@ begin
         'phone', f.phone, 'is_open', f.is_open,
         'avg_rating', f.avg_rating, 'review_count', f.review_count),
       'reviews', coalesce((
-        select jsonb_agg(jsonb_build_object('rating', r.rating, 'content', r.content)
-                         order by r.created_at desc)
-        from (select rating, content, created_at
+        select jsonb_agg(jsonb_build_object(
+                 'rating', r.rating, 'content', r.content,
+                 'has_incentive', r.has_incentive)
+                 order by r.created_at desc)
+        from (select rating, content, has_incentive, created_at
               from public.facility_reviews
               where facility_id = f.id and visibility_status = 'visible'
               order by created_at desc limit 3) r), '[]'::jsonb))
@@ -5640,9 +5662,17 @@ CREATE TABLE public.facility_reviews (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     photo_paths text[] DEFAULT '{}'::text[] NOT NULL,
     visibility_status character varying(20) DEFAULT 'visible'::character varying NOT NULL,
+    has_incentive boolean DEFAULT false NOT NULL,
     CONSTRAINT facility_reviews_photos_max CHECK (((array_length(photo_paths, 1) IS NULL) OR (array_length(photo_paths, 1) <= 5))),
     CONSTRAINT facility_reviews_rating_check CHECK (((rating >= 1) AND (rating <= 5)))
 );
+
+
+--
+-- Name: COLUMN facility_reviews.has_incentive; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.facility_reviews.has_incentive IS '업체로부터 할인·사은품 등 혜택을 받고 작성 — 표시광고법 표시 의무(0028 §6)';
 
 
 --
@@ -7977,6 +8007,13 @@ CREATE TRIGGER trg_posts_authored_as BEFORE INSERT ON public.posts FOR EACH ROW 
 
 
 --
+-- Name: posts trg_posts_block_trader; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_posts_block_trader BEFORE INSERT OR UPDATE OF category ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_block_trader();
+
+
+--
 -- Name: posts trg_posts_check_write; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -9499,12 +9536,12 @@ GRANT ALL ON FUNCTION public._push_pref_allows(p_user uuid, p_type text) TO serv
 
 
 --
--- Name: FUNCTION add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]) TO authenticated;
-GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]) TO service_role;
+REVOKE ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) TO authenticated;
+GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) TO service_role;
 
 
 --
