@@ -80,6 +80,8 @@ function page(title: string, ogDesc: string, inner: string): string {
   .incent { font-size:11px; font-weight:600; color:var(--muted); border:1px solid #e2dccd;
             border-radius:999px; padding:2px 8px; margin-left:8px; vertical-align:1px; }
   .review p { font-size:14px; line-height:1.6; margin-top:6px; word-break:break-all; }
+  .rphotos { display:flex; gap:6px; margin-top:8px; }
+  .rphotos img { width:72px; height:72px; object-fit:cover; border-radius:10px; }
   .section { font-size:14px; font-weight:800; margin:24px 0 8px; }
   .cta { display:block; text-align:center; background:var(--brown); color:#fff; text-decoration:none;
          font-size:16px; font-weight:800; border-radius:14px; padding:16px; margin-top:24px; }
@@ -151,17 +153,28 @@ Deno.serve(async (req) => {
     ? `★${rating.toFixed(1)} · 후기 ${reviewCount}개 · ${catLabel}`
     : `우리 동네 ${catLabel} — PawMate 에서 확인하세요`;
 
-  const reviews: Array<{ rating: number; content: string | null; has_incentive?: boolean }> =
-    data.reviews ?? [];
+  const reviews: Array<{
+    rating: number;
+    content: string | null;
+    has_incentive?: boolean;
+    photo_urls?: string[];
+  }> = data.reviews ?? [];
   const reviewHtml = reviews.length === 0
     ? `<p class="meta">아직 후기가 없어요. 첫 후기의 주인공이 되어 주세요!</p>`
-    : reviews.map((r) => `
+    : reviews.map((r) => {
+      // 후기 사진 썸네일(최대 2장, 서버에서 제한) — 사진 후기가 가장 설득력 있다.
+      const photos = (r.photo_urls ?? [])
+        .map((u) => `<img src="${esc(String(u))}" alt="" loading="lazy">`)
+        .join("");
+      return `
       <div class="review">
         <span class="stars">${starBar(Number(r.rating))}</span>${
           r.has_incentive ? '<span class="incent">업체 혜택 받고 작성</span>' : ""
         }
         <p>${esc(String(r.content ?? "")).slice(0, 400)}</p>
-      </div>`).join("");
+        ${photos ? `<div class="rphotos">${photos}</div>` : ""}
+      </div>`;
+    }).join("");
 
   // 인증 업체 대표 사진 히어로 — 지도 상세와 동일한 세로 초점(alignY -1~1 → 0~100%).
   // 콜드스타트(후기 0개) 매장도 사진 한 장으로 명함 이상이 되게 (0028 §3).
