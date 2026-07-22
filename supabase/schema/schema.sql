@@ -37,6 +37,20 @@ COMMENT ON SCHEMA public IS 'standard public schema';
 
 
 --
+-- Name: biz_license_type; Type: TYPE; Schema: app; Owner: -
+--
+
+CREATE TYPE app.biz_license_type AS ENUM (
+    'grooming',
+    'boarding',
+    'sales',
+    'production',
+    'exhibition',
+    'transport'
+);
+
+
+--
 -- Name: facility_category; Type: TYPE; Schema: public; Owner: -
 --
 
@@ -298,6 +312,21 @@ begin
   update public.posts set pawing_notified = true
    where not pawing_notified and created_at <= now() - v_grace;
 end;
+$$;
+
+
+--
+-- Name: has_license(app.biz_license_type); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.has_license(p_type app.biz_license_type) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select exists (
+    select 1 from app.business_licenses
+    where user_id = app.uid() and license_type = p_type and status = 'approved'
+  );
 $$;
 
 
@@ -2278,10 +2307,10 @@ $$;
 
 
 --
--- Name: add_facility_review(uuid, smallint, text, text[], text[]); Type: FUNCTION; Schema: public; Owner: -
+-- Name: add_facility_review(uuid, smallint, text, text[], text[], boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[] DEFAULT '{}'::text[], p_urls text[] DEFAULT '{}'::text[]) RETURNS uuid
+CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[] DEFAULT '{}'::text[], p_urls text[] DEFAULT '{}'::text[], p_has_incentive boolean DEFAULT false) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -2298,9 +2327,9 @@ begin
     raise exception 'own_facility' using errcode = 'P0001';
   end if;
   insert into public.facility_reviews
-    (facility_id, user_id, rating, content, photo_paths, photo_urls)
+    (facility_id, user_id, rating, content, photo_paths, photo_urls, has_incentive)
   values (p_facility, v_uid, p_rating, p_body,
-          coalesce(p_paths,'{}'), coalesce(p_urls,'{}'))
+          coalesce(p_paths,'{}'), coalesce(p_urls,'{}'), coalesce(p_has_incentive, false))
   returning id into v_id;
   return v_id;
 end $$;
@@ -2519,6 +2548,32 @@ begin
    order by bp.updated_at desc
    limit greatest(1, least(coalesce(p_limit, 50), 100))
   offset greatest(0, coalesce(p_offset, 0));
+end;
+$$;
+
+
+--
+-- Name: admin_list_business_licenses(text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_list_business_licenses(p_status text DEFAULT 'pending'::text, p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, nickname text, business_name text, license_type text, license_no text, document_path text, status text, reject_reason text, created_at timestamp with time zone, reviewed_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  return query
+  select l.id, l.user_id, u.nickname::text, b.business_name::text,
+         l.license_type::text, l.license_no::text, l.document_path,
+         l.status::text, l.reject_reason, l.created_at, l.reviewed_at
+    from app.business_licenses l
+    join public.users u on u.id = l.user_id
+    left join public.business_profiles b on b.user_id = l.user_id
+   where (p_status is null or l.status = p_status)
+   order by l.created_at
+   limit least(coalesce(p_limit, 50), 200) offset coalesce(p_offset, 0);
 end;
 $$;
 
@@ -2808,6 +2863,75 @@ $$;
 
 
 --
+-- Name: admin_review_business_license(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_review_business_license(p_license uuid, p_status text, p_reason text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_row app.business_licenses%rowtype;
+  v_reason text := nullif(btrim(coalesce(p_reason, '')), '');
+  v_label text;
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  if p_status not in ('approved', 'rejected') then
+    raise exception 'invalid_status' using errcode = 'P0001';
+  end if;
+  select * into v_row from app.business_licenses where id = p_license;
+  if not found then
+    raise exception 'license_not_found' using errcode = 'P0001';
+  end if;
+  if v_row.status = p_status then
+    raise exception 'no_change' using errcode = 'P0001';
+  end if;
+
+  v_label := case v_row.license_type
+    when 'grooming' then '동물미용업' when 'boarding' then '동물위탁관리업'
+    when 'sales' then '동물판매업' when 'production' then '동물생산업'
+    when 'exhibition' then '동물전시업' when 'transport' then '동물운송업'
+  end;
+
+  if p_status = 'rejected' then
+    if v_reason is null then
+      raise exception 'reason_required' using errcode = 'P0001';
+    end if;
+    update app.business_licenses set
+      status = 'rejected', reject_reason = v_reason,
+      reviewed_by = app.uid(), reviewed_at = now(), updated_at = now()
+    where id = p_license;
+
+    insert into app.business_doc_purge_queue (path, reason, purge_after)
+    values (v_row.document_path, 'license_rejected', now() + interval '6 months');
+
+    insert into public.notifications (user_id, notification_type, is_system, title, body)
+    values (v_row.user_id, 'business_rejected', true,
+            v_label || ' 인증이 반려되었어요',
+            '사유: ' || v_reason || E'\n업체 관리에서 보완 후 다시 신청할 수 있어요.');
+  else
+    update app.business_licenses set
+      status = 'approved', reject_reason = null,
+      reviewed_by = app.uid(), reviewed_at = now(), updated_at = now()
+    where id = p_license;
+
+    insert into public.notifications (user_id, notification_type, is_system, title, body)
+    values (v_row.user_id, 'business_approved', true,
+            v_label || ' 인증이 완료되었어요',
+            v_label || ' 인증이 승인되었어요. 해당 업종 기능이 열렸어요.');
+  end if;
+
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'review_business_license', 'user', v_row.user_id,
+          jsonb_build_object('license_id', p_license, 'type', v_row.license_type,
+                             'from', v_row.status, 'to', p_status, 'reason', v_reason));
+end;
+$$;
+
+
+--
 -- Name: admin_revoke_share_link(character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3092,6 +3216,66 @@ begin
 
   insert into public.admin_logs(admin_id, action_type, target_type, target_id, detail)
   values (app.uid(), 'set_user_status', 'user', p_user, jsonb_build_object('status', p_status));
+end;
+$$;
+
+
+--
+-- Name: apply_business_license(text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.apply_business_license(p_type text, p_license_no text, p_document_path text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid  uuid := app.uid();
+  v_type app.biz_license_type;
+  v_no   text := nullif(btrim(coalesce(p_license_no, '')), '');
+  v_path text := nullif(btrim(coalesce(p_document_path, '')), '');
+  v_old  app.business_licenses%rowtype;
+  v_id   uuid;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.business_profiles b
+                 where b.user_id = v_uid and b.status = 'approved') then
+    raise exception 'biz_profile_required' using errcode = 'P0001';
+  end if;
+  begin
+    v_type := p_type::app.biz_license_type;
+  exception when others then
+    raise exception 'invalid_type' using errcode = 'P0001';
+  end;
+  if v_no is null or length(v_no) < 4 or length(v_no) > 40 then
+    raise exception 'invalid_license_no' using errcode = 'P0001';
+  end if;
+  if v_path is null or position(v_uid::text || '/' in v_path) <> 1 then
+    raise exception 'invalid_document_path' using errcode = 'P0001';
+  end if;
+
+  select * into v_old from app.business_licenses
+   where user_id = v_uid and license_type = v_type;
+  if found and v_old.status = 'approved' then
+    raise exception 'already_approved' using errcode = 'P0001';
+  end if;
+
+  delete from app.business_doc_purge_queue where path = v_path;
+  if found and v_old.document_path <> v_path then
+    insert into app.business_doc_purge_queue (path, reason, purge_after)
+    values (v_old.document_path, 'replaced', now() + interval '1 month');
+  end if;
+
+  insert into app.business_licenses (user_id, license_type, license_no, document_path)
+  values (v_uid, v_type, v_no, v_path)
+  on conflict (user_id, license_type) do update
+    set license_no = excluded.license_no,
+        document_path = excluded.document_path,
+        status = 'pending', reject_reason = null,
+        reviewed_by = null, reviewed_at = null, updated_at = now()
+  returning id into v_id;
+  return v_id;
 end;
 $$;
 
@@ -3899,12 +4083,12 @@ $$;
 -- Name: facility_review_by_id(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer)
+CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
   select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no
+         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive
     from (
       select fr.*,
              row_number() over (
@@ -3924,12 +4108,12 @@ $$;
 -- Name: facility_reviews_of(uuid, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFAULT 20, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer)
+CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFAULT 20, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
   select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no
+         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive
     from (
       select fr.*,
              row_number() over (
@@ -4097,6 +4281,22 @@ begin
   select token_version into v_tv from public.users u where u.id = p_user;
   return coalesce(v_tv, 0);
 end $$;
+
+
+--
+-- Name: my_business_licenses(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.my_business_licenses() RETURNS TABLE(id uuid, license_type text, license_no text, status text, reject_reason text, created_at timestamp with time zone, reviewed_at timestamp with time zone)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select l.id, l.license_type::text, l.license_no::text, l.status::text,
+         l.reject_reason, l.created_at, l.reviewed_at
+    from app.business_licenses l
+   where l.user_id = app.uid()
+   order by l.created_at;
+$$;
 
 
 --
@@ -4738,16 +4938,30 @@ begin
       'facility', jsonb_build_object(
         'name', f.name, 'category', f.category, 'address', f.address,
         'phone', f.phone, 'is_open', f.is_open,
-        'avg_rating', f.avg_rating, 'review_count', f.review_count),
+        'avg_rating', f.avg_rating, 'review_count', f.review_count,
+        'photo_url', bp.photo_url,
+        'photo_align_y', coalesce(bp.photo_align_y, 0),
+        'business_hours', bp.business_hours),
       'reviews', coalesce((
-        select jsonb_agg(jsonb_build_object('rating', r.rating, 'content', r.content)
-                         order by r.created_at desc)
-        from (select rating, content, created_at
+        select jsonb_agg(jsonb_build_object(
+                 'rating', r.rating, 'content', r.content,
+                 'has_incentive', r.has_incentive)
+                 order by r.created_at desc)
+        from (select rating, content, has_incentive, created_at
               from public.facility_reviews
               where facility_id = f.id and visibility_status = 'visible'
               order by created_at desc limit 3) r), '[]'::jsonb))
     into v_out
-    from public.facilities f where f.id = v_link.ref_id;
+    from public.facilities f
+    left join lateral (
+      select b.photo_url, b.photo_align_y, b.business_hours
+        from public.business_profiles b
+       where b.status = 'approved'
+         and b.matched_facility_id = any(public.facility_sibling_ids(f.id))
+       order by b.reviewed_at nulls last
+       limit 1
+    ) bp on true
+    where f.id = v_link.ref_id;
     return coalesce(v_out, jsonb_build_object('status', 'not_found'));
   end if;
 
@@ -5163,6 +5377,33 @@ ALTER TABLE app.business_doc_purge_queue ALTER COLUMN id ADD GENERATED ALWAYS AS
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: business_licenses; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.business_licenses (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    license_type app.biz_license_type NOT NULL,
+    license_no character varying(40) NOT NULL,
+    document_path text NOT NULL,
+    status character varying(12) DEFAULT 'pending'::character varying NOT NULL,
+    reject_reason text,
+    reviewed_by uuid,
+    reviewed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT business_licenses_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'approved'::character varying, 'rejected'::character varying])::text[])))
+);
+
+
+--
+-- Name: TABLE business_licenses; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.business_licenses IS '업종별 등록·허가 증빙(0028 §1). approved 행 존재 = 해당 업종 모듈 ON(app.has_license).';
 
 
 --
@@ -5660,9 +5901,17 @@ CREATE TABLE public.facility_reviews (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     photo_paths text[] DEFAULT '{}'::text[] NOT NULL,
     visibility_status character varying(20) DEFAULT 'visible'::character varying NOT NULL,
+    has_incentive boolean DEFAULT false NOT NULL,
     CONSTRAINT facility_reviews_photos_max CHECK (((array_length(photo_paths, 1) IS NULL) OR (array_length(photo_paths, 1) <= 5))),
     CONSTRAINT facility_reviews_rating_check CHECK (((rating >= 1) AND (rating <= 5)))
 );
+
+
+--
+-- Name: COLUMN facility_reviews.has_incentive; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.facility_reviews.has_incentive IS '업체로부터 할인·사은품 등 혜택을 받고 작성 — 표시광고법 표시 의무(0028 §6)';
 
 
 --
@@ -6547,6 +6796,22 @@ ALTER TABLE ONLY app.auth_logs
 
 ALTER TABLE ONLY app.business_doc_purge_queue
     ADD CONSTRAINT business_doc_purge_queue_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: business_licenses business_licenses_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.business_licenses
+    ADD CONSTRAINT business_licenses_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: business_licenses business_licenses_user_id_license_type_key; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.business_licenses
+    ADD CONSTRAINT business_licenses_user_id_license_type_key UNIQUE (user_id, license_type);
 
 
 --
@@ -7605,6 +7870,13 @@ CREATE INDEX users_user_type_idx ON public.users USING btree (user_type);
 
 
 --
+-- Name: business_licenses trg_business_licenses_updated; Type: TRIGGER; Schema: app; Owner: -
+--
+
+CREATE TRIGGER trg_business_licenses_updated BEFORE UPDATE ON app.business_licenses FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
 -- Name: facility_reviews facility_reviews_aggs; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -8107,6 +8379,22 @@ CREATE TRIGGER trg_users_updated BEFORE UPDATE ON public.users FOR EACH ROW EXEC
 
 ALTER TABLE ONLY app.auth_logs
     ADD CONSTRAINT auth_logs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: business_licenses business_licenses_reviewed_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.business_licenses
+    ADD CONSTRAINT business_licenses_reviewed_by_fkey FOREIGN KEY (reviewed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: business_licenses business_licenses_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.business_licenses
+    ADD CONSTRAINT business_licenses_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -9526,12 +9814,12 @@ GRANT ALL ON FUNCTION public._push_pref_allows(p_user uuid, p_type text) TO serv
 
 
 --
--- Name: FUNCTION add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]) TO authenticated;
-GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[]) TO service_role;
+REVOKE ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) TO authenticated;
+GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) TO service_role;
 
 
 --
@@ -9586,6 +9874,15 @@ GRANT ALL ON FUNCTION public.admin_join_inquiry(p_room uuid) TO service_role;
 REVOKE ALL ON FUNCTION public.admin_list_business_applications(p_status text, p_track text, p_auto_only boolean, p_limit integer, p_offset integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.admin_list_business_applications(p_status text, p_track text, p_auto_only boolean, p_limit integer, p_offset integer) TO authenticated;
 GRANT ALL ON FUNCTION public.admin_list_business_applications(p_status text, p_track text, p_auto_only boolean, p_limit integer, p_offset integer) TO service_role;
+
+
+--
+-- Name: FUNCTION admin_list_business_licenses(p_status text, p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_list_business_licenses(p_status text, p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_list_business_licenses(p_status text, p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_list_business_licenses(p_status text, p_limit integer, p_offset integer) TO service_role;
 
 
 --
@@ -9670,6 +9967,15 @@ GRANT ALL ON FUNCTION public.admin_photo_verification_failures(p_limit integer, 
 
 
 --
+-- Name: FUNCTION admin_review_business_license(p_license uuid, p_status text, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_review_business_license(p_license uuid, p_status text, p_reason text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_review_business_license(p_license uuid, p_status text, p_reason text) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_review_business_license(p_license uuid, p_status text, p_reason text) TO service_role;
+
+
+--
 -- Name: FUNCTION admin_revoke_share_link(p_token character varying); Type: ACL; Schema: public; Owner: -
 --
 
@@ -9748,6 +10054,15 @@ GRANT ALL ON FUNCTION public.admin_set_report_status(p_report uuid, p_status tex
 REVOKE ALL ON FUNCTION public.admin_set_user_status(p_user uuid, p_status text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.admin_set_user_status(p_user uuid, p_status text) TO authenticated;
 GRANT ALL ON FUNCTION public.admin_set_user_status(p_user uuid, p_status text) TO service_role;
+
+
+--
+-- Name: FUNCTION apply_business_license(p_type text, p_license_no text, p_document_path text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.apply_business_license(p_type text, p_license_no text, p_document_path text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.apply_business_license(p_type text, p_license_no text, p_document_path text) TO authenticated;
+GRANT ALL ON FUNCTION public.apply_business_license(p_type text, p_license_no text, p_document_path text) TO service_role;
 
 
 --
@@ -9973,6 +10288,15 @@ GRANT ALL ON FUNCTION public.leave_chat_room(p_room uuid) TO service_role;
 
 REVOKE ALL ON FUNCTION public.login_issue_refresh(p_user uuid, p_token_hash text, p_user_agent text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.login_issue_refresh(p_user uuid, p_token_hash text, p_user_agent text) TO service_role;
+
+
+--
+-- Name: FUNCTION my_business_licenses(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.my_business_licenses() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.my_business_licenses() TO authenticated;
+GRANT ALL ON FUNCTION public.my_business_licenses() TO service_role;
 
 
 --
