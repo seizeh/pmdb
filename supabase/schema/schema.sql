@@ -2321,6 +2321,47 @@ end $$;
 
 
 --
+-- Name: admin_create_facility_share_link(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_create_facility_share_link(p_facility uuid, p_days integer DEFAULT 365) RETURNS TABLE(token character varying, expires_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+declare
+  v_token varchar(32);
+  v_exp   timestamptz;
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  if p_days < 1 or p_days > 3650 then
+    raise exception 'days 1..3650';
+  end if;
+  if not exists (select 1 from public.facilities f where f.id = p_facility) then
+    raise exception 'facility not found';
+  end if;
+
+  select l.token, l.expires_at into v_token, v_exp
+  from app.share_links l
+  where l.kind = 'facility_preview' and l.ref_id = p_facility
+    and l.revoked_at is null and l.expires_at > now()
+  order by l.created_at desc limit 1;
+  if v_token is not null then
+    return query select v_token, v_exp;
+    return;
+  end if;
+
+  v_token := encode(extensions.gen_random_bytes(16), 'hex');
+  v_exp   := now() + make_interval(days => p_days);
+  insert into app.share_links (token, kind, ref_id, created_by, expires_at)
+  values (v_token, 'facility_preview', p_facility, app.uid(), v_exp);
+  return query select v_token, v_exp;
+end;
+$$;
+
+
+--
 -- Name: admin_dashboard_stats(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2742,6 +2783,25 @@ begin
   order by pv.created_at desc
   limit greatest(1, least(coalesce(p_limit, 50), 200))
   offset greatest(0, coalesce(p_offset, 0));
+end;
+$$;
+
+
+--
+-- Name: admin_revoke_share_link(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_revoke_share_link(p_token character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  update app.share_links set revoked_at = now()
+  where token = p_token and revoked_at is null;
+  return found;
 end;
 $$;
 
@@ -3391,6 +3451,22 @@ begin
 
   return v_tv;
 end;
+$$;
+
+
+--
+-- Name: check_nickname_available(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.check_nickname_available(p_nickname text) RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+  select not exists (
+    select 1 from public.users
+    where lower(nickname) = lower(trim(p_nickname))
+      and id is distinct from app.uid()
+  );
 $$;
 
 
@@ -4595,6 +4671,72 @@ $$;
 
 
 --
+-- Name: share_view_click(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.share_view_click(p_token character varying) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+begin
+  if not exists (select 1 from app.share_links
+                 where token = p_token and revoked_at is null and expires_at > now()) then
+    return false;
+  end if;
+  insert into app.funnel_events (event, token) values ('store_click', p_token);
+  return true;
+end;
+$$;
+
+
+--
+-- Name: share_view_load(character varying); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.share_view_load(p_token character varying) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+declare
+  v_link app.share_links%rowtype;
+  v_out  jsonb;
+begin
+  select * into v_link from app.share_links where token = p_token;
+  if not found or v_link.revoked_at is not null then
+    return jsonb_build_object('status', 'not_found');
+  end if;
+  if v_link.expires_at < now() then
+    return jsonb_build_object('status', 'expired');
+  end if;
+
+  update app.share_links set view_count = view_count + 1 where token = p_token;
+  insert into app.funnel_events (event, token) values ('share_view', p_token);
+
+  if v_link.kind = 'facility_preview' then
+    select jsonb_build_object(
+      'status', 'ok', 'kind', v_link.kind,
+      'facility', jsonb_build_object(
+        'name', f.name, 'category', f.category, 'address', f.address,
+        'phone', f.phone, 'is_open', f.is_open,
+        'avg_rating', f.avg_rating, 'review_count', f.review_count),
+      'reviews', coalesce((
+        select jsonb_agg(jsonb_build_object('rating', r.rating, 'content', r.content)
+                         order by r.created_at desc)
+        from (select rating, content, created_at
+              from public.facility_reviews
+              where facility_id = f.id and visibility_status = 'visible'
+              order by created_at desc limit 3) r), '[]'::jsonb))
+    into v_out
+    from public.facilities f where f.id = v_link.ref_id;
+    return coalesce(v_out, jsonb_build_object('status', 'not_found'));
+  end if;
+
+  return jsonb_build_object('status', 'ok', 'kind', v_link.kind);
+end;
+$$;
+
+
+--
 -- Name: signup_user(text, text, text, text, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5016,6 +5158,41 @@ CREATE TABLE app.business_purge_config (
 
 
 --
+-- Name: funnel_events; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.funnel_events (
+    id bigint NOT NULL,
+    event character varying(30) NOT NULL,
+    token character varying(32),
+    user_id uuid,
+    props jsonb DEFAULT '{}'::jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE funnel_events; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.funnel_events IS '오프라인 제휴 파일럿 퍼널 계측(0028 §7). 원시 이벤트 보존 1년.';
+
+
+--
+-- Name: funnel_events_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.funnel_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.funnel_events_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: location_usage_logs; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -5074,6 +5251,30 @@ CREATE TABLE app.refresh_tokens (
     replaced_by uuid,
     user_agent text
 );
+
+
+--
+-- Name: share_links; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.share_links (
+    token character varying(32) NOT NULL,
+    kind character varying(20) NOT NULL,
+    ref_id uuid NOT NULL,
+    created_by uuid NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    view_count integer DEFAULT 0 NOT NULL,
+    revoked_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying])::text[])))
+);
+
+
+--
+-- Name: TABLE share_links; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.share_links IS '설치 전 가치 전달용 공유 링크(0028 §3). share-view Edge Function 이 서빙.';
 
 
 --
@@ -6337,6 +6538,14 @@ ALTER TABLE ONLY app.business_purge_config
 
 
 --
+-- Name: funnel_events funnel_events_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.funnel_events
+    ADD CONSTRAINT funnel_events_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: location_usage_logs location_usage_logs_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -6374,6 +6583,14 @@ ALTER TABLE ONLY app.refresh_tokens
 
 ALTER TABLE ONLY app.refresh_tokens
     ADD CONSTRAINT refresh_tokens_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: share_links share_links_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.share_links
+    ADD CONSTRAINT share_links_pkey PRIMARY KEY (token);
 
 
 --
@@ -6801,6 +7018,13 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: funnel_events_token_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX funnel_events_token_idx ON app.funnel_events USING btree (token, event);
+
+
+--
 -- Name: idx_auth_logs_created; Type: INDEX; Schema: app; Owner: -
 --
 
@@ -6840,6 +7064,13 @@ CREATE INDEX refresh_tokens_family_idx ON app.refresh_tokens USING btree (family
 --
 
 CREATE INDEX refresh_tokens_user_idx ON app.refresh_tokens USING btree (user_id);
+
+
+--
+-- Name: share_links_ref_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX share_links_ref_idx ON app.share_links USING btree (kind, ref_id);
 
 
 --
@@ -7865,6 +8096,14 @@ ALTER TABLE ONLY app.refresh_tokens
 
 ALTER TABLE ONLY app.refresh_tokens
     ADD CONSTRAINT refresh_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: share_links share_links_created_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.share_links
+    ADD CONSTRAINT share_links_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -9278,6 +9517,15 @@ GRANT ALL ON FUNCTION public.admin_broadcast_system_notice(p_title text, p_body 
 
 
 --
+-- Name: FUNCTION admin_create_facility_share_link(p_facility uuid, p_days integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_create_facility_share_link(p_facility uuid, p_days integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_create_facility_share_link(p_facility uuid, p_days integer) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_create_facility_share_link(p_facility uuid, p_days integer) TO service_role;
+
+
+--
 -- Name: FUNCTION admin_dashboard_stats(); Type: ACL; Schema: public; Owner: -
 --
 
@@ -9392,6 +9640,15 @@ GRANT ALL ON FUNCTION public.admin_ops_metrics() TO service_role;
 REVOKE ALL ON FUNCTION public.admin_photo_verification_failures(p_limit integer, p_offset integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.admin_photo_verification_failures(p_limit integer, p_offset integer) TO authenticated;
 GRANT ALL ON FUNCTION public.admin_photo_verification_failures(p_limit integer, p_offset integer) TO service_role;
+
+
+--
+-- Name: FUNCTION admin_revoke_share_link(p_token character varying); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_revoke_share_link(p_token character varying) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_revoke_share_link(p_token character varying) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_revoke_share_link(p_token character varying) TO service_role;
 
 
 --
@@ -9513,6 +9770,15 @@ GRANT ALL ON FUNCTION public.can_manage_post_applicants(p_post uuid) TO service_
 
 REVOKE ALL ON FUNCTION public.change_password_and_rotate(p_user uuid, p_current_hash text, p_new_hash text, p_tv integer, p_new_token_hash text, p_user_agent text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.change_password_and_rotate(p_user uuid, p_current_hash text, p_new_hash text, p_tv integer, p_new_token_hash text, p_user_agent text) TO service_role;
+
+
+--
+-- Name: FUNCTION check_nickname_available(p_nickname text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.check_nickname_available(p_nickname text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.check_nickname_available(p_nickname text) TO authenticated;
+GRANT ALL ON FUNCTION public.check_nickname_available(p_nickname text) TO service_role;
 
 
 --
@@ -9865,6 +10131,22 @@ GRANT ALL ON FUNCTION public.set_my_business_photo(p_url text, p_align_y real) T
 
 REVOKE ALL ON FUNCTION public.set_pet_ai_reference(p_pet uuid, p_verification uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.set_pet_ai_reference(p_pet uuid, p_verification uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION share_view_click(p_token character varying); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.share_view_click(p_token character varying) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.share_view_click(p_token character varying) TO service_role;
+
+
+--
+-- Name: FUNCTION share_view_load(p_token character varying); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.share_view_load(p_token character varying) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.share_view_load(p_token character varying) TO service_role;
 
 
 --
