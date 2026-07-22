@@ -1,0 +1,12 @@
+# pawmate-share-proxy — 공유 뷰어 도메인 프록시 (0028 §3)
+# 배포: workers/share-proxy 에서 `npx wrangler deploy`
+# custom_domain 라우트는 Cloudflare 가 DNS 레코드를 자동 생성한다.
+name = "pawmate-share-proxy"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+routes = [
+  { pattern = "go.pawmate.kr", custom_domain = true },
+  { pattern = "pawmate.kr", custom_domain = true },
+  { pattern = "www.pawmate.kr", custom_domain = true },
+]
