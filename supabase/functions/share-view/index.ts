@@ -11,6 +11,9 @@
 //   service_role 전용 public RPC(share_view_load/click)로만 — app 스키마는
 //   PostgREST 미노출이라 직접 못 읽고, RPC 가 검증·데이터·계측을 원자 처리한다.
 //   개인 식별 없음(쿠키 미사용, IP·UA 미저장).
+//
+//   외부 노출 주소는 반드시 go.pawmate.kr(Worker 프록시) 경유 — supabase.co
+//   공유 도메인은 게이트웨이가 HTML 을 차단한다(0028 §3.1 4차 개정).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -63,6 +66,8 @@ function page(title: string, ogDesc: string, inner: string): string {
   .wrap { max-width:480px; margin:0 auto; padding:24px 20px 40px; }
   .brand { font-size:13px; font-weight:800; color:var(--gold); letter-spacing:.5px; margin-bottom:16px; }
   .card { background:var(--card); border-radius:20px; padding:24px 20px; box-shadow:0 2px 12px rgba(90,78,58,.08); }
+  .hero { width:calc(100% + 40px); margin:-24px -20px 18px; height:200px; object-fit:cover;
+          border-radius:20px 20px 0 0; display:block; }
   h1 { font-size:22px; font-weight:800; line-height:1.3; }
   .tags { margin:10px 0 4px; }
   .tag { display:inline-block; font-size:12px; font-weight:700; color:var(--gold);
@@ -158,8 +163,18 @@ Deno.serve(async (req) => {
         <p>${esc(String(r.content ?? "")).slice(0, 400)}</p>
       </div>`).join("");
 
+  // 인증 업체 대표 사진 히어로 — 지도 상세와 동일한 세로 초점(alignY -1~1 → 0~100%).
+  // 콜드스타트(후기 0개) 매장도 사진 한 장으로 명함 이상이 되게 (0028 §3).
+  const photoUrl = fac.photo_url ? String(fac.photo_url) : null;
+  const alignPct = Math.round(((Number(fac.photo_align_y ?? 0) + 1) / 2) * 100);
+  const heroHtml = photoUrl
+    ? `<img class="hero" src="${esc(photoUrl)}" alt="" style="object-position:center ${alignPct}%">`
+    : "";
+  const hours = fac.business_hours ? String(fac.business_hours) : null;
+
   const inner = `
   <div class="card">
+    ${heroHtml}
     <h1>${esc(name)}</h1>
     <div class="tags"><span class="tag">${esc(catLabel)}</span>${fac.is_open === false ? '<span class="tag">휴업</span>' : ""}</div>
     ${rating > 0
@@ -167,6 +182,7 @@ Deno.serve(async (req) => {
       : ""}
     <div class="meta">
       ${fac.address ? `📍 ${esc(String(fac.address))}<br>` : ""}
+      ${hours ? `🕐 ${esc(hours)}<br>` : ""}
       ${fac.phone ? `📞 ${esc(String(fac.phone))}` : ""}
     </div>
     <div class="section">방문 후기</div>
