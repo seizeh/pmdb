@@ -11,6 +11,9 @@
 //   service_role 전용 public RPC(share_view_load/click)로만 — app 스키마는
 //   PostgREST 미노출이라 직접 못 읽고, RPC 가 검증·데이터·계측을 원자 처리한다.
 //   개인 식별 없음(쿠키 미사용, IP·UA 미저장).
+//
+//   외부 노출 주소는 반드시 go.pawmate.kr(Worker 프록시) 경유 — supabase.co
+//   공유 도메인은 게이트웨이가 HTML 을 차단한다(0028 §3.1 4차 개정).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -63,6 +66,8 @@ function page(title: string, ogDesc: string, inner: string): string {
   .wrap { max-width:480px; margin:0 auto; padding:24px 20px 40px; }
   .brand { font-size:13px; font-weight:800; color:var(--gold); letter-spacing:.5px; margin-bottom:16px; }
   .card { background:var(--card); border-radius:20px; padding:24px 20px; box-shadow:0 2px 12px rgba(90,78,58,.08); }
+  .hero { width:calc(100% + 40px); margin:-24px -20px 18px; height:200px; object-fit:cover;
+          border-radius:20px 20px 0 0; display:block; }
   h1 { font-size:22px; font-weight:800; line-height:1.3; }
   .tags { margin:10px 0 4px; }
   .tag { display:inline-block; font-size:12px; font-weight:700; color:var(--gold);
@@ -72,6 +77,8 @@ function page(title: string, ogDesc: string, inner: string): string {
   .meta { font-size:14px; color:var(--muted); line-height:1.7; margin-top:10px; }
   .review { border-top:1px solid #efe9de; padding:14px 0; }
   .review .stars { color:var(--gold); font-size:13px; font-weight:700; }
+  .incent { font-size:11px; font-weight:600; color:var(--muted); border:1px solid #e2dccd;
+            border-radius:999px; padding:2px 8px; margin-left:8px; vertical-align:1px; }
   .review p { font-size:14px; line-height:1.6; margin-top:6px; word-break:break-all; }
   .section { font-size:14px; font-weight:800; margin:24px 0 8px; }
   .cta { display:block; text-align:center; background:var(--brown); color:#fff; text-decoration:none;
@@ -144,17 +151,30 @@ Deno.serve(async (req) => {
     ? `★${rating.toFixed(1)} · 후기 ${reviewCount}개 · ${catLabel}`
     : `우리 동네 ${catLabel} — PawMate 에서 확인하세요`;
 
-  const reviews: Array<{ rating: number; content: string | null }> = data.reviews ?? [];
+  const reviews: Array<{ rating: number; content: string | null; has_incentive?: boolean }> =
+    data.reviews ?? [];
   const reviewHtml = reviews.length === 0
     ? `<p class="meta">아직 후기가 없어요. 첫 후기의 주인공이 되어 주세요!</p>`
     : reviews.map((r) => `
       <div class="review">
-        <span class="stars">${starBar(Number(r.rating))}</span>
+        <span class="stars">${starBar(Number(r.rating))}</span>${
+          r.has_incentive ? '<span class="incent">업체 혜택 받고 작성</span>' : ""
+        }
         <p>${esc(String(r.content ?? "")).slice(0, 400)}</p>
       </div>`).join("");
 
+  // 인증 업체 대표 사진 히어로 — 지도 상세와 동일한 세로 초점(alignY -1~1 → 0~100%).
+  // 콜드스타트(후기 0개) 매장도 사진 한 장으로 명함 이상이 되게 (0028 §3).
+  const photoUrl = fac.photo_url ? String(fac.photo_url) : null;
+  const alignPct = Math.round(((Number(fac.photo_align_y ?? 0) + 1) / 2) * 100);
+  const heroHtml = photoUrl
+    ? `<img class="hero" src="${esc(photoUrl)}" alt="" style="object-position:center ${alignPct}%">`
+    : "";
+  const hours = fac.business_hours ? String(fac.business_hours) : null;
+
   const inner = `
   <div class="card">
+    ${heroHtml}
     <h1>${esc(name)}</h1>
     <div class="tags"><span class="tag">${esc(catLabel)}</span>${fac.is_open === false ? '<span class="tag">휴업</span>' : ""}</div>
     ${rating > 0
@@ -162,6 +182,7 @@ Deno.serve(async (req) => {
       : ""}
     <div class="meta">
       ${fac.address ? `📍 ${esc(String(fac.address))}<br>` : ""}
+      ${hours ? `🕐 ${esc(hours)}<br>` : ""}
       ${fac.phone ? `📞 ${esc(String(fac.phone))}` : ""}
     </div>
     <div class="section">방문 후기</div>
