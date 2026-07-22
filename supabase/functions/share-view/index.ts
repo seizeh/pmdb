@@ -112,8 +112,13 @@ function page(title: string, ogDesc: string, inner: string): string {
             border-radius:100px; padding:2px 8px; margin-left:8px; vertical-align:1px; }
   .review p { font-size:14px; line-height:1.6; margin-top:6px; color:var(--text);
               word-break:break-all; }
-  .rphotos { display:flex; gap:6px; margin-top:10px; }
-  .rphotos img { width:72px; height:72px; object-fit:cover; border-radius:10px; }
+  /* 후기 사진 — 주인공 배치: 1장은 카드 폭 전체(16:10), 2장은 반반 정방형 */
+  .rphotos { display:grid; gap:6px; margin:10px 0 2px; }
+  .rphotos.one { grid-template-columns:1fr; }
+  .rphotos.one img { width:100%; aspect-ratio:16/10; max-height:260px;
+                     object-fit:cover; border-radius:12px; }
+  .rphotos.two { grid-template-columns:1fr 1fr; }
+  .rphotos.two img { width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:12px; }
 
   /* 더 보기 줄 — 숨긴 콘텐츠가 있음을 정직하게 + 앱 전환 유인 */
   .more { display:block; text-align:center; font-size:13.5px; font-weight:700;
@@ -239,17 +244,20 @@ Deno.serve(async (req) => {
   const reviewHtml = reviews.length === 0
     ? `<div class="card"><p style="font-size:14px;color:var(--text2)">아직 후기가 없어요. 첫 후기의 주인공이 되어 주세요!</p></div>`
     : reviews.map((r) => {
-      // 후기 사진 썸네일(최대 2장, 서버에서 제한) — 사진 후기가 가장 설득력 있다.
-      const photos = (r.photo_urls ?? [])
-        .map((u) => `<img src="${esc(String(u))}" alt="" loading="lazy">`)
-        .join("");
+      // 후기 사진(최대 2장, 서버에서 제한) — 주인공 배치: 별점 아래·본문 위에 크게.
+      const urls = r.photo_urls ?? [];
+      const photos = urls.length === 0 ? "" : `<div class="rphotos ${
+        urls.length === 1 ? "one" : "two"
+      }">${
+        urls.map((u) => `<img src="${esc(String(u))}" alt="" loading="lazy">`).join("")
+      }</div>`;
       return `
       <div class="card review">
         <span class="stars">${starBar(Number(r.rating))}</span>${
         r.has_incentive ? '<span class="incent">업체 혜택 받고 작성</span>' : ""
       }
+        ${photos}
         <p>${esc(String(r.content ?? "")).slice(0, 400)}</p>
-        ${photos ? `<div class="rphotos">${photos}</div>` : ""}
       </div>`;
     }).join("");
 
