@@ -542,6 +542,25 @@ end $$;
 
 
 --
+-- Name: phone_hmac(text); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.phone_hmac(p_phone text) RETURNS bytea
+    LANGUAGE plpgsql STABLE
+    SET search_path TO ''
+    AS $$
+declare
+  v_digits text := regexp_replace(coalesce(p_phone, ''), '\D', '', 'g');
+  v_key text;
+begin
+  if length(v_digits) not between 10 and 11 then return null; end if;
+  select hmac_key into v_key from app.care_config;
+  return extensions.hmac(v_digits, v_key, 'sha256');
+end;
+$$;
+
+
+--
 -- Name: posts_set_authored_as(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -3689,6 +3708,106 @@ $$;
 
 
 --
+-- Name: claim_care_reports(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.claim_care_reports() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+  v_hmac bytea;
+  v_cnt integer := 0;
+  r record;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  select app.phone_hmac(u.phone) into v_hmac from public.users u where u.id = v_uid;
+  if v_hmac is null then return 0; end if;
+
+  for r in
+    update app.care_reports cr
+       set claimed_by = v_uid, claimed_at = now(), recipient_phone_hmac = null
+     where cr.recipient_phone_hmac = v_hmac
+       and cr.claimed_by is null
+       and cr.business_id <> v_uid
+    returning cr.id, cr.pet_label
+  loop
+    v_cnt := v_cnt + 1;
+    insert into public.notifications (user_id, notification_type, is_system, title, body)
+    values (v_uid, 'system_notice', true,
+            r.pet_label || ' 케어 기록이 도착했어요',
+            '업체가 보내준 ' || r.pet_label || ' 사진을 앱에서 확인해 보세요.');
+    insert into app.funnel_events (event, token, user_id)
+    select 'claim', l.token, v_uid
+      from app.share_links l
+     where l.kind = 'care_report' and l.ref_id = r.id;
+  end loop;
+  return v_cnt;
+end;
+$$;
+
+
+--
+-- Name: create_care_report(text, jsonb, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text DEFAULT NULL::text, p_recipient_phone text DEFAULT NULL::text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+  v_label text := nullif(btrim(coalesce(p_pet_label, '')), '');
+  v_hmac bytea;
+  v_report uuid;
+  v_token varchar(32);
+  v_exp timestamptz;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not app.has_license('grooming') then
+    raise exception 'license_required' using errcode = 'P0001';
+  end if;
+  if v_label is null or length(v_label) > 50 then
+    raise exception 'invalid_pet_label' using errcode = 'P0001';
+  end if;
+  if jsonb_typeof(p_photos) is distinct from 'array'
+     or jsonb_array_length(p_photos) not between 1 and 4 then
+    raise exception 'invalid_photos' using errcode = 'P0001';
+  end if;
+  if p_recipient_phone is not null and btrim(p_recipient_phone) <> '' then
+    v_hmac := app.phone_hmac(p_recipient_phone);
+    if v_hmac is null then
+      raise exception 'invalid_phone' using errcode = 'P0001';
+    end if;
+  end if;
+
+  insert into app.care_reports
+    (business_id, kind, pet_label, photos, note,
+     recipient_phone_hmac, recipient_key_version)
+  values
+    (v_uid, 'grooming', v_label, p_photos, nullif(btrim(coalesce(p_note, '')), ''),
+     v_hmac, (select key_version from app.care_config))
+  returning id into v_report;
+
+  v_token := encode(extensions.gen_random_bytes(16), 'hex');
+  v_exp := now() + interval '30 days';
+  insert into app.share_links (token, kind, ref_id, created_by, expires_at)
+  values (v_token, 'care_report', v_report, v_uid, v_exp);
+
+  insert into app.funnel_events (event, token, user_id)
+  values ('report_issued', v_token, v_uid);
+
+  return jsonb_build_object('report_id', v_report, 'token', v_token, 'expires_at', v_exp);
+end;
+$$;
+
+
+--
 -- Name: create_post_verified(character varying, character varying, text, timestamp with time zone, uuid[], text, character varying, integer, uuid, double precision, double precision, character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4296,6 +4415,43 @@ CREATE FUNCTION public.my_business_licenses() RETURNS TABLE(id uuid, license_typ
     from app.business_licenses l
    where l.user_id = app.uid()
    order by l.created_at;
+$$;
+
+
+--
+-- Name: my_care_reports(integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.my_care_reports(p_limit integer DEFAULT 30, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, pet_label text, photos jsonb, note text, created_at timestamp with time zone, claimed_nickname text, token text, expires_at timestamp with time zone, view_count integer)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select r.id, r.pet_label::text, r.photos, r.note, r.created_at,
+         pr.nickname::text, l.token::text, l.expires_at, l.view_count
+    from app.care_reports r
+    left join app.share_links l on l.kind = 'care_report' and l.ref_id = r.id
+    left join public.public_profiles pr on pr.id = r.claimed_by
+   where r.business_id = app.uid()
+   order by r.created_at desc
+   limit least(coalesce(p_limit, 30), 100) offset coalesce(p_offset, 0);
+$$;
+
+
+--
+-- Name: my_received_care_reports(integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.my_received_care_reports(p_limit integer DEFAULT 30, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, kind text, pet_label text, photos jsonb, note text, created_at timestamp with time zone, business_name text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select r.id, r.kind::text, r.pet_label::text, r.photos, r.note, r.created_at,
+         coalesce(b.storefront_name, b.business_name)::text
+    from app.care_reports r
+    left join public.business_profiles b on b.user_id = r.business_id
+   where r.claimed_by = app.uid()
+   order by r.created_at desc
+   limit least(coalesce(p_limit, 30), 100) offset coalesce(p_offset, 0);
 $$;
 
 
@@ -4972,6 +5128,20 @@ begin
     return coalesce(v_out, jsonb_build_object('status', 'not_found'));
   end if;
 
+  if v_link.kind = 'care_report' then
+    select jsonb_build_object(
+      'status', 'ok', 'kind', v_link.kind,
+      'report', jsonb_build_object(
+        'pet_label', r.pet_label, 'photos', r.photos, 'note', r.note,
+        'kind', r.kind, 'created_at', r.created_at,
+        'business_name', coalesce(b.storefront_name, b.business_name)))
+    into v_out
+    from app.care_reports r
+    left join public.business_profiles b on b.user_id = r.business_id
+    where r.id = v_link.ref_id;
+    return coalesce(v_out, jsonb_build_object('status', 'not_found'));
+  end if;
+
   return jsonb_build_object('status', 'ok', 'kind', v_link.kind);
 end;
 $$;
@@ -5423,6 +5593,46 @@ CREATE TABLE app.business_purge_config (
     trigger_secret text DEFAULT encode(extensions.gen_random_bytes(24), 'hex'::text) NOT NULL,
     CONSTRAINT business_purge_config_singleton CHECK (id)
 );
+
+
+--
+-- Name: care_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.care_config (
+    id boolean DEFAULT true NOT NULL,
+    hmac_key text DEFAULT encode(extensions.gen_random_bytes(32), 'hex'::text) NOT NULL,
+    key_version smallint DEFAULT 1 NOT NULL,
+    CONSTRAINT care_config_singleton CHECK (id)
+);
+
+
+--
+-- Name: care_reports; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.care_reports (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    business_id uuid NOT NULL,
+    kind character varying(12) NOT NULL,
+    pet_label character varying(50) NOT NULL,
+    photos jsonb DEFAULT '[]'::jsonb NOT NULL,
+    body jsonb DEFAULT '{}'::jsonb NOT NULL,
+    note text,
+    recipient_phone_hmac bytea,
+    recipient_key_version smallint DEFAULT 1 NOT NULL,
+    claimed_by uuid,
+    claimed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT care_reports_kind_check CHECK (((kind)::text = ANY ((ARRAY['grooming'::character varying, 'boarding'::character varying])::text[])))
+);
+
+
+--
+-- Name: TABLE care_reports; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.care_reports IS '업체→보호자 케어 리포트(0028 §4 — 미용 전후 사진·P2 알림장 공용 원형).';
 
 
 --
@@ -6830,6 +7040,22 @@ ALTER TABLE ONLY app.business_purge_config
 
 
 --
+-- Name: care_config care_config_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_config
+    ADD CONSTRAINT care_config_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: care_reports care_reports_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_reports
+    ADD CONSTRAINT care_reports_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: funnel_events funnel_events_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -7307,6 +7533,27 @@ ALTER TABLE ONLY public.user_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: care_reports_business_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_reports_business_idx ON app.care_reports USING btree (business_id, created_at DESC);
+
+
+--
+-- Name: care_reports_claimed_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_reports_claimed_idx ON app.care_reports USING btree (claimed_by, created_at DESC);
+
+
+--
+-- Name: care_reports_phone_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_reports_phone_idx ON app.care_reports USING btree (recipient_phone_hmac) WHERE ((claimed_by IS NULL) AND (recipient_phone_hmac IS NOT NULL));
 
 
 --
@@ -8405,6 +8652,22 @@ ALTER TABLE ONLY app.business_licenses
 
 
 --
+-- Name: care_reports care_reports_business_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_reports
+    ADD CONSTRAINT care_reports_business_id_fkey FOREIGN KEY (business_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: care_reports care_reports_claimed_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_reports
+    ADD CONSTRAINT care_reports_claimed_by_fkey FOREIGN KEY (claimed_by) REFERENCES public.users(id);
+
+
+--
 -- Name: refresh_tokens refresh_tokens_replaced_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -8925,6 +9188,12 @@ ALTER TABLE app.business_doc_purge_queue ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.business_purge_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: care_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.care_config ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: location_usage_logs; Type: ROW SECURITY; Schema: app; Owner: -
@@ -10141,6 +10410,24 @@ GRANT ALL ON FUNCTION public.check_username_available(p_username text) TO servic
 
 
 --
+-- Name: FUNCTION claim_care_reports(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.claim_care_reports() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.claim_care_reports() TO authenticated;
+GRANT ALL ON FUNCTION public.claim_care_reports() TO service_role;
+
+
+--
+-- Name: FUNCTION create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text) TO authenticated;
+GRANT ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text) TO service_role;
+
+
+--
 -- Name: FUNCTION create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying); Type: ACL; Schema: public; Owner: -
 --
 
@@ -10304,6 +10591,24 @@ GRANT ALL ON FUNCTION public.login_issue_refresh(p_user uuid, p_token_hash text,
 REVOKE ALL ON FUNCTION public.my_business_licenses() FROM PUBLIC;
 GRANT ALL ON FUNCTION public.my_business_licenses() TO authenticated;
 GRANT ALL ON FUNCTION public.my_business_licenses() TO service_role;
+
+
+--
+-- Name: FUNCTION my_care_reports(p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.my_care_reports(p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.my_care_reports(p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.my_care_reports(p_limit integer, p_offset integer) TO service_role;
+
+
+--
+-- Name: FUNCTION my_received_care_reports(p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.my_received_care_reports(p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.my_received_care_reports(p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.my_received_care_reports(p_limit integer, p_offset integer) TO service_role;
 
 
 --
