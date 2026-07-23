@@ -23,7 +23,7 @@ for f in supabase/tests/*_test.sql; do
     continue
   fi
   echo "$out"
-  if grep -q '^not ok' <<<"$out"; then
+  if grep -qE '^[[:space:]]*not ok' <<<"$out"; then
     echo "-- 단언 실패: $f"
     fail=1
   fi

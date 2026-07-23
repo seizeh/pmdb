@@ -35,7 +35,9 @@ select is(
   '공유 링크 생성'
 );
 select is(
-  (select count(*)::int from app.funnel_events where event = 'report_issued'),
+  (select count(*)::int from app.funnel_events
+    where event = 'report_issued'
+      and user_id = (select id from seed where k='bizowner')),
   1,
   '발행 퍼널 이벤트 기록'
 );
