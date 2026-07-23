@@ -2,7 +2,7 @@
 begin;
 set local search_path = public, app, extensions;
 \ir helpers/seed.sql
-select plan(9);
+select plan(11);
 
 -- 추가 시드: 관리자(심사자).
 create temp table t10 (k text primary key, id uuid not null);
@@ -100,6 +100,34 @@ select is(
       and l.license_type = 'boarding'),
   'pending:0',
   '재신청 시 pending 복귀 + 파기 큐 회수'
+);
+
+-- ⑧ 업체 등록과 동시 신청 — pending 업체도 신청 가능(등록 폼 동시 제출).
+insert into public.business_profiles
+  (user_id, business_reg_no, declared_category, business_name,
+   business_address, contact_email, license_image_path, status)
+select id, '9999999999', 'grooming', '동시신청테스트',
+       '서울 어딘가 1', 'p@test.co', 'x/p.png', 'pending'
+  from seed where k = 'friend';
+select set_config('request.jwt.claims',
+  json_build_object('sub', (select id from seed where k='friend'), 'tv', 0)::text, true);
+select lives_ok(
+  $$select public.apply_business_license('grooming', 'C-9999',
+      (select id::text || '/licenses/c.png' from seed where k='friend'))$$,
+  'pending 업체의 동시 신청 허용'
+);
+
+-- ⑨ 단, 업종 '승인'은 업체 인증 승인이 선행돼야 한다(순서 보장).
+select set_config('request.jwt.claims',
+  json_build_object('sub', (select id from t10 where k='admin'), 'tv', 0)::text, true);
+select throws_like(
+  $$select public.admin_review_business_license(
+      (select l.id from app.business_licenses l
+        where l.user_id = (select id from seed where k='friend')
+          and l.license_type = 'grooming'),
+      'approved')$$,
+  '%business_not_approved%',
+  '업체 미승인 상태의 업종 승인 차단'
 );
 
 select * from finish();
