@@ -2907,6 +2907,12 @@ begin
   if v_row.status = p_status then
     raise exception 'no_change' using errcode = 'P0001';
   end if;
+  if p_status = 'approved' and not exists (
+    select 1 from public.business_profiles b
+    where b.user_id = v_row.user_id and b.status = 'approved'
+  ) then
+    raise exception 'business_not_approved' using errcode = 'P0001';
+  end if;
 
   v_label := case v_row.license_type
     when 'grooming' then '동물미용업' when 'boarding' then '동물위탁관리업'
@@ -3259,7 +3265,7 @@ begin
     raise exception 'auth required' using errcode = '42501';
   end if;
   if not exists (select 1 from public.business_profiles b
-                 where b.user_id = v_uid and b.status = 'approved') then
+                 where b.user_id = v_uid and b.status in ('pending', 'approved')) then
     raise exception 'biz_profile_required' using errcode = 'P0001';
   end if;
   begin
