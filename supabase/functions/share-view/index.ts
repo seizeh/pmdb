@@ -117,7 +117,7 @@ function page(title: string, ogDesc: string, inner: string): string {
   .rgrid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:10px 20px 0; }
   .rtile { position:relative; aspect-ratio:1/1; border-radius:14px; overflow:hidden;
            border:.5px solid var(--border); background:var(--surface); }
-  .rtile > img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .rtile > img, .rtile > video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
   .rtile .tscrim { position:absolute; left:0; right:0; bottom:0; height:56px;
     background:linear-gradient(transparent, rgba(0,0,0,.4)); }
   /* 사진 없는 후기 — 앱 블롭 배경의 정적 재현(프라이머리 톤 원형 그라데이션) */
@@ -351,12 +351,23 @@ Deno.serve(async (req) => {
     content: string | null;
     has_incentive?: boolean;
     photo_urls?: string[];
+    videos?: Array<{ url?: string; thumb_url?: string }>;
   }> = data.reviews ?? [];
   const starBar = (n: number) =>
     `<span class="star">★</span>${Math.max(0, Math.min(5, Math.round(n)))}`;
   const tiles = reviews.map((r) => {
     const photo = (r.photo_urls ?? [])[0];
+    const video = (r.videos ?? [])[0];
     const badge = r.has_incentive ? `<div class="badges"><span class="badge">업체 혜택</span></div>` : "";
+    // 영상 후기 — 포스터 + 탭 재생(<video controls>, 외부 리소스 없음)
+    if (video?.url) {
+      return `<div class="rtile hasimg">
+        <video controls playsinline preload="none"
+          ${video.thumb_url ? `poster="${esc(String(video.thumb_url))}"` : ""}
+          src="${esc(String(video.url))}"></video>
+        ${badge}<div class="rate">${starBar(Number(r.rating))}</div>
+      </div>`;
+    }
     if (photo) {
       return `<div class="rtile hasimg">
         <img src="${esc(String(photo))}" alt="" loading="lazy"><div class="tscrim"></div>

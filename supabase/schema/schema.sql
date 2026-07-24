@@ -1154,6 +1154,7 @@ CREATE FUNCTION app.tg_chat_messages_after_insert() RETURNS trigger
 declare v_preview text;
 begin
   if new.content is not null then v_preview := left(new.content, 100);
+  elsif new.image_mime_type like 'video/%' then v_preview := '[동영상]';
   else v_preview := '[사진]'; end if;
 
   update public.chat_rooms
@@ -2326,14 +2327,17 @@ $$;
 
 
 --
--- Name: add_facility_review(uuid, smallint, text, text[], text[], boolean); Type: FUNCTION; Schema: public; Owner: -
+-- Name: add_facility_review(uuid, smallint, text, text[], text[], boolean, jsonb); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[] DEFAULT '{}'::text[], p_urls text[] DEFAULT '{}'::text[], p_has_incentive boolean DEFAULT false) RETURNS uuid
+CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[] DEFAULT '{}'::text[], p_urls text[] DEFAULT '{}'::text[], p_has_incentive boolean DEFAULT false, p_videos jsonb DEFAULT '[]'::jsonb) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
-declare v_uid uuid := app.uid(); v_id uuid;
+declare
+  v_uid uuid := app.uid();
+  v_id uuid;
+  v jsonb;
 begin
   if v_uid is null then raise exception 'auth required'; end if;
   if p_rating < 1 or p_rating > 5 then raise exception 'rating 1..5'; end if;
@@ -2345,10 +2349,24 @@ begin
   ) then
     raise exception 'own_facility' using errcode = 'P0001';
   end if;
+  -- 영상 검증 — 배열·개수는 CHECK 가 재검증하지만, 원소 형태는 여기서 명시 거부.
+  if jsonb_typeof(coalesce(p_videos, '[]'::jsonb)) is distinct from 'array'
+     or jsonb_array_length(coalesce(p_videos, '[]'::jsonb)) > 2 then
+    raise exception 'invalid_videos' using errcode = 'P0001';
+  end if;
+  for v in select value from jsonb_array_elements(coalesce(p_videos, '[]'::jsonb))
+  loop
+    if jsonb_typeof(v) is distinct from 'object'
+       or coalesce(v->>'url', '') = '' or length(v->>'url') > 500 then
+      raise exception 'invalid_videos' using errcode = 'P0001';
+    end if;
+  end loop;
   insert into public.facility_reviews
-    (facility_id, user_id, rating, content, photo_paths, photo_urls, has_incentive)
+    (facility_id, user_id, rating, content, photo_paths, photo_urls,
+     has_incentive, videos)
   values (p_facility, v_uid, p_rating, p_body,
-          coalesce(p_paths,'{}'), coalesce(p_urls,'{}'), coalesce(p_has_incentive, false))
+          coalesce(p_paths,'{}'), coalesce(p_urls,'{}'),
+          coalesce(p_has_incentive, false), coalesce(p_videos, '[]'::jsonb))
   returning id into v_id;
   return v_id;
 end $$;
@@ -4024,10 +4042,10 @@ $$;
 
 
 --
--- Name: create_post_verified(character varying, character varying, text, timestamp with time zone, uuid[], text, character varying, integer, uuid, double precision, double precision, character varying); Type: FUNCTION; Schema: public; Owner: -
+-- Name: create_post_verified(character varying, character varying, text, timestamp with time zone, uuid[], text, character varying, integer, uuid, double precision, double precision, character varying, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid DEFAULT NULL::uuid, p_actual_lat double precision DEFAULT NULL::double precision, p_actual_lng double precision DEFAULT NULL::double precision, p_region_code character varying DEFAULT NULL::character varying) RETURNS uuid
+CREATE FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid DEFAULT NULL::uuid, p_actual_lat double precision DEFAULT NULL::double precision, p_actual_lng double precision DEFAULT NULL::double precision, p_region_code character varying DEFAULT NULL::character varying, p_image_thumb_url text DEFAULT NULL::text) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -4082,11 +4100,11 @@ begin
 
   insert into public.posts (
     user_id, category, title, content, scheduled_at,
-    image_url, image_mime_type, image_file_size,
+    image_url, image_mime_type, image_file_size, image_thumbnail_url,
     actual_lat, actual_lng, region_code
   ) values (
     v_uid, p_category, p_title, p_content, p_scheduled_at,
-    p_image_url, p_image_mime, p_image_size,
+    p_image_url, p_image_mime, p_image_size, p_image_thumb_url,
     p_actual_lat, p_actual_lng, p_region_code
   ) returning id into v_post;
 
@@ -4164,6 +4182,7 @@ begin
      = p_message then
     select m.id, m.created_at,
            case when m.content is not null then left(m.content, 100)
+                when m.image_mime_type like 'video/%' then '[동영상]'
                 else '[사진]' end
       into v_next_id, v_next_at, v_next_preview
       from public.chat_messages m
@@ -4418,12 +4437,12 @@ $$;
 -- Name: facility_review_by_id(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean)
+CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean, videos jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
   select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive
+         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive, r.videos
     from (
       select fr.*,
              row_number() over (
@@ -4443,12 +4462,12 @@ $$;
 -- Name: facility_reviews_of(uuid, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFAULT 20, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean)
+CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFAULT 20, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, user_id uuid, author_nickname text, rating smallint, content text, photo_urls text[], created_at timestamp with time zone, is_mine boolean, visit_no integer, has_incentive boolean, videos jsonb)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
   select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive
+         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive, r.videos
     from (
       select fr.*,
              row_number() over (
@@ -5455,15 +5474,18 @@ begin
         select jsonb_agg(jsonb_build_object(
                  'rating', r.rating, 'content', r.content,
                  'has_incentive', r.has_incentive,
-                 'photo_urls', r.photos)
-                 order by r.has_photo desc, r.created_at desc)
-        from (select rating, content, has_incentive, created_at,
-                     coalesce(array_length(photo_urls, 1), 0) > 0 as has_photo,
+                 'photo_urls', r.photos,
+                 'videos', r.videos)
+                 order by r.has_media desc, r.created_at desc)
+        from (select rating, content, has_incentive, created_at, videos,
+                     coalesce(array_length(photo_urls, 1), 0) > 0
+                       or jsonb_array_length(videos) > 0 as has_media,
                      (select coalesce(jsonb_agg(u), '[]'::jsonb)
                         from unnest(photo_urls[1:2]) u) as photos
               from public.facility_reviews
               where facility_id = f.id and visibility_status = 'visible'
-              order by coalesce(array_length(photo_urls, 1), 0) > 0 desc,
+              order by coalesce(array_length(photo_urls, 1), 0) > 0
+                         or jsonb_array_length(videos) > 0 desc,
                        created_at desc
               limit 3) r), '[]'::jsonb))
     into v_out
@@ -5502,7 +5524,6 @@ begin
     into v_out
     from public.business_profiles b
     where b.user_id = v_link.ref_id and b.status = 'approved';
-    -- 업체가 인증 취소돼도 랜딩 자체는 살아있게(출처 표기만 생략)
     return coalesce(v_out, jsonb_build_object(
       'status', 'ok', 'kind', v_link.kind,
       'starter', jsonb_build_object('business_name', null)));
@@ -5721,10 +5742,10 @@ $$;
 
 
 --
--- Name: update_my_post(uuid, text, text, timestamp with time zone, text, character varying, integer, boolean); Type: FUNCTION; Schema: public; Owner: -
+-- Name: update_my_post(uuid, text, text, timestamp with time zone, text, character varying, integer, boolean, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone DEFAULT NULL::timestamp with time zone, p_image_url text DEFAULT NULL::text, p_image_mime character varying DEFAULT NULL::character varying, p_image_size integer DEFAULT NULL::integer, p_edit_image boolean DEFAULT false) RETURNS void
+CREATE FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone DEFAULT NULL::timestamp with time zone, p_image_url text DEFAULT NULL::text, p_image_mime character varying DEFAULT NULL::character varying, p_image_size integer DEFAULT NULL::integer, p_edit_image boolean DEFAULT false, p_image_thumb_url text DEFAULT NULL::text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -5752,14 +5773,17 @@ begin
     scheduled_at = p_scheduled_at,
     edited_at = now(),
     image_url = case
-      when p_edit_image and v_cat in ('free', 'adoption') then p_image_url
+      when p_edit_image and v_cat in ('free', 'adoption', 'news') then p_image_url
       else image_url end,
     image_mime_type = case
-      when p_edit_image and v_cat in ('free', 'adoption') then p_image_mime
+      when p_edit_image and v_cat in ('free', 'adoption', 'news') then p_image_mime
       else image_mime_type end,
     image_file_size = case
-      when p_edit_image and v_cat in ('free', 'adoption') then p_image_size
-      else image_file_size end
+      when p_edit_image and v_cat in ('free', 'adoption', 'news') then p_image_size
+      else image_file_size end,
+    image_thumbnail_url = case
+      when p_edit_image and v_cat in ('free', 'adoption', 'news') then p_image_thumb_url
+      else image_thumbnail_url end
   where id = p_post;
 
   if v_old_sched is distinct from p_scheduled_at and p_scheduled_at is not null then
@@ -6348,7 +6372,11 @@ CREATE TABLE public.chat_messages (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
     CONSTRAINT chat_messages_content_not_blank CHECK (((content IS NULL) OR (length(TRIM(BOTH FROM content)) > 0))),
-    CONSTRAINT chat_messages_image_file_size_check CHECK (((image_file_size IS NULL) OR (image_file_size <= 10485760))),
+    CONSTRAINT chat_messages_image_file_size_check CHECK (((image_file_size IS NULL) OR (image_file_size <=
+CASE
+    WHEN ((image_mime_type)::text ~~ 'video/%'::text) THEN 104857600
+    ELSE 10485760
+END))),
     CONSTRAINT chat_messages_not_empty CHECK (((content IS NOT NULL) OR (image_url IS NOT NULL)))
 );
 
@@ -6534,8 +6562,10 @@ CREATE TABLE public.facility_reviews (
     photo_paths text[] DEFAULT '{}'::text[] NOT NULL,
     visibility_status character varying(20) DEFAULT 'visible'::character varying NOT NULL,
     has_incentive boolean DEFAULT false NOT NULL,
+    videos jsonb DEFAULT '[]'::jsonb NOT NULL,
     CONSTRAINT facility_reviews_photos_max CHECK (((array_length(photo_paths, 1) IS NULL) OR (array_length(photo_paths, 1) <= 5))),
-    CONSTRAINT facility_reviews_rating_check CHECK (((rating >= 1) AND (rating <= 5)))
+    CONSTRAINT facility_reviews_rating_check CHECK (((rating >= 1) AND (rating <= 5))),
+    CONSTRAINT facility_reviews_videos_check CHECK (((jsonb_typeof(videos) = 'array'::text) AND (jsonb_array_length(videos) <= 2)))
 );
 
 
@@ -6977,9 +7007,14 @@ CREATE TABLE public.posts (
     CONSTRAINT posts_category_check CHECK (((category)::text = ANY (ARRAY['walk_together'::text, 'walk_proxy'::text, 'care'::text, 'adoption'::text, 'give_away'::text, 'free'::text, 'news'::text]))),
     CONSTRAINT posts_comment_count_check CHECK ((comment_count >= 0)),
     CONSTRAINT posts_deleted_at_consistency CHECK ((((visibility_status)::text !~~ 'deleted_%'::text) OR (deleted_at IS NOT NULL))),
-    CONSTRAINT posts_image_file_size_check CHECK (((image_file_size IS NULL) OR (image_file_size <= 12582912))),
+    CONSTRAINT posts_image_file_size_check CHECK (((image_file_size IS NULL) OR (image_file_size <=
+CASE
+    WHEN ((image_mime_type)::text ~~ 'video/%'::text) THEN 104857600
+    ELSE 12582912
+END))),
     CONSTRAINT posts_like_count_check CHECK ((heart_count >= 0)),
     CONSTRAINT posts_progress_status_check CHECK (((progress_status)::text = ANY ((ARRAY['recruiting'::character varying, 'matched'::character varying, 'completed'::character varying, 'cancelled'::character varying])::text[]))),
+    CONSTRAINT posts_video_category_check CHECK (((image_mime_type IS NULL) OR ((image_mime_type)::text !~~ 'video/%'::text) OR ((category)::text = ANY ((ARRAY['free'::character varying, 'news'::character varying])::text[])))),
     CONSTRAINT posts_view_count_check CHECK ((view_count >= 0)),
     CONSTRAINT posts_visibility_status_check CHECK (((visibility_status)::text = ANY ((ARRAY['visible'::character varying, 'hidden_by_user'::character varying, 'hidden_by_admin'::character varying, 'deleted_by_user'::character varying, 'deleted_by_admin'::character varying])::text[])))
 );
@@ -10603,12 +10638,12 @@ GRANT ALL ON FUNCTION public._push_pref_allows(p_user uuid, p_type text) TO serv
 
 
 --
--- Name: FUNCTION add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean, p_videos jsonb); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) TO authenticated;
-GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean) TO service_role;
+REVOKE ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean, p_videos jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean, p_videos jsonb) TO authenticated;
+GRANT ALL ON FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p_body text, p_paths text[], p_urls text[], p_has_incentive boolean, p_videos jsonb) TO service_role;
 
 
 --
@@ -10977,12 +11012,12 @@ GRANT ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_ph
 
 
 --
--- Name: FUNCTION create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying, p_image_thumb_url text); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying) TO authenticated;
-GRANT ALL ON FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying) TO service_role;
+REVOKE ALL ON FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying, p_image_thumb_url text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying, p_image_thumb_url text) TO authenticated;
+GRANT ALL ON FUNCTION public.create_post_verified(p_category character varying, p_title character varying, p_content text, p_scheduled_at timestamp with time zone, p_pet_ids uuid[], p_image_url text, p_image_mime character varying, p_image_size integer, p_photo_token uuid, p_actual_lat double precision, p_actual_lng double precision, p_region_code character varying, p_image_thumb_url text) TO service_role;
 
 
 --
@@ -11433,12 +11468,12 @@ GRANT ALL ON FUNCTION public.update_my_business_info(p_storefront_name text, p_p
 
 
 --
--- Name: FUNCTION update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean, p_image_thumb_url text); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean) TO authenticated;
-GRANT ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean) TO service_role;
+REVOKE ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean, p_image_thumb_url text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean, p_image_thumb_url text) TO authenticated;
+GRANT ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content text, p_scheduled_at timestamp with time zone, p_image_url text, p_image_mime character varying, p_image_size integer, p_edit_image boolean, p_image_thumb_url text) TO service_role;
 
 
 --
