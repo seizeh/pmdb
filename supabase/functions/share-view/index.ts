@@ -5,7 +5,7 @@
 //
 //   설치 전 가치 먼저(0028 원칙 2): 매장 미리보기(facility_preview)를 설치·가입
 //   없이 보여주고, 설치 유도 버튼만 둔다. 후기 강요·가입 강제 없음.
-//   kind='care_report' 는 P1(미용 전후 사진)에서 열린다 — 지금은 안내만.
+//   kind='care_report'(P1 미용 전후 사진 · P2 알림장)는 사진 중심 + '내 기록 받기' CTA.
 //
 //   디자인 = 앱 업체 프로필(user_profile_screen 업체 얼굴) 미러:
 //   애플뮤직 스타일 헤더 카드(사진 풀블리드 + 점진 블러 + 상호·통계 2칸) →
@@ -202,12 +202,29 @@ Deno.serve(async (req) => {
   if (data.status !== "ok") {
     return noticePage("링크를 찾을 수 없어요", "회수되었거나 존재하지 않는 링크예요.", 404);
   }
-  // ── 케어 리포트(P1 미용 전후 사진) — 사진이 주인공, 설치 CTA 는 "내 기록 받기" ──
+  // ── 케어 리포트(P1 미용 전후 사진 · P2 알림장) — 사진이 주인공 ──
   if (data.kind === "care_report") {
     const rp = data.report ?? {};
     const petLabel = String(rp.pet_label ?? "우리 아이");
+    const isBoarding = String(rp.kind ?? "grooming") === "boarding";
+    const kindLabel = isBoarding ? "돌봄 기록" : "미용 기록";
     const bizName = rp.business_name ? String(rp.business_name) : null;
     const note = rp.note ? String(rp.note) : null;
+    // 알림장 구조 필드(0028 §4.4) — 알려진 키는 한글 라벨, 그 외는 키 그대로.
+    const BODY_LABELS: Record<string, string> = {
+      meal: "🍚 식사",
+      potty: "🚽 배변",
+      mood: "😊 컨디션",
+      walk: "🐾 산책",
+    };
+    const body = (rp.body ?? {}) as Record<string, unknown>;
+    const bodyRows = Object.entries(body)
+      .filter(([, v]) => v != null && String(v).trim() !== "")
+      .map(([k, v]) =>
+        `<div class="irow"><span class="ic"></span><span><b>${
+          esc(BODY_LABELS[k] ?? k)
+        }</b> · ${esc(String(v))}</span></div>`
+      ).join("");
     const photos: string[] = Array.isArray(rp.photos) ? rp.photos.map(String) : [];
     const d = new Date(String(rp.created_at ?? ""));
     const dateStr = isNaN(d.getTime())
@@ -222,7 +239,7 @@ Deno.serve(async (req) => {
         }>
           <img src="${esc(u)}" alt="" loading="lazy">
           ${
-          photos.length === 2
+          !isBoarding && photos.length === 2
             ? `<div class="badges"><span class="badge">${i === 0 ? "전" : "후"}</span></div>`
             : ""
         }
@@ -230,16 +247,17 @@ Deno.serve(async (req) => {
       ).join("")
     }</div>`;
     const inner = `
-    <div class="titlebar" style="margin-top:4px"><b>${esc(petLabel)}의 미용 기록</b></div>
+    <div class="titlebar" style="margin-top:4px"><b>${esc(petLabel)}의 ${kindLabel}</b></div>
     <div class="info-card">
       ${bizName ? `<div class="verified">✓ ${esc(bizName)}에서 보냈어요</div>` : ""}
       ${dateStr ? `<div class="irow"><span class="ic">🗓</span><span>${dateStr}</span></div>` : ""}
+      ${bodyRows}
       ${note ? `<div class="irow"><span class="ic">💬</span><span>${esc(note)}</span></div>` : ""}
     </div>
     ${photoHtml}
     <a class="cta" href="?t=${token}&amp;go=store">PawMate 앱에서 ${esc(petLabel)} 기록 모아보기</a>
     <a class="cta sub" href="?t=${token}&amp;go=store">가입하면 다음 기록은 자동으로 도착해요</a>`;
-    return html(page(`${petLabel}의 미용 기록`, `${bizName ?? "PawMate"} · 케어 리포트`, inner));
+    return html(page(`${petLabel}의 ${kindLabel}`, `${bizName ?? "PawMate"} · 케어 리포트`, inner));
   }
 
   if (data.kind !== "facility_preview") {

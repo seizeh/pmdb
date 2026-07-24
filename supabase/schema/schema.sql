@@ -3636,6 +3636,36 @@ $$;
 
 
 --
+-- Name: care_thread_reports(uuid, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.care_thread_reports(p_thread uuid, p_limit integer DEFAULT 100, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, photos jsonb, body jsonb, note text, created_at timestamp with time zone, token text)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not exists (select 1 from app.care_threads t
+                 where t.id = p_thread
+                   and (t.business_id = v_uid or t.claimed_by = v_uid)) then
+    raise exception 'thread_not_found' using errcode = 'P0001';
+  end if;
+  return query
+  select r.id, r.photos, r.body, r.note, r.created_at, l.token::text
+    from app.care_reports r
+    left join app.share_links l on l.kind = 'care_report' and l.ref_id = r.id
+   where r.thread_id = p_thread
+   order by r.created_at desc
+   limit least(coalesce(p_limit, 100), 300) offset coalesce(p_offset, 0);
+end;
+$$;
+
+
+--
 -- Name: change_password_and_rotate(uuid, text, text, integer, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3751,7 +3781,97 @@ begin
       from app.share_links l
      where l.kind = 'care_report' and l.ref_id = r.id;
   end loop;
+
+  for r in
+    update app.care_threads t
+       set claimed_by = v_uid, claimed_at = now(), recipient_phone_hmac = null
+     where t.recipient_phone_hmac = v_hmac
+       and t.claimed_by is null
+       and t.business_id <> v_uid
+    returning t.id, t.pet_label
+  loop
+    v_cnt := v_cnt + 1;
+    update app.care_reports set claimed_by = v_uid, claimed_at = now()
+     where thread_id = r.id and claimed_by is null;
+    insert into public.notifications (user_id, notification_type, is_system, title, body)
+    values (v_uid, 'system_notice', true,
+            r.pet_label || ' 알림장이 연결됐어요',
+            '이제 ' || r.pet_label || ' 돌봄 기록이 도착할 때마다 알려드려요.');
+    insert into app.funnel_events (event, user_id, props)
+    values ('claim', v_uid, jsonb_build_object('thread_id', r.id));
+  end loop;
+
   return v_cnt;
+end;
+$$;
+
+
+--
+-- Name: create_boarding_report(uuid, jsonb, jsonb, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_boarding_report(p_thread uuid, p_photos jsonb DEFAULT '[]'::jsonb, p_body jsonb DEFAULT '{}'::jsonb, p_note text DEFAULT NULL::text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+  v_thread app.care_threads%rowtype;
+  v_report uuid;
+  v_token varchar(32);
+  v_exp timestamptz;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not app.has_license('boarding') then
+    raise exception 'license_required' using errcode = 'P0001';
+  end if;
+  select * into v_thread from app.care_threads
+   where id = p_thread and business_id = v_uid;
+  if not found then
+    raise exception 'thread_not_found' using errcode = 'P0001';
+  end if;
+  if jsonb_typeof(coalesce(p_photos, '[]'::jsonb)) is distinct from 'array'
+     or jsonb_array_length(coalesce(p_photos, '[]'::jsonb)) > 4 then
+    raise exception 'invalid_photos' using errcode = 'P0001';
+  end if;
+  if jsonb_typeof(coalesce(p_body, '{}'::jsonb)) is distinct from 'object' then
+    raise exception 'invalid_body' using errcode = 'P0001';
+  end if;
+  if jsonb_array_length(coalesce(p_photos, '[]'::jsonb)) = 0
+     and coalesce(p_body, '{}'::jsonb) = '{}'::jsonb
+     and nullif(btrim(coalesce(p_note, '')), '') is null then
+    raise exception 'empty_report' using errcode = 'P0001';
+  end if;
+
+  insert into app.care_reports
+    (business_id, kind, pet_label, photos, body, note, thread_id, claimed_by, claimed_at)
+  values
+    (v_uid, 'boarding', v_thread.pet_label, coalesce(p_photos, '[]'::jsonb),
+     coalesce(p_body, '{}'::jsonb), nullif(btrim(coalesce(p_note, '')), ''),
+     p_thread,
+     v_thread.claimed_by, case when v_thread.claimed_by is null then null else now() end)
+  returning id into v_report;
+
+  update app.care_threads set last_report_at = now() where id = p_thread;
+
+  v_token := encode(extensions.gen_random_bytes(16), 'hex');
+  v_exp := now() + interval '30 days';
+  insert into app.share_links (token, kind, ref_id, created_by, expires_at)
+  values (v_token, 'care_report', v_report, v_uid, v_exp);
+
+  insert into app.funnel_events (event, token, user_id)
+  values ('report_issued', v_token, v_uid);
+
+  if v_thread.claimed_by is not null then
+    insert into public.notifications (user_id, notification_type, is_system, title, body)
+    values (v_thread.claimed_by, 'system_notice', true,
+            v_thread.pet_label || ' 돌봄 기록이 도착했어요',
+            '오늘의 ' || v_thread.pet_label || ' 소식을 앱에서 확인해 보세요.');
+  end if;
+
+  return jsonb_build_object('report_id', v_report, 'token', v_token, 'expires_at', v_exp);
 end;
 $$;
 
@@ -3809,6 +3929,46 @@ begin
   values ('report_issued', v_token, v_uid);
 
   return jsonb_build_object('report_id', v_report, 'token', v_token, 'expires_at', v_exp);
+end;
+$$;
+
+
+--
+-- Name: create_care_thread(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text DEFAULT NULL::text) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+  v_label text := nullif(btrim(coalesce(p_pet_label, '')), '');
+  v_hmac bytea;
+  v_id uuid;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not app.has_license('boarding') then
+    raise exception 'license_required' using errcode = 'P0001';
+  end if;
+  if v_label is null or length(v_label) > 50 then
+    raise exception 'invalid_pet_label' using errcode = 'P0001';
+  end if;
+  if p_recipient_phone is not null and btrim(p_recipient_phone) <> '' then
+    v_hmac := app.phone_hmac(p_recipient_phone);
+    if v_hmac is null then
+      raise exception 'invalid_phone' using errcode = 'P0001';
+    end if;
+  end if;
+
+  insert into app.care_threads
+    (business_id, pet_label, recipient_phone_hmac, recipient_key_version)
+  values (v_uid, v_label, v_hmac,
+          (select key_version from app.care_config))
+  returning id into v_id;
+  return v_id;
 end;
 $$;
 
@@ -4444,15 +4604,42 @@ $$;
 
 
 --
--- Name: my_received_care_reports(integer, integer); Type: FUNCTION; Schema: public; Owner: -
+-- Name: my_care_threads(integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.my_received_care_reports(p_limit integer DEFAULT 30, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, kind text, pet_label text, photos jsonb, note text, created_at timestamp with time zone, business_name text)
+CREATE FUNCTION public.my_care_threads(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, pet_label text, claimed_nickname text, last_report_at timestamp with time zone, report_count integer, last_photo text, archived boolean)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
-  select r.id, r.kind::text, r.pet_label::text, r.photos, r.note, r.created_at,
-         coalesce(b.storefront_name, b.business_name)::text
+  select t.id, t.pet_label::text, pr.nickname::text,
+         t.last_report_at,
+         (select count(*)::int from app.care_reports r where r.thread_id = t.id),
+         (select r.photos->>0 from app.care_reports r
+           where r.thread_id = t.id and jsonb_array_length(r.photos) > 0
+           order by r.created_at desc limit 1),
+         coalesce(
+           t.last_report_at < now() - make_interval(
+             days => (select boarding_archive_days from app.care_config)),
+           false)
+    from app.care_threads t
+    left join public.public_profiles pr on pr.id = t.claimed_by
+   where t.business_id = app.uid()
+   order by t.last_report_at desc nulls last
+   limit least(coalesce(p_limit, 50), 200) offset coalesce(p_offset, 0);
+$$;
+
+
+--
+-- Name: my_received_care_reports(integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.my_received_care_reports(p_limit integer DEFAULT 30, p_offset integer DEFAULT 0) RETURNS TABLE(id uuid, kind text, pet_label text, photos jsonb, body jsonb, note text, created_at timestamp with time zone, business_name text, thread_id uuid)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select r.id, r.kind::text, r.pet_label::text, r.photos, r.body, r.note,
+         r.created_at, coalesce(b.storefront_name, b.business_name)::text,
+         r.thread_id
     from app.care_reports r
     left join public.business_profiles b on b.user_id = r.business_id
    where r.claimed_by = app.uid()
@@ -5139,7 +5326,7 @@ begin
       'status', 'ok', 'kind', v_link.kind,
       'report', jsonb_build_object(
         'pet_label', r.pet_label, 'photos', r.photos, 'note', r.note,
-        'kind', r.kind, 'created_at', r.created_at,
+        'kind', r.kind, 'body', r.body, 'created_at', r.created_at,
         'business_name', coalesce(b.storefront_name, b.business_name)))
     into v_out
     from app.care_reports r
@@ -5609,6 +5796,7 @@ CREATE TABLE app.care_config (
     id boolean DEFAULT true NOT NULL,
     hmac_key text DEFAULT encode(extensions.gen_random_bytes(32), 'hex'::text) NOT NULL,
     key_version smallint DEFAULT 1 NOT NULL,
+    boarding_archive_days smallint DEFAULT 7 NOT NULL,
     CONSTRAINT care_config_singleton CHECK (id)
 );
 
@@ -5630,6 +5818,7 @@ CREATE TABLE app.care_reports (
     claimed_by uuid,
     claimed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    thread_id uuid,
     CONSTRAINT care_reports_kind_check CHECK (((kind)::text = ANY ((ARRAY['grooming'::character varying, 'boarding'::character varying])::text[])))
 );
 
@@ -5639,6 +5828,30 @@ CREATE TABLE app.care_reports (
 --
 
 COMMENT ON TABLE app.care_reports IS '업체→보호자 케어 리포트(0028 §4 — 미용 전후 사진·P2 알림장 공용 원형).';
+
+
+--
+-- Name: care_threads; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.care_threads (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    business_id uuid NOT NULL,
+    pet_label character varying(50) NOT NULL,
+    recipient_phone_hmac bytea,
+    recipient_key_version smallint DEFAULT 1 NOT NULL,
+    claimed_by uuid,
+    claimed_at timestamp with time zone,
+    last_report_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE care_threads; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.care_threads IS '위탁 알림장 스레드(0028 §4.4) — 반려동물×업체 상시 1개, 건 엔티티 없음.';
 
 
 --
@@ -7062,6 +7275,14 @@ ALTER TABLE ONLY app.care_reports
 
 
 --
+-- Name: care_threads care_threads_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_threads
+    ADD CONSTRAINT care_threads_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: funnel_events funnel_events_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -7560,6 +7781,34 @@ CREATE INDEX care_reports_claimed_idx ON app.care_reports USING btree (claimed_b
 --
 
 CREATE INDEX care_reports_phone_idx ON app.care_reports USING btree (recipient_phone_hmac) WHERE ((claimed_by IS NULL) AND (recipient_phone_hmac IS NOT NULL));
+
+
+--
+-- Name: care_reports_thread_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_reports_thread_idx ON app.care_reports USING btree (thread_id, created_at DESC) WHERE (thread_id IS NOT NULL);
+
+
+--
+-- Name: care_threads_business_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_threads_business_idx ON app.care_threads USING btree (business_id, last_report_at DESC NULLS LAST);
+
+
+--
+-- Name: care_threads_claimed_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_threads_claimed_idx ON app.care_threads USING btree (claimed_by);
+
+
+--
+-- Name: care_threads_phone_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX care_threads_phone_idx ON app.care_threads USING btree (recipient_phone_hmac) WHERE ((claimed_by IS NULL) AND (recipient_phone_hmac IS NOT NULL));
 
 
 --
@@ -8671,6 +8920,30 @@ ALTER TABLE ONLY app.care_reports
 
 ALTER TABLE ONLY app.care_reports
     ADD CONSTRAINT care_reports_claimed_by_fkey FOREIGN KEY (claimed_by) REFERENCES public.users(id);
+
+
+--
+-- Name: care_reports care_reports_thread_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_reports
+    ADD CONSTRAINT care_reports_thread_id_fkey FOREIGN KEY (thread_id) REFERENCES app.care_threads(id) ON DELETE CASCADE;
+
+
+--
+-- Name: care_threads care_threads_business_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_threads
+    ADD CONSTRAINT care_threads_business_id_fkey FOREIGN KEY (business_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: care_threads care_threads_claimed_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.care_threads
+    ADD CONSTRAINT care_threads_claimed_by_fkey FOREIGN KEY (claimed_by) REFERENCES public.users(id);
 
 
 --
@@ -10389,6 +10662,15 @@ GRANT ALL ON FUNCTION public.can_manage_post_applicants(p_post uuid) TO service_
 
 
 --
+-- Name: FUNCTION care_thread_reports(p_thread uuid, p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.care_thread_reports(p_thread uuid, p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.care_thread_reports(p_thread uuid, p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.care_thread_reports(p_thread uuid, p_limit integer, p_offset integer) TO service_role;
+
+
+--
 -- Name: FUNCTION change_password_and_rotate(p_user uuid, p_current_hash text, p_new_hash text, p_tv integer, p_new_token_hash text, p_user_agent text); Type: ACL; Schema: public; Owner: -
 --
 
@@ -10425,12 +10707,30 @@ GRANT ALL ON FUNCTION public.claim_care_reports() TO service_role;
 
 
 --
+-- Name: FUNCTION create_boarding_report(p_thread uuid, p_photos jsonb, p_body jsonb, p_note text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_boarding_report(p_thread uuid, p_photos jsonb, p_body jsonb, p_note text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_boarding_report(p_thread uuid, p_photos jsonb, p_body jsonb, p_note text) TO authenticated;
+GRANT ALL ON FUNCTION public.create_boarding_report(p_thread uuid, p_photos jsonb, p_body jsonb, p_note text) TO service_role;
+
+
+--
 -- Name: FUNCTION create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb, p_note text, p_recipient_phone text) TO service_role;
+
+
+--
+-- Name: FUNCTION create_care_thread(p_pet_label text, p_recipient_phone text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text) TO authenticated;
+GRANT ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text) TO service_role;
 
 
 --
@@ -10606,6 +10906,15 @@ GRANT ALL ON FUNCTION public.my_business_licenses() TO service_role;
 REVOKE ALL ON FUNCTION public.my_care_reports(p_limit integer, p_offset integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.my_care_reports(p_limit integer, p_offset integer) TO authenticated;
 GRANT ALL ON FUNCTION public.my_care_reports(p_limit integer, p_offset integer) TO service_role;
+
+
+--
+-- Name: FUNCTION my_care_threads(p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.my_care_threads(p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.my_care_threads(p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.my_care_threads(p_limit integer, p_offset integer) TO service_role;
 
 
 --
