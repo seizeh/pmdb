@@ -260,6 +260,32 @@ Deno.serve(async (req) => {
     return html(page(`${petLabel}의 ${kindLabel}`, `${bizName ?? "PawMate"} · 케어 리포트`, inner));
   }
 
+  // ── 분양 스타터 랜딩(P3) — 본문은 정적 콘텐츠, 업체명만 데이터(출처 표기·계측) ──
+  if (data.kind === "starter") {
+    const st = data.starter ?? {};
+    const bizName = st.business_name ? String(st.business_name) : null;
+    const inner = `
+    <div class="titlebar" style="margin-top:4px"><b>새 가족의 시작을 함께해요</b></div>
+    <div class="info-card">
+      ${bizName ? `<div class="verified">✓ ${esc(bizName)}에서 준비했어요</div>` : ""}
+      <div class="irow"><span class="ic">🎁</span><span>새 보호자를 위한 <b>스타터 패키지</b>예요.
+        앱을 설치하고 "최근에 아이를 데려왔어요"를 선택하면 바로 시작돼요.</span></div>
+    </div>
+    <div class="titlebar"><b>패키지에 담긴 것</b></div>
+    <div class="info-card">
+      <div class="irow"><span class="ic">💉</span><span><b>접종 일정 알림</b> — 종합백신부터 광견병까지, 시기마다 잊지 않게 알려드려요</span></div>
+      <div class="irow"><span class="ic">✅</span><span><b>초보 보호자 체크리스트</b> — 처음 한 달, 챙길 것들을 순서대로</span></div>
+      <div class="irow"><span class="ic">🗺</span><span><b>동네 병원·미용 지도</b> — 우리 동네 반려 시설을 후기와 함께</span></div>
+    </div>
+    <a class="cta" href="?t=${token}&amp;go=store">PawMate 앱에서 스타터 패키지 받기</a>
+    <a class="cta sub" href="?t=${token}&amp;go=store">설치와 가입은 무료예요</a>`;
+    return html(page(
+      "새 보호자 스타터 패키지",
+      `${bizName ?? "PawMate"} · 새 가족 맞이 선물`,
+      inner,
+    ));
+  }
+
   if (data.kind !== "facility_preview") {
     return noticePage("준비 중인 콘텐츠예요", "앱에서 곧 만나볼 수 있어요.", 200);
   }

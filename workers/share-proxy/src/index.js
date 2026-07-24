@@ -9,11 +9,29 @@
 //
 // 라우트 (wrangler.toml custom_domain):
 //   go.pawmate.kr/s?t=<token>[&go=store]  → share-view 프록시(HTML 복원)
+//   */.well-known/*                       → 유니버설 링크·앱 링크 검증 파일(출시 준비)
 //   pawmate.kr, www.pawmate.kr            → 임시 랜딩(출시 전 안내)
 // ============================================================================
 
 const UPSTREAM =
   "https://vyatppuxmpulqtxevfpk.supabase.co/functions/v1/share-view";
+
+// ── 유니버설 링크(iOS) — 설치된 앱이 go.pawmate.kr/s 링크를 바로 열게 한다.
+//    appID = <TeamID>.<BundleID>. 앱 쪽 associated-domains(applinks:go.pawmate.kr)
+//    + 링크 수신 라우팅은 출시 준비 체크리스트(docs/launch-checklist.md) 참조.
+const AASA = {
+  applinks: {
+    apps: [],
+    details: [{
+      appIDs: ["5GVP46ZJ2H.com.seizeh.pawmate"],
+      components: [{ "/": "/s", comment: "공유 뷰어" }],
+    }],
+  },
+};
+
+// ── 앱 링크(Android) — 릴리스 서명키 SHA-256 지문 확보 전까지 빈 배열(404 응답).
+//    지문 채우면 자동으로 서빙 시작: keytool -list -printcert -keystore <release.jks>
+const ANDROID_CERT_SHA256 = [];
 
 export default {
   async fetch(req) {
@@ -43,6 +61,32 @@ export default {
       headers.delete("content-security-policy");
       headers.delete("x-content-type-options");
       return new Response(res.body, { status: res.status, headers });
+    }
+
+    // ── 유니버설 링크·앱 링크 검증 파일 — 모든 호스트에서 서빙(무해) ──
+    if (
+      url.pathname === "/.well-known/apple-app-site-association" ||
+      url.pathname === "/apple-app-site-association"
+    ) {
+      return new Response(JSON.stringify(AASA), {
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.pathname === "/.well-known/assetlinks.json") {
+      if (ANDROID_CERT_SHA256.length === 0) {
+        return new Response("not configured", { status: 404 });
+      }
+      return new Response(
+        JSON.stringify([{
+          relation: ["delegate_permission/common.handle_all_urls"],
+          target: {
+            namespace: "android_app",
+            package_name: "com.seizeh.pawmate",
+            sha256_cert_fingerprints: ANDROID_CERT_SHA256,
+          },
+        }]),
+        { headers: { "content-type": "application/json" } },
+      );
     }
 
     // ── 루트/기타 — 출시 전 임시 랜딩 (스토어 오픈 후 리다이렉트로 교체) ──
