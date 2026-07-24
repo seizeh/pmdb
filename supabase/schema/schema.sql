@@ -2430,6 +2430,56 @@ $$;
 
 
 --
+-- Name: admin_create_starter_share_link(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_create_starter_share_link(p_business uuid, p_days integer DEFAULT 365) RETURNS TABLE(token character varying, expires_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public'
+    AS $$
+declare
+  v_token varchar(32);
+  v_exp   timestamptz;
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  if p_days < 1 or p_days > 3650 then
+    raise exception 'days 1..3650';
+  end if;
+  -- 발급 명단 = 승인 업체 + 판매/생산 허가 승인(0028 §1.3)
+  if not exists (select 1 from public.business_profiles b
+                  where b.user_id = p_business and b.status = 'approved') then
+    raise exception 'business_not_approved';
+  end if;
+  if not exists (select 1 from app.business_licenses l
+                  where l.user_id = p_business
+                    and l.license_type in ('sales', 'production')
+                    and l.status = 'approved') then
+    raise exception 'starter_license_required';
+  end if;
+
+  -- 유효(미회수·미만료) 링크 재사용
+  select l.token, l.expires_at into v_token, v_exp
+  from app.share_links l
+  where l.kind = 'starter' and l.ref_id = p_business
+    and l.revoked_at is null and l.expires_at > now()
+  order by l.created_at desc limit 1;
+  if v_token is not null then
+    return query select v_token, v_exp;
+    return;
+  end if;
+
+  v_token := encode(extensions.gen_random_bytes(16), 'hex');
+  v_exp   := now() + make_interval(days => p_days);
+  insert into app.share_links (token, kind, ref_id, created_by, expires_at)
+  values (v_token, 'starter', p_business, app.uid(), v_exp);
+  return query select v_token, v_exp;
+end;
+$$;
+
+
+--
 -- Name: admin_dashboard_stats(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4649,6 +4699,33 @@ $$;
 
 
 --
+-- Name: my_vaccination_events(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.my_vaccination_events(p_pet uuid) RETURNS TABLE(id uuid, label text, due_date date, done_at timestamp with time zone)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.pet_guardians g
+                 where g.pet_id = p_pet and g.user_id = v_uid) then
+    raise exception 'not_guardian' using errcode = 'P0001';
+  end if;
+  return query
+  select e.id, e.label::text, e.due_date, e.done_at
+    from app.vaccination_events e
+   where e.pet_id = p_pet
+   order by e.due_date, e.created_at;
+end;
+$$;
+
+
+--
 -- Name: naver_facility_id(text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5240,6 +5317,88 @@ $$;
 
 
 --
+-- Name: set_vaccination_done(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.set_vaccination_done(p_event uuid, p_done boolean DEFAULT true) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  update app.vaccination_events e
+     set done_at = case when p_done then now() else null end
+   where e.id = p_event
+     and exists (select 1 from public.pet_guardians g
+                 where g.pet_id = e.pet_id and g.user_id = v_uid);
+  return found;
+end;
+$$;
+
+
+--
+-- Name: set_vaccination_schedule(uuid, jsonb, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.set_vaccination_schedule(p_pet uuid, p_events jsonb, p_source text DEFAULT NULL::text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $_$
+declare
+  v_uid uuid := app.uid();
+  v_cnt integer := 0;
+  e jsonb;
+  v_label text;
+  v_due date;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.pet_guardians g
+                 where g.pet_id = p_pet and g.user_id = v_uid) then
+    raise exception 'not_guardian' using errcode = 'P0001';
+  end if;
+  if jsonb_typeof(coalesce(p_events, '[]'::jsonb)) is distinct from 'array'
+     or jsonb_array_length(coalesce(p_events, '[]'::jsonb)) > 40 then
+    raise exception 'invalid_events' using errcode = 'P0001';
+  end if;
+  if p_source is not null and p_source not in ('onboarding', 'manage') then
+    raise exception 'invalid_source' using errcode = 'P0001';
+  end if;
+
+  delete from app.vaccination_events
+   where pet_id = p_pet and done_at is null;
+
+  for e in select value from jsonb_array_elements(coalesce(p_events, '[]'::jsonb))
+  loop
+    v_label := nullif(btrim(coalesce(e->>'label', '')), '');
+    if v_label is null or length(v_label) > 60
+       or coalesce(e->>'due_date', '') !~ '^\d{4}-\d{2}-\d{2}$' then
+      raise exception 'invalid_events' using errcode = 'P0001';
+    end if;
+    v_due := (e->>'due_date')::date;
+    if v_due not between current_date - 730 and current_date + 1095 then
+      raise exception 'invalid_events' using errcode = 'P0001';
+    end if;
+    insert into app.vaccination_events (pet_id, label, due_date, created_by)
+    values (p_pet, v_label, v_due, v_uid);
+    v_cnt := v_cnt + 1;
+  end loop;
+
+  insert into app.funnel_events (event, user_id, props)
+  values ('vaccine_schedule', v_uid,
+          jsonb_build_object('pet_id', p_pet, 'count', v_cnt,
+                             'source', p_source));
+  return v_cnt;
+end;
+$_$;
+
+
+--
 -- Name: share_view_click(character varying); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5333,6 +5492,20 @@ begin
     left join public.business_profiles b on b.user_id = r.business_id
     where r.id = v_link.ref_id;
     return coalesce(v_out, jsonb_build_object('status', 'not_found'));
+  end if;
+
+  if v_link.kind = 'starter' then
+    select jsonb_build_object(
+      'status', 'ok', 'kind', v_link.kind,
+      'starter', jsonb_build_object(
+        'business_name', coalesce(b.storefront_name, b.business_name)))
+    into v_out
+    from public.business_profiles b
+    where b.user_id = v_link.ref_id and b.status = 'approved';
+    -- 업체가 인증 취소돼도 랜딩 자체는 살아있게(출처 표기만 생략)
+    return coalesce(v_out, jsonb_build_object(
+      'status', 'ok', 'kind', v_link.kind,
+      'starter', jsonb_build_object('business_name', null)));
   end if;
 
   return jsonb_build_object('status', 'ok', 'kind', v_link.kind);
@@ -5963,7 +6136,7 @@ CREATE TABLE app.share_links (
     view_count integer DEFAULT 0 NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying])::text[])))
+    CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying, 'starter'::character varying])::text[])))
 );
 
 
@@ -5972,6 +6145,29 @@ CREATE TABLE app.share_links (
 --
 
 COMMENT ON TABLE app.share_links IS '설치 전 가치 전달용 공유 링크(0028 §3). share-view Edge Function 이 서빙.';
+
+
+--
+-- Name: vaccination_events; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.vaccination_events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    pet_id uuid NOT NULL,
+    label character varying(60) NOT NULL,
+    due_date date NOT NULL,
+    done_at timestamp with time zone,
+    notified_at timestamp with time zone,
+    created_by uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE vaccination_events; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.vaccination_events IS '분양 스타터 접종 리마인더(0028 §5) — 일정 콘텐츠는 앱, 서버는 저장·알림만.';
 
 
 --
@@ -6414,11 +6610,11 @@ CREATE TABLE public.notifications (
     push_attempts smallint DEFAULT 0 NOT NULL,
     push_error text,
     CONSTRAINT notifications_aggregated_count_check CHECK ((aggregated_count >= 1)),
-    CONSTRAINT notifications_notification_type_check CHECK (((notification_type)::text = ANY (ARRAY['chat_message'::text, 'post_application'::text, 'post_comment'::text, 'pawing_new_post'::text, 'application_accepted'::text, 'application_accepted_by_co'::text, 'review_received'::text, 'guardian_invite'::text, 'system_notice'::text, 'location_expired'::text, 'chat_read_receipt'::text, 'unread_sync'::text, 'security_login'::text, 'schedule_changed'::text, 'business_approved'::text, 'business_rejected'::text, 'review_comment'::text, 'post_heart'::text, 'pawing_follow'::text, 'facility_review_received'::text, 'pet_in_post'::text]))),
+    CONSTRAINT notifications_notification_type_check CHECK (((notification_type)::text = ANY (ARRAY['chat_message'::text, 'post_application'::text, 'post_comment'::text, 'pawing_new_post'::text, 'application_accepted'::text, 'application_accepted_by_co'::text, 'review_received'::text, 'guardian_invite'::text, 'system_notice'::text, 'location_expired'::text, 'chat_read_receipt'::text, 'unread_sync'::text, 'security_login'::text, 'schedule_changed'::text, 'business_approved'::text, 'business_rejected'::text, 'review_comment'::text, 'post_heart'::text, 'pawing_follow'::text, 'facility_review_received'::text, 'pet_in_post'::text, 'vaccine_reminder'::text]))),
     CONSTRAINT notifications_priority_check CHECK (((priority)::text = ANY ((ARRAY['high'::character varying, 'normal'::character varying, 'low'::character varying])::text[]))),
     CONSTRAINT notifications_push_attempts_check CHECK ((push_attempts >= 0)),
     CONSTRAINT notifications_push_status_check CHECK (((push_status)::text = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text, 'skipped'::text]))),
-    CONSTRAINT notifications_resource_type_check CHECK (((resource_type IS NULL) OR ((resource_type)::text = ANY (ARRAY['post'::text, 'comment'::text, 'chat_room'::text, 'appointment'::text, 'facility_review'::text, 'user'::text]))))
+    CONSTRAINT notifications_resource_type_check CHECK (((resource_type IS NULL) OR ((resource_type)::text = ANY (ARRAY['post'::text, 'comment'::text, 'chat_room'::text, 'appointment'::text, 'facility_review'::text, 'user'::text, 'pet'::text]))))
 );
 
 
@@ -7339,6 +7535,14 @@ ALTER TABLE ONLY app.share_links
 
 
 --
+-- Name: vaccination_events vaccination_events_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.vaccination_events
+    ADD CONSTRAINT vaccination_events_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: withdrawn_users withdrawn_users_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -7865,6 +8069,20 @@ CREATE INDEX refresh_tokens_user_idx ON app.refresh_tokens USING btree (user_id)
 --
 
 CREATE INDEX share_links_ref_idx ON app.share_links USING btree (kind, ref_id);
+
+
+--
+-- Name: vaccination_events_due_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX vaccination_events_due_idx ON app.vaccination_events USING btree (due_date) WHERE ((done_at IS NULL) AND (notified_at IS NULL));
+
+
+--
+-- Name: vaccination_events_pet_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX vaccination_events_pet_idx ON app.vaccination_events USING btree (pet_id, due_date);
 
 
 --
@@ -8968,6 +9186,22 @@ ALTER TABLE ONLY app.refresh_tokens
 
 ALTER TABLE ONLY app.share_links
     ADD CONSTRAINT share_links_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: vaccination_events vaccination_events_created_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.vaccination_events
+    ADD CONSTRAINT vaccination_events_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: vaccination_events vaccination_events_pet_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.vaccination_events
+    ADD CONSTRAINT vaccination_events_pet_id_fkey FOREIGN KEY (pet_id) REFERENCES public.pets(id) ON DELETE CASCADE;
 
 
 --
@@ -10396,6 +10630,15 @@ GRANT ALL ON FUNCTION public.admin_create_facility_share_link(p_facility uuid, p
 
 
 --
+-- Name: FUNCTION admin_create_starter_share_link(p_business uuid, p_days integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_create_starter_share_link(p_business uuid, p_days integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_create_starter_share_link(p_business uuid, p_days integer) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_create_starter_share_link(p_business uuid, p_days integer) TO service_role;
+
+
+--
 -- Name: FUNCTION admin_dashboard_stats(); Type: ACL; Schema: public; Owner: -
 --
 
@@ -10927,6 +11170,15 @@ GRANT ALL ON FUNCTION public.my_received_care_reports(p_limit integer, p_offset 
 
 
 --
+-- Name: FUNCTION my_vaccination_events(p_pet uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.my_vaccination_events(p_pet uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.my_vaccination_events(p_pet uuid) TO authenticated;
+GRANT ALL ON FUNCTION public.my_vaccination_events(p_pet uuid) TO service_role;
+
+
+--
 -- Name: FUNCTION naver_facility_id(p_name text, p_address text); Type: ACL; Schema: public; Owner: -
 --
 
@@ -11109,6 +11361,24 @@ GRANT ALL ON FUNCTION public.set_my_business_photo(p_url text, p_align_y real) T
 
 REVOKE ALL ON FUNCTION public.set_pet_ai_reference(p_pet uuid, p_verification uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.set_pet_ai_reference(p_pet uuid, p_verification uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION set_vaccination_done(p_event uuid, p_done boolean); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.set_vaccination_done(p_event uuid, p_done boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.set_vaccination_done(p_event uuid, p_done boolean) TO authenticated;
+GRANT ALL ON FUNCTION public.set_vaccination_done(p_event uuid, p_done boolean) TO service_role;
+
+
+--
+-- Name: FUNCTION set_vaccination_schedule(p_pet uuid, p_events jsonb, p_source text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.set_vaccination_schedule(p_pet uuid, p_events jsonb, p_source text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.set_vaccination_schedule(p_pet uuid, p_events jsonb, p_source text) TO authenticated;
+GRANT ALL ON FUNCTION public.set_vaccination_schedule(p_pet uuid, p_events jsonb, p_source text) TO service_role;
 
 
 --
