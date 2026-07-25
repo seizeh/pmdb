@@ -260,6 +260,67 @@ Deno.serve(async (req) => {
     return html(page(`${petLabel}의 ${kindLabel}`, `${bizName ?? "PawMate"} · 케어 리포트`, inner));
   }
 
+  // ── 게시글 공유 — 앱 게시글 상세 미러(히어로 미디어 → 카테고리 칩 →
+  //    제목 → 작성자·날짜 → 본문). 영상은 포스터 + <video controls>. ──
+  if (data.kind === "post") {
+    const po = data.post ?? {};
+    const POST_CATEGORY_LABELS: Record<string, string> = {
+      walk_together: "동반산책",
+      walk_proxy: "대리산책",
+      care: "돌봄",
+      give_away: "분양",
+      adoption: "입양",
+      free: "자유",
+      news: "소식",
+    };
+    const title = String(po.title ?? "게시글");
+    const content = String(po.content ?? "");
+    const catLabel = POST_CATEGORY_LABELS[String(po.category)] ??
+      String(po.category ?? "");
+    const author = po.author_name ? String(po.author_name) : "알 수 없음";
+    const isVideo = String(po.image_mime ?? "").startsWith("video/");
+    const mediaUrl = po.image_url ? String(po.image_url) : null;
+    const thumbUrl = po.image_thumb_url ? String(po.image_thumb_url) : null;
+    const d = new Date(String(po.created_at ?? ""));
+    const dateStr = isNaN(d.getTime())
+      ? ""
+      : `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, "0")}.${
+        String(d.getDate()).padStart(2, "0")
+      }`;
+    // 히어로 — 앱 상세의 미디어 히어로 미러(3:4, radius 24)
+    const hero = !mediaUrl ? "" : isVideo
+      ? `<div style="margin:0 20px 4px;border-radius:24px;overflow:hidden;aspect-ratio:3/4;background:#000">
+          <video controls playsinline preload="metadata"
+            ${thumbUrl ? `poster="${esc(thumbUrl)}"` : ""}
+            src="${esc(mediaUrl)}"
+            style="width:100%;height:100%;object-fit:cover"></video>
+        </div>`
+      : `<div style="margin:0 20px 4px;border-radius:24px;overflow:hidden;aspect-ratio:3/4">
+          <img src="${esc(mediaUrl)}" alt=""
+            style="width:100%;height:100%;object-fit:cover" loading="lazy">
+        </div>`;
+    const inner = `
+    ${hero}
+    <div class="pad" style="margin-top:${mediaUrl ? "16" : "4"}px">
+      <span style="display:inline-block;font-size:11.5px;font-weight:700;
+        color:var(--primary-dark);background:var(--surface-muted);
+        border:.5px solid var(--border);border-radius:100px;padding:3px 10px">
+        ${esc(catLabel)}</span>
+      <div style="font-size:20px;font-weight:800;line-height:1.4;margin-top:10px">
+        ${esc(title)}</div>
+      <div style="font-size:12.5px;color:var(--text2);margin-top:6px">
+        ${esc(author)}${dateStr ? ` · ${dateStr}` : ""}</div>
+    </div>
+    <div class="info-card" style="margin-top:14px">
+      <div style="font-size:14.5px;line-height:1.7;white-space:pre-wrap">${
+      esc(content)
+    }</div>
+    </div>
+    <a class="cta" href="?t=${token}&amp;go=store">PawMate 앱에서 이 글 보기</a>
+    <a class="cta sub" href="?t=${token}&amp;go=store">우리 동네 반려 이웃의 소식이 더 있어요</a>`;
+    return html(page(title, `${author} · ${catLabel} — PawMate`, inner));
+  }
+
   // ── 분양 스타터 랜딩(P3) — 본문은 정적 콘텐츠, 업체명만 데이터(출처 표기·계측) ──
   if (data.kind === "starter") {
     const st = data.starter ?? {};

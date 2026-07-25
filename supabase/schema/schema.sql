@@ -4042,6 +4042,48 @@ $$;
 
 
 --
+-- Name: create_post_share_link(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.create_post_share_link(p_post uuid) RETURNS TABLE(token character varying, expires_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+  v_token varchar(32);
+  v_exp   timestamptz;
+begin
+  if v_uid is null then
+    raise exception 'auth required' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.posts p
+                  where p.id = p_post and p.visibility_status = 'visible') then
+    raise exception 'post_not_found' using errcode = 'P0001';
+  end if;
+
+  select l.token, l.expires_at into v_token, v_exp
+  from app.share_links l
+  where l.kind = 'post' and l.ref_id = p_post
+    and l.revoked_at is null and l.expires_at > now()
+  order by l.created_at desc limit 1;
+  if v_token is not null then
+    return query select v_token, v_exp;
+    return;
+  end if;
+
+  v_token := encode(extensions.gen_random_bytes(16), 'hex');
+  v_exp   := now() + interval '30 days';
+  insert into app.share_links (token, kind, ref_id, created_by, expires_at)
+  values (v_token, 'post', p_post, v_uid, v_exp);
+  insert into app.funnel_events (event, token, user_id)
+  values ('post_share', v_token, v_uid);
+  return query select v_token, v_exp;
+end;
+$$;
+
+
+--
 -- Name: create_post_verified(character varying, character varying, text, timestamp with time zone, uuid[], text, character varying, integer, uuid, double precision, double precision, character varying, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5529,6 +5571,27 @@ begin
       'starter', jsonb_build_object('business_name', null)));
   end if;
 
+  if v_link.kind = 'post' then
+    select jsonb_build_object(
+      'status', 'ok', 'kind', v_link.kind,
+      'post', jsonb_build_object(
+        'category', p.category, 'title', p.title, 'content', p.content,
+        'image_url', p.image_url, 'image_mime', p.image_mime_type,
+        'image_thumb_url', p.image_thumbnail_url,
+        'created_at', p.created_at,
+        'author_name', case
+          when p.category = 'news'
+            then coalesce(b.storefront_name, b.business_name, pr.nickname)
+          else pr.nickname end))
+    into v_out
+    from public.posts p
+    left join public.public_profiles pr on pr.id = p.user_id
+    left join public.business_profiles b
+      on p.category = 'news' and b.user_id = p.user_id
+    where p.id = v_link.ref_id and p.visibility_status = 'visible';
+    return coalesce(v_out, jsonb_build_object('status', 'not_found'));
+  end if;
+
   return jsonb_build_object('status', 'ok', 'kind', v_link.kind);
 end;
 $$;
@@ -6160,7 +6223,7 @@ CREATE TABLE app.share_links (
     view_count integer DEFAULT 0 NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying, 'starter'::character varying])::text[])))
+    CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying, 'starter'::character varying, 'post'::character varying])::text[])))
 );
 
 
@@ -11009,6 +11072,15 @@ GRANT ALL ON FUNCTION public.create_care_report(p_pet_label text, p_photos jsonb
 REVOKE ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_care_thread(p_pet_label text, p_recipient_phone text) TO service_role;
+
+
+--
+-- Name: FUNCTION create_post_share_link(p_post uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.create_post_share_link(p_post uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_post_share_link(p_post uuid) TO authenticated;
+GRANT ALL ON FUNCTION public.create_post_share_link(p_post uuid) TO service_role;
 
 
 --
