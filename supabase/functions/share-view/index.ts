@@ -28,6 +28,11 @@ const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 // 스토어 링크 — 출시 전엔 미설정(버튼이 준비 중 안내로 대체됨)
 const STORE_URL_IOS = Deno.env.get("STORE_URL_IOS") ?? "";
 const STORE_URL_ANDROID = Deno.env.get("STORE_URL_ANDROID") ?? "";
+// 웹앱 주소(예: https://app.pawmate.kr) — 미설정이면 '웹에서 보기' CTA 를 아예
+// 그리지 않는다. 웹앱 배포 전에 죽은 링크가 노출되지 않게 하는 스위치.
+// 게시글 공유에만 쓴다 — 케어리포트·업체 미리보기는 웹앱에 대응 화면이 없다
+// (지도·시설 상세는 웹 범위 밖. pmdart docs/web-port.md 결정 2).
+const WEB_APP_URL = (Deno.env.get("WEB_APP_URL") ?? "").replace(/\/+$/, "");
 
 // 카테고리 라벨 — 앱과 동일.
 const CATEGORY_LABELS: Record<string, string> = {
@@ -159,6 +164,15 @@ function page(title: string, ogDesc: string, inner: string): string {
            padding:0 20px; margin-bottom:10px; }
 </style></head>
 <body><div class="wrap"><div class="brand">PawMate</div>${inner}</div></body></html>`;
+}
+
+/// '웹에서 계속 보기' CTA — 웹앱 주소가 설정됐고 게시글 id 가 있을 때만.
+/// 앱 설치 없이 브라우저에서 계속 둘러보게 하는 2차 동선이다(1차는 스토어).
+/// 계측은 기존 share_view 이벤트가 이미 이 페이지 열람 시점에 기록한다.
+function webCta(postId: unknown): string {
+  if (!WEB_APP_URL || typeof postId !== "string" || !postId) return "";
+  return `<a class="cta sub" href="${esc(WEB_APP_URL)}/p/${esc(postId)}"
+    rel="noopener">웹에서 계속 보기</a>`;
 }
 
 function noticePage(title: string, msg: string, status: number): Response {
@@ -317,6 +331,7 @@ Deno.serve(async (req) => {
     }</div>
     </div>
     <a class="cta" href="?t=${token}&amp;go=store">PawMate 앱에서 이 글 보기</a>
+    ${webCta(po.id)}
     <a class="cta sub" href="?t=${token}&amp;go=store">우리 동네 반려 이웃의 소식이 더 있어요</a>`;
     return html(page(title, `${author} · ${catLabel} — PawMate`, inner));
   }
