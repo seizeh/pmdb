@@ -63,3 +63,18 @@ with p as (
   returning id
 )
 insert into seed select 'pet1', id from p;
+
+-- 케어 설정 싱글턴 — **CI 에서만 없는 행**이라 여기서 보장한다.
+--
+-- dump_schema.sh 는 구조만 덤프하므로(데이터 제외) CI 컨테이너의 app.care_config
+-- 는 0행이다. 그러면 app.phone_hmac 의 `select hmac_key into v_key` 가 NULL 을
+-- 집어 extensions.hmac(digits, NULL, 'sha256') 이 NULL 을 돌려주고,
+-- create_care_report 가 번호를 못 읽었다며 invalid_phone 을 던진다
+-- (t11 단언 2·3·4·6·7·8 실패, t12 는 아예 SQL 오류로 중단).
+-- 운영 DB 직행 검증에서는 행이 이미 있어 통과하므로 CI 에서만 드러났다.
+--
+-- hmac_key 는 컬럼 기본값(랜덤 32바이트)에 맡긴다 — 테스트는 같은 트랜잭션 안에서
+-- 발행·조회를 모두 하므로 키 값 자체는 무관하고, 운영 키를 흉내 낼 이유도 없다.
+-- 이미 행이 있으면(운영 직행 검증) 아무것도 하지 않는다.
+insert into app.care_config (id)
+select true where not exists (select 1 from app.care_config);
