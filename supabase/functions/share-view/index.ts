@@ -169,10 +169,69 @@ function page(title: string, ogDesc: string, inner: string): string {
 /// '웹에서 계속 보기' CTA — 웹앱 주소가 설정됐고 게시글 id 가 있을 때만.
 /// 앱 설치 없이 브라우저에서 계속 둘러보게 하는 2차 동선이다(1차는 스토어).
 /// 계측은 기존 share_view 이벤트가 이미 이 페이지 열람 시점에 기록한다.
+///
+/// 게시글은 셸 서빙(appShell)으로 대체됐고, 남은 종류(스타터 등)를 위해 둔다.
 function webCta(postId: unknown): string {
   if (!WEB_APP_URL || typeof postId !== "string" || !postId) return "";
   return `<a class="cta sub" href="${esc(WEB_APP_URL)}/p/${esc(postId)}"
     rel="noopener">웹에서 계속 보기</a>`;
+}
+
+/// **게시글 공유 = 웹앱 셸을 그대로 내려준다**(pmdart docs/web-port.md 결정 6).
+///
+/// 같은 주소(go.pawmate.kr/s?t=…)에서 크롤러는 OG 태그만 읽고, 사람은 웹앱이
+/// 부팅돼 바로 둘러보기로 이어진다. 웹앱 주소를 직접 공유하지 않는 이유는
+/// 그러면 크롤러가 빈 셸을 받아 **링크 미리보기가 죽기** 때문이다.
+///
+/// 구현: 웹앱의 index.html 을 가져와 (1) `<base href>` 를 웹앱 절대주소로 바꿔
+/// 에셋을 그쪽에서 받게 하고, (2) 토큰별 OG 태그와 (3) 열어야 할 게시글 id 를
+/// `<meta name="pm-post">` 로 심는다. 주소에는 토큰만 있고 토큰→게시글 해석은
+/// service_role 전용이라 웹앱이 스스로 못 하기 때문이다.
+///
+/// 셸을 못 가져오면(웹앱 배포 중 등) null 을 돌려 기존 서버 렌더링으로 폴백한다
+/// — 공유 링크가 죽는 것보다 낫다.
+///
+/// 케어리포트·업체 미리보기는 이 경로를 쓰지 않는다. 그쪽 수신자는 '내 아이 기록을
+/// 받을 보호자' 한 명이라 웹 탐색이 아니라 앱 설치·계정 연결이 목적이다.
+async function appShell(
+  postId: unknown,
+  ogTitle: string,
+  ogDesc: string,
+  ogImage: string | null,
+): Promise<string | null> {
+  if (!WEB_APP_URL || typeof postId !== "string" || !postId) return null;
+  let shell: string;
+  try {
+    const res = await fetch(`${WEB_APP_URL}/index.html`, {
+      headers: { "cache-control": "no-cache" },
+    });
+    if (!res.ok) return null;
+    shell = await res.text();
+  } catch (e) {
+    console.error("appShell: 셸을 가져오지 못함 — 서버 렌더링으로 폴백", e);
+    return null;
+  }
+  // 빌드가 <base href="/"> 로 나오므로 절대주소로 교체 — 에셋(main.dart.js,
+  // canvaskit.wasm 등)을 웹앱 도메인에서 받는다(그쪽에 CORS 허용 헤더가 있다).
+  shell = shell.replace(
+    /<base href="[^"]*">/,
+    `<base href="${esc(WEB_APP_URL)}/">`,
+  );
+  // 기본 OG 를 이 게시글 것으로 교체(없으면 그대로 두고 아래에서 추가).
+  shell = shell
+    .replace(/<meta property="og:title"[^>]*>/, "")
+    .replace(/<meta property="og:description"[^>]*>/, "")
+    .replace(/<meta property="og:image"[^>]*>/, "");
+  const inject = `
+<meta property="og:title" content="${esc(ogTitle)}">
+<meta property="og:description" content="${esc(ogDesc)}">
+${ogImage ? `<meta property="og:image" content="${esc(ogImage)}">` : ""}
+<meta property="og:url" content="${esc(WEB_APP_URL)}/p/${esc(postId)}">
+<meta name="pm-post" content="${esc(postId)}">
+<title>${esc(ogTitle)} — PawMate</title>`;
+  // 기존 <title> 은 지우고(중복 방지) </head> 앞에 한 번에 넣는다.
+  shell = shell.replace(/<title>[\s\S]*?<\/title>/, "");
+  return shell.replace("</head>", `${inject}\n</head>`);
 }
 
 function noticePage(title: string, msg: string, status: number): Response {
@@ -295,6 +354,16 @@ Deno.serve(async (req) => {
     const isVideo = String(po.image_mime ?? "").startsWith("video/");
     const mediaUrl = po.image_url ? String(po.image_url) : null;
     const thumbUrl = po.image_thumb_url ? String(po.image_thumb_url) : null;
+
+    // 웹앱 셸 우선 — 같은 주소에서 크롤러는 OG 만, 사람은 웹앱이 뜬다.
+    // WEB_APP_URL 미설정이거나 셸을 못 가져오면 아래 서버 렌더링으로 폴백한다.
+    const shell = await appShell(
+      po.id,
+      title,
+      `${author} · ${catLabel} — PawMate`,
+      isVideo ? thumbUrl : mediaUrl,
+    );
+    if (shell) return html(shell);
     const d = new Date(String(po.created_at ?? ""));
     const dateStr = isNaN(d.getTime())
       ? ""
