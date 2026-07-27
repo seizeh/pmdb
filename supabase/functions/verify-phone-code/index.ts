@@ -1,15 +1,18 @@
 // ============================================================================
 // verify-phone-code — 전화 인증번호 검증
-//   POST { phone: string, code: string, purpose?: 'signup' | 'password_reset' }
+//   POST { phone: string, code: string, purpose?: 'signup' | 'password_reset' | 'review' }
 //   같은 phone+purpose 의 미사용·미만료 최신 code 일치 확인 → is_used=true.
 //   verify_jwt=false: 로그인 전 단계. service_role 로만 DB 접근.
+//   ⚠ purpose='review'(간이 후기)는 보통 이 함수를 거치지 않는다 — signup-lite 가
+//   검증·계정생성·토큰발급을 한 번에 한다(코드 소지와 세션 발급을 분리하면
+//   남의 인증을 가로챌 창이 생긴다). 여기 목록에 둔 건 재사용 여지를 위해서다.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import { normalizePhone } from "../_shared/solapi.ts";
 
-const PURPOSES = new Set(["signup", "password_reset"]);
+const PURPOSES = new Set(["signup", "password_reset", "review"]);
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
