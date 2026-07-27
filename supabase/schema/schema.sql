@@ -5575,6 +5575,7 @@ begin
     select jsonb_build_object(
       'status', 'ok', 'kind', v_link.kind,
       'post', jsonb_build_object(
+        'id', p.id,
         'category', p.category, 'title', p.title, 'content', p.content,
         'image_url', p.image_url, 'image_mime', p.image_mime_type,
         'image_thumb_url', p.image_thumbnail_url,
