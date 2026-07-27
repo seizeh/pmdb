@@ -177,61 +177,28 @@ function webCta(postId: unknown): string {
     rel="noopener">웹에서 계속 보기</a>`;
 }
 
-/// **게시글 공유 = 웹앱 셸을 그대로 내려준다**(pmdart docs/web-port.md 결정 6).
+/// **링크 미리보기 크롤러인가** — 미리보기를 만들려고 긁어가는 봇이면 true.
 ///
-/// 같은 주소(go.pawmate.kr/s?t=…)에서 크롤러는 OG 태그만 읽고, 사람은 웹앱이
-/// 부팅돼 바로 둘러보기로 이어진다. 웹앱 주소를 직접 공유하지 않는 이유는
-/// 그러면 크롤러가 빈 셸을 받아 **링크 미리보기가 죽기** 때문이다.
+/// 게시글 공유는 사람에게는 웹앱으로 302 를 보내고, 크롤러에게는 서버 렌더링
+/// HTML(OG 태그 포함)을 그대로 준다. 크롤러를 웹앱으로 보내면 Flutter 웹은
+/// 클라이언트 렌더링이라 **빈 셸을 읽고 링크 미리보기가 죽는다.**
 ///
-/// 구현: 웹앱의 index.html 을 가져와 (1) `<base href>` 를 웹앱 절대주소로 바꿔
-/// 에셋을 그쪽에서 받게 하고, (2) 토큰별 OG 태그와 (3) 열어야 할 게시글 id 를
-/// `<meta name="pm-post">` 로 심는다. 주소에는 토큰만 있고 토큰→게시글 해석은
-/// service_role 전용이라 웹앱이 스스로 못 하기 때문이다.
+/// ⚠️ 인앱 브라우저와 크롤러를 구분해야 한다. 카카오톡을 예로 들면
+///   · 스크래퍼(크롤러) : "kakaotalk-scrap/1.0"
+///   · 인앱 브라우저(사람): "... KAKAOTALK 10.x.x"
+/// 이다. `kakaotalk` 로 뭉뚱그리면 **한국에서 이 링크를 여는 가장 흔한 경로인
+/// 카톡 인앱 브라우저 사용자가 전부 서버 렌더링에 갇힌다.** 네이버(앱=NAVER /
+/// 크롤러=Yeti)·다음(앱=Daum / 크롤러=daumoa)도 같다. 그래서 크롤러 쪽 토큰만
+/// 정확히 집는다.
 ///
-/// 셸을 못 가져오면(웹앱 배포 중 등) null 을 돌려 기존 서버 렌더링으로 폴백한다
-/// — 공유 링크가 죽는 것보다 낫다.
-///
-/// 케어리포트·업체 미리보기는 이 경로를 쓰지 않는다. 그쪽 수신자는 '내 아이 기록을
-/// 받을 보호자' 한 명이라 웹 탐색이 아니라 앱 설치·계정 연결이 목적이다.
-async function appShell(
-  postId: unknown,
-  ogTitle: string,
-  ogDesc: string,
-  ogImage: string | null,
-): Promise<string | null> {
-  if (!WEB_APP_URL || typeof postId !== "string" || !postId) return null;
-  let shell: string;
-  try {
-    const res = await fetch(`${WEB_APP_URL}/index.html`, {
-      headers: { "cache-control": "no-cache" },
-    });
-    if (!res.ok) return null;
-    shell = await res.text();
-  } catch (e) {
-    console.error("appShell: 셸을 가져오지 못함 — 서버 렌더링으로 폴백", e);
-    return null;
-  }
-  // 빌드가 <base href="/"> 로 나오므로 절대주소로 교체 — 에셋(main.dart.js,
-  // canvaskit.wasm 등)을 웹앱 도메인에서 받는다(그쪽에 CORS 허용 헤더가 있다).
-  shell = shell.replace(
-    /<base href="[^"]*">/,
-    `<base href="${esc(WEB_APP_URL)}/">`,
-  );
-  // 기본 OG 를 이 게시글 것으로 교체(없으면 그대로 두고 아래에서 추가).
-  shell = shell
-    .replace(/<meta property="og:title"[^>]*>/, "")
-    .replace(/<meta property="og:description"[^>]*>/, "")
-    .replace(/<meta property="og:image"[^>]*>/, "");
-  const inject = `
-<meta property="og:title" content="${esc(ogTitle)}">
-<meta property="og:description" content="${esc(ogDesc)}">
-${ogImage ? `<meta property="og:image" content="${esc(ogImage)}">` : ""}
-<meta property="og:url" content="${esc(WEB_APP_URL)}/p/${esc(postId)}">
-<meta name="pm-post" content="${esc(postId)}">
-<title>${esc(ogTitle)} — PawMate</title>`;
-  // 기존 <title> 은 지우고(중복 방지) </head> 앞에 한 번에 넣는다.
-  shell = shell.replace(/<title>[\s\S]*?<\/title>/, "");
-  return shell.replace("</head>", `${inject}\n</head>`);
+/// 판정이 틀렸을 때의 손해가 비대칭이다 — 사람을 크롤러로 오인하면 기존 페이지를
+/// 보게 될 뿐이지만(무해), 크롤러를 사람으로 오인하면 미리보기가 죽는다.
+/// 그래서 끝에 일반 봇 토큰(bot/crawler/spider/scraper)도 넓게 받는다.
+const CRAWLER_UA =
+  /kakaotalk-scrap|facebookexternalhit|facebot|twitterbot|slackbot|slack-imgproxy|discordbot|telegrambot|whatsapp|line-?poker|yeti|daumoa|googlebot|bingbot|applebot|linkedinbot|embedly|redditbot|pinterest|skypeuripreview|vkshare|\bbot\b|crawler|spider|scraper/i;
+
+function isCrawler(ua: string): boolean {
+  return CRAWLER_UA.test(ua);
 }
 
 function noticePage(title: string, msg: string, status: number): Response {
@@ -250,6 +217,8 @@ Deno.serve(async (req) => {
   }
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  // 스토어 분기(아래)와 게시글의 크롤러 판별(isCrawler)이 함께 쓴다.
+  const ua = req.headers.get("user-agent") ?? "";
 
   // 스토어 이동 — 클릭 계측 후 302 (UA 로 스토어 분기, 미출시 시 안내 페이지)
   if (url.searchParams.get("go") === "store") {
@@ -257,7 +226,6 @@ Deno.serve(async (req) => {
     if (!ok) {
       return noticePage("링크를 찾을 수 없어요", "만료되었거나 회수된 링크예요.", 404);
     }
-    const ua = req.headers.get("user-agent") ?? "";
     const store = /iphone|ipad|ipod|macintosh/i.test(ua) ? STORE_URL_IOS : STORE_URL_ANDROID;
     if (!store) {
       return noticePage("앱 출시 준비 중이에요", "곧 스토어에서 만나요. 조금만 기다려 주세요!", 200);
@@ -355,15 +323,18 @@ Deno.serve(async (req) => {
     const mediaUrl = po.image_url ? String(po.image_url) : null;
     const thumbUrl = po.image_thumb_url ? String(po.image_thumb_url) : null;
 
-    // 웹앱 셸 우선 — 같은 주소에서 크롤러는 OG 만, 사람은 웹앱이 뜬다.
-    // WEB_APP_URL 미설정이거나 셸을 못 가져오면 아래 서버 렌더링으로 폴백한다.
-    const shell = await appShell(
-      po.id,
-      title,
-      `${author} · ${catLabel} — PawMate`,
-      isVideo ? thumbUrl : mediaUrl,
-    );
-    if (shell) return html(shell);
+    // 사람은 웹앱으로, 크롤러는 아래 서버 렌더링(OG 태그)으로.
+    // WEB_APP_URL 미설정이면 지금까지처럼 모두 서버 렌더링을 받는다.
+    if (WEB_APP_URL && typeof po.id === "string" && po.id && !isCrawler(ua)) {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: `${WEB_APP_URL}/p/${po.id}`,
+          // 동작이 바뀔 수 있으므로 브라우저가 리다이렉트를 캐시하지 않게 한다.
+          "cache-control": "no-store",
+        },
+      });
+    }
     const d = new Date(String(po.created_at ?? ""));
     const dateStr = isNaN(d.getTime())
       ? ""
