@@ -483,6 +483,49 @@ $$;
 
 
 --
+-- Name: mask_phone(text); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.mask_phone(p_phone text) RETURNS text
+    LANGUAGE sql IMMUTABLE
+    SET search_path TO ''
+    AS $$
+  select case
+    when d is null or length(d) < 4 then '***-****-****'
+    when length(d) >= 11 then
+      '***-' || substr(d, 4, 1) || '***-**' || right(d, 2)
+    -- 10자리 등 비표준 번호는 끝 2자리만 — 자리수를 억지로 맞추지 않는다.
+    else '***-****-**' || right(d, 2)
+  end
+  from (select regexp_replace(coalesce(p_phone, ''), '\D', '', 'g') as d) t;
+$$;
+
+
+--
+-- Name: FUNCTION mask_phone(p_phone text); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.mask_phone(p_phone text) IS '간이 회원 표시명 — 010 전체 마스킹 + 가운데 앞 1자리 + 끝 2자리(***-1***-**78).';
+
+
+--
+-- Name: needs_photo_gate(integer); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.needs_photo_gate(p_verify_post_count integer) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    SET search_path TO ''
+    AS $$ select coalesce(p_verify_post_count, 0) in (0, 3, 9) $$;
+
+
+--
+-- Name: FUNCTION needs_photo_gate(p_verify_post_count integer); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.needs_photo_gate(p_verify_post_count integer) IS '사진 촬영 인증이 필요한 게시글 순번(1·4·10번째)인지 — 앱 MyPet.needsPhotoGate 와 같은 규칙';
+
+
+--
 -- Name: norm_biz_text(text); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1760,6 +1803,26 @@ $$;
 
 
 --
+-- Name: tg_post_pets_bump_verify_count(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_post_pets_bump_verify_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  update public.pets
+     set verify_post_count = verify_post_count + 1
+   where id = new.pet_id
+     and exists (
+           select 1 from public.posts p
+            where p.id = new.post_id
+              and p.category in ('walk_together','walk_proxy','care','give_away'));
+  return new;
+end $$;
+
+
+--
 -- Name: tg_post_pets_giveaway_limit(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -2302,6 +2365,30 @@ $$;
 
 
 --
+-- Name: uid_lite(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.uid_lite() RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select u.id
+  from public.users u
+  where u.id = nullif((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'sub','')::uuid
+    and u.status in ('active', 'lite')
+    and u.token_version = coalesce(
+      ((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'tv')::int, 0)
+$$;
+
+
+--
+-- Name: FUNCTION uid_lite(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.uid_lite() IS '후기 작성 전용 uid — active + lite 허용. 이 함수를 다른 기능에 쓰지 말 것(간이 회원은 후기 외 모든 기능에서 비회원이어야 한다).';
+
+
+--
 -- Name: _push_pref_allows(uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -2335,12 +2422,31 @@ CREATE FUNCTION public.add_facility_review(p_facility uuid, p_rating smallint, p
     SET search_path TO ''
     AS $$
 declare
-  v_uid uuid := app.uid();
-  v_id uuid;
-  v jsonb;
+  v_uid    uuid := app.uid_lite();
+  v_id     uuid;
+  v        jsonb;
+  v_status text;
+  v_phone  text;
 begin
   if v_uid is null then raise exception 'auth required'; end if;
   if p_rating < 1 or p_rating > 5 then raise exception 'rating 1..5'; end if;
+
+  select status, phone into v_status, v_phone
+    from public.users where id = v_uid;
+
+  -- 간이 회원은 후기 한 건마다 전화 인증을 새로 받는다(세션을 들고 다니지 않는다).
+  if v_status = 'lite' then
+    if not exists (
+      select 1 from public.phone_verifications
+      where phone = v_phone
+        and purpose = 'review'
+        and is_used = true
+        and created_at > now() - interval '15 minutes'
+    ) then
+      raise exception 'reverify_required' using errcode = 'P0001';
+    end if;
+  end if;
+
   if exists (
     select 1 from public.business_profiles bp
      where bp.user_id = v_uid
@@ -4095,15 +4201,13 @@ declare
   v_uid  uuid := app.uid();
   v_post uuid;
   v_pv   public.photo_verifications%rowtype;
-  v_all_trusted boolean := false;
+  v_exempt boolean := false;
   v_user record;
 begin
   if v_uid is null then
     raise exception 'posts: 로그인이 필요합니다';
   end if;
 
-  -- 동네 인증 게이트 — 업체 모드(소식 전용)는 사업장 주소 기준이라 생략
-  -- (승인 여부·지역 스탬프는 tg_posts_set_region 트리거가 강제).
   select region_code, is_location_verified, last_verified_at, active_mode
     into v_user
     from public.users where id = v_uid;
@@ -4117,17 +4221,16 @@ begin
   end if;
 
   if p_category in ('walk_together','walk_proxy','care','give_away') then
-    v_all_trusted := p_pet_ids is not null
-                 and array_length(p_pet_ids, 1) >= 1
-                 and not exists (
-                       select 1 from public.pets
-                        where id = any(p_pet_ids) and trust_score < 3);
+    v_exempt := p_pet_ids is not null
+            and array_length(p_pet_ids, 1) >= 1
+            and not exists (
+                  select 1 from public.pets
+                   where id = any(p_pet_ids)
+                     and app.needs_photo_gate(verify_post_count));
 
-    if v_all_trusted then
+    if v_exempt then
       perform set_config('app.photo_trusted', 'true', true);
     else
-      -- 미인증 펫 포함 → 사진 검증 필수. 촬영 대상은 연결 펫 중 아무나
-      -- (한 마리 통과로 충분 — 인증된 펫을 촬영해도 된다).
       select * into v_pv from public.photo_verifications where id = p_photo_token;
       if not found or v_pv.pet_id is null then
         raise exception 'posts: 사진 검증 정보가 올바르지 않습니다';
@@ -4483,19 +4586,21 @@ CREATE FUNCTION public.facility_review_by_id(p_review uuid) RETURNS TABLE(id uui
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
-  select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive, r.videos
+  select r.id, r.user_id,
+         case when au.status = 'lite' then app.mask_phone(au.phone)
+              else pr.nickname end,
+         r.rating, r.content, r.photo_urls, r.created_at,
+         (r.user_id = app.uid_lite()) as is_mine, r.visit_no, r.has_incentive, r.videos
     from (
       select fr.*,
              row_number() over (
                partition by fr.user_id order by fr.created_at
              )::int as visit_no
         from public.facility_reviews fr
-       where fr.facility_id = any(public.facility_sibling_ids(
-               (select facility_id from public.facility_reviews where id = p_review)))
-         and fr.visibility_status = 'visible'
+       where fr.visibility_status = 'visible'
     ) r
     left join public.public_profiles pr on pr.id = r.user_id
+    left join public.users au on au.id = r.user_id
    where r.id = p_review;
 $$;
 
@@ -4508,8 +4613,11 @@ CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFA
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
-  select r.id, r.user_id, pr.nickname, r.rating, r.content, r.photo_urls, r.created_at,
-         (r.user_id = app.uid()) as is_mine, r.visit_no, r.has_incentive, r.videos
+  select r.id, r.user_id,
+         case when au.status = 'lite' then app.mask_phone(au.phone)
+              else pr.nickname end,
+         r.rating, r.content, r.photo_urls, r.created_at,
+         (r.user_id = app.uid_lite()) as is_mine, r.visit_no, r.has_incentive, r.videos
     from (
       select fr.*,
              row_number() over (
@@ -4520,6 +4628,7 @@ CREATE FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer DEFA
          and fr.visibility_status = 'visible'
     ) r
     left join public.public_profiles pr on pr.id = r.user_id
+    left join public.users au on au.id = r.user_id
    order by r.created_at desc
    limit least(p_limit, 50) offset p_offset;
 $$;
@@ -5508,9 +5617,11 @@ begin
         'name', f.name, 'category', f.category, 'address', f.address,
         'phone', f.phone, 'is_open', f.is_open,
         'avg_rating', f.avg_rating, 'review_count', f.review_count,
+        'id', f.id,
         'photo_url', bp.photo_url,
         'photo_align_y', coalesce(bp.photo_align_y, 0),
         'business_hours', bp.business_hours,
+        'owner_user_id', bp.user_id,
         'owner_verified', coalesce(bp.verified, false)),
       'reviews', coalesce((
         select jsonb_agg(jsonb_build_object(
@@ -5533,7 +5644,7 @@ begin
     into v_out
     from public.facilities f
     left join lateral (
-      select true as verified, b.photo_url, b.photo_align_y, b.business_hours
+      select true as verified, b.user_id, b.photo_url, b.photo_align_y, b.business_hours
         from public.business_profiles b
        where b.status = 'approved'
          and b.matched_facility_id = any(public.facility_sibling_ids(f.id))
@@ -5599,6 +5710,82 @@ $$;
 
 
 --
+-- Name: signup_lite_user(text, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean DEFAULT false) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_id     uuid;
+  v_status text;
+  v_hex    text;
+begin
+  -- 개인정보(전화번호) 수집·이용 동의는 필수. 클라이언트 체크박스만 믿지 않는다.
+  if coalesce(p_privacy_consent, false) is not true then
+    raise exception 'privacy_consent_required' using errcode = 'P0001';
+  end if;
+
+  -- 후기 목적 전화 인증 확인(30분 이내). purpose 를 'signup' 과 분리하는 이유:
+  -- send-phone-code 가 signup 목적은 "이미 가입된 번호"에 발송을 거부하는데,
+  -- 간이 후기는 정식 회원이 쓸 수도 있어 그 차단에 걸리면 안 된다.
+  if not exists (
+    select 1 from public.phone_verifications
+    where phone = p_phone
+      and purpose = 'review'
+      and is_used = true
+      and created_at > now() - interval '30 minutes'
+  ) then
+    raise exception 'phone_not_verified' using errcode = 'P0001';
+  end if;
+
+  select id, status into v_id, v_status
+    from public.users where phone = p_phone;
+
+  if found then
+    -- 정지·탈퇴 계정이 간이 경로로 되살아나면 안 된다.
+    if v_status in ('suspended', 'deleted') then
+      raise exception 'account_unavailable' using errcode = 'P0001';
+    end if;
+    return v_id;
+  end if;
+
+  -- username/nickname 은 NOT NULL + 유니크라 값이 필요하지만 사용자에게는 보이지
+  -- 않는다(표시는 app.mask_phone). password_hash 는 argon2id/bcrypt 어느 쪽으로도
+  -- 검증에 성공할 수 없는 sentinel — 비밀번호 로그인 경로를 원천 차단한다.
+  -- gen_random_uuid() 는 pg_catalog 라 search_path='' 에서도 그냥 보인다.
+  -- (pgcrypto 의 gen_random_bytes 는 extensions 스키마라 여기서 안 보인다.)
+  v_hex := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
+
+  insert into public.users (
+    username, password_hash, nickname, user_type, phone, phone_verified,
+    status, terms_agreed_at
+  ) values (
+    'lite_' || v_hex,
+    '!',
+    'lite_' || v_hex,
+    'no_pet',
+    p_phone,
+    true,
+    'lite',
+    now()
+  )
+  returning id into v_id;
+
+  return v_id;
+end;
+$$;
+
+
+--
+-- Name: FUNCTION signup_lite_user(p_phone text, p_privacy_consent boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean) IS '간이 회원 생성/조회 — 엣지 signup-lite 전용(service_role). 같은 번호는 항상 같은 계정.';
+
+
+--
 -- Name: signup_user(text, text, text, text, text, boolean); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5607,7 +5794,8 @@ CREATE FUNCTION public.signup_user(p_username text, p_password_hash text, p_nick
     SET search_path TO ''
     AS $$
 declare
-  v_id uuid;
+  v_id     uuid;
+  v_status text;
 begin
   -- 1) 전화 인증 완료 확인 (signup 목적, 사용처리됨, 30분 이내)
   if not exists (
@@ -5627,11 +5815,30 @@ begin
   if exists (select 1 from public.users where lower(nickname) = lower(p_nickname)) then
     raise exception 'nickname_taken' using errcode = 'P0001';
   end if;
-  if exists (select 1 from public.users where phone = p_phone) then
-    raise exception 'phone_taken' using errcode = 'P0001';
+
+  -- 3) 같은 번호가 이미 있으면 — lite 면 승격, 그 외엔 기존대로 거부.
+  select id, status into v_id, v_status
+    from public.users where phone = p_phone;
+
+  if found then
+    if v_status <> 'lite' then
+      raise exception 'phone_taken' using errcode = 'P0001';
+    end if;
+    update public.users set
+      username            = p_username,
+      password_hash       = p_password_hash,
+      nickname            = p_nickname,
+      user_type           = p_user_type,
+      status              = 'active',
+      terms_agreed_at     = now(),
+      marketing_opt_in    = coalesce(p_marketing, false),
+      marketing_opt_in_at = case when coalesce(p_marketing, false) then now() else null end,
+      updated_at          = now()
+    where id = v_id;
+    return v_id;
   end if;
 
-  -- 3) INSERT (해시는 엣지에서 argon2id 로 생성, 필수 약관 동의 시각 기록)
+  -- 4) 신규 INSERT (해시는 엣지에서 argon2id 로 생성, 필수 약관 동의 시각 기록)
   insert into public.users (
     username, password_hash, nickname, user_type, phone, phone_verified,
     terms_agreed_at, marketing_opt_in, marketing_opt_in_at
@@ -6860,6 +7067,7 @@ CREATE TABLE public.pets (
     ai_colors text[],
     info_match jsonb,
     trust_score integer DEFAULT 0 NOT NULL,
+    verify_post_count integer DEFAULT 0 NOT NULL,
     CONSTRAINT pets_gender_check CHECK (((gender IS NULL) OR ((gender)::text = ANY ((ARRAY['male'::character varying, 'female'::character varying])::text[])))),
     CONSTRAINT pets_pet_status_check CHECK (((pet_status)::text = ANY ((ARRAY['active'::character varying, 'transferred'::character varying, 'deceased'::character varying, 'deleted'::character varying])::text[]))),
     CONSTRAINT pets_species_kind_check CHECK (((species_kind IS NULL) OR ((species_kind)::text = ANY ((ARRAY['dog'::character varying, 'cat'::character varying])::text[]))))
@@ -6916,6 +7124,13 @@ COMMENT ON COLUMN public.pets.info_match IS '등록정보 대조 결과. 예: {"
 
 
 --
+-- Name: COLUMN pets.verify_post_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.pets.verify_post_count IS '검증 카테고리(walk/care/give_away) 게시글 누적 수 — 사진 인증 요구 순번(1·4·10) 판정용. 게시글 삭제로 줄지 않음';
+
+
+--
 -- Name: phone_verifications; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -6927,7 +7142,7 @@ CREATE TABLE public.phone_verifications (
     expires_at timestamp with time zone NOT NULL,
     is_used boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT phone_verifications_purpose_check CHECK (((purpose)::text = ANY ((ARRAY['signup'::character varying, 'password_reset'::character varying])::text[])))
+    CONSTRAINT phone_verifications_purpose_check CHECK (((purpose)::text = ANY ((ARRAY['signup'::character varying, 'password_reset'::character varying, 'review'::character varying])::text[])))
 );
 
 
@@ -7172,7 +7387,7 @@ CREATE TABLE public.users (
     active_mode character varying DEFAULT 'personal'::character varying NOT NULL,
     CONSTRAINT users_active_mode_check CHECK (((active_mode)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT users_activity_radius_chk CHECK (((activity_radius_m IS NULL) OR ((activity_radius_m >= 5000) AND (activity_radius_m <= 15000)))),
-    CONSTRAINT users_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying, 'suspended'::character varying, 'deleted'::character varying])::text[]))),
+    CONSTRAINT users_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying, 'suspended'::character varying, 'deleted'::character varying, 'lite'::character varying])::text[]))),
     CONSTRAINT users_unread_chat_count_nonneg CHECK ((unread_chat_count >= 0)),
     CONSTRAINT users_unread_notification_count_nonneg CHECK ((unread_notification_count >= 0)),
     CONSTRAINT users_user_type_check CHECK (((user_type)::text = ANY ((ARRAY['pet_owner'::character varying, 'no_pet'::character varying, 'business'::character varying, 'admin'::character varying])::text[]))),
@@ -7185,6 +7400,13 @@ CREATE TABLE public.users (
 --
 
 COMMENT ON TABLE public.users IS '사용자(커스텀 인증). password_hash 노출 금지 → 외부는 public_profiles 뷰 조회';
+
+
+--
+-- Name: COLUMN users.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.status IS 'active=정식 회원 · lite=후기 전용 간이 회원(비회원 취급, app.uid() 에서 제외) · inactive=휴면 · suspended=정지 · deleted=탈퇴';
 
 
 --
@@ -9071,6 +9293,13 @@ CREATE TRIGGER trg_post_hearts_count AFTER INSERT OR DELETE ON public.post_heart
 --
 
 CREATE TRIGGER trg_post_hearts_recall AFTER DELETE ON public.post_hearts FOR EACH ROW EXECUTE FUNCTION app.tg_post_hearts_recall();
+
+
+--
+-- Name: post_pets trg_post_pets_bump_verify_count; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_post_pets_bump_verify_count AFTER INSERT ON public.post_pets FOR EACH ROW EXECUTE FUNCTION app.tg_post_pets_bump_verify_count();
 
 
 --
@@ -11152,6 +11381,7 @@ GRANT ALL ON FUNCTION public.ensure_naver_facility(p_name text, p_address text, 
 REVOKE ALL ON FUNCTION public.facilities_search(p_query text, p_lng double precision, p_lat double precision) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.facilities_search(p_query text, p_lng double precision, p_lat double precision) TO authenticated;
 GRANT ALL ON FUNCTION public.facilities_search(p_query text, p_lng double precision, p_lat double precision) TO service_role;
+GRANT ALL ON FUNCTION public.facilities_search(p_query text, p_lng double precision, p_lat double precision) TO anon;
 
 
 --
@@ -11161,6 +11391,7 @@ GRANT ALL ON FUNCTION public.facilities_search(p_query text, p_lng double precis
 REVOKE ALL ON FUNCTION public.facilities_within(p_lng double precision, p_lat double precision, p_radius_m integer, p_categories public.facility_category[]) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.facilities_within(p_lng double precision, p_lat double precision, p_radius_m integer, p_categories public.facility_category[]) TO authenticated;
 GRANT ALL ON FUNCTION public.facilities_within(p_lng double precision, p_lat double precision, p_radius_m integer, p_categories public.facility_category[]) TO service_role;
+GRANT ALL ON FUNCTION public.facilities_within(p_lng double precision, p_lat double precision, p_radius_m integer, p_categories public.facility_category[]) TO anon;
 
 
 --
@@ -11170,6 +11401,7 @@ GRANT ALL ON FUNCTION public.facilities_within(p_lng double precision, p_lat dou
 REVOKE ALL ON FUNCTION public.facility_all_categories(p_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.facility_all_categories(p_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.facility_all_categories(p_id uuid) TO service_role;
+GRANT ALL ON FUNCTION public.facility_all_categories(p_id uuid) TO anon;
 
 
 --
@@ -11179,6 +11411,7 @@ GRANT ALL ON FUNCTION public.facility_all_categories(p_id uuid) TO service_role;
 REVOKE ALL ON FUNCTION public.facility_review_by_id(p_review uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.facility_review_by_id(p_review uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.facility_review_by_id(p_review uuid) TO service_role;
+GRANT ALL ON FUNCTION public.facility_review_by_id(p_review uuid) TO anon;
 
 
 --
@@ -11188,6 +11421,7 @@ GRANT ALL ON FUNCTION public.facility_review_by_id(p_review uuid) TO service_rol
 REVOKE ALL ON FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer, p_offset integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer, p_offset integer) TO authenticated;
 GRANT ALL ON FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer, p_offset integer) TO service_role;
+GRANT ALL ON FUNCTION public.facility_reviews_of(p_facility uuid, p_limit integer, p_offset integer) TO anon;
 
 
 --
@@ -11503,6 +11737,14 @@ GRANT ALL ON FUNCTION public.share_view_click(p_token character varying) TO serv
 
 REVOKE ALL ON FUNCTION public.share_view_load(p_token character varying) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.share_view_load(p_token character varying) TO service_role;
+
+
+--
+-- Name: FUNCTION signup_lite_user(p_phone text, p_privacy_consent boolean); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean) TO service_role;
 
 
 --
@@ -11936,6 +12178,14 @@ GRANT INSERT(species_kind),UPDATE(species_kind) ON TABLE public.pets TO authenti
 
 GRANT SELECT(trust_score) ON TABLE public.pets TO anon;
 GRANT SELECT(trust_score) ON TABLE public.pets TO authenticated;
+
+
+--
+-- Name: COLUMN pets.verify_post_count; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT(verify_post_count) ON TABLE public.pets TO anon;
+GRANT SELECT(verify_post_count) ON TABLE public.pets TO authenticated;
 
 
 --
