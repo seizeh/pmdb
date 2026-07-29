@@ -6,7 +6,7 @@
 //   ① 활동지역 인증 + 모의위치 + 촬영지 행정동==users.region_code (0018 유지)
 //   ② 대상 펫의 기준 프레임(pet_identity_frames) 조회 — 없으면 pet_not_enrolled
 //   ③ Gemini: 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 여부 + 라이브니스
-//   ④ identity_score>=IDENTITY_PASS_THRESHOLD AND is_real AND real>=AI_REAL_THRESHOLD AND real>fake → 통과
+//   ④ identity_score>=IDENTITY_PASS_THRESHOLD AND is_real AND real>fake → 통과
 //   ⑤ 통과: 사진 업로드 + record_photo_verification 토큰(pet_id, ai_match_score, ai_matched)
 //
 //   --no-verify-jwt 배포. 신원 등록은 enroll-pet-identity(영상)에서 처리(0020).
@@ -22,7 +22,10 @@ const NAVER_KEY_ID = Deno.env.get("NAVER_MAP_KEY_ID");
 const NAVER_KEY = Deno.env.get("NAVER_MAP_KEY");
 const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY");
 
-const AI_REAL_THRESHOLD = 0.70; // 라이브니스(실제 개/고양이) 하한
+// 라이브니스는 is_real && real > fake 조합으로만 판정한다 — 사진 1장 판정은
+// 실내 저조도·역광·모션 블러에 민감해 절대 하한(0.70 류)을 두지 않는다.
+// (영상 11초가 근거인 enroll 쪽 ENROLL_REAL_THRESHOLD 와 대칭 맞추기 금지 —
+//  모달리티가 다르다. 절대 하한 도입은 오탐률 측정 후에만.)
 const IDENTITY_PASS_THRESHOLD = 0.63; // 동일 개체 통과선(중간신뢰)
 const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 멀티이미지
 const TOKEN_TTL_MIN = 15;
@@ -348,7 +351,7 @@ Deno.serve(async (req: Request) => {
   }
   const real = Math.max(m.dog_real, m.cat_real);
   const fake = Math.max(m.dog_fake, m.cat_fake);
-  const livenessOk = m.is_real && real >= AI_REAL_THRESHOLD && real > fake;
+  const livenessOk = m.is_real && real > fake;
   const idOk = m.identity_score >= IDENTITY_PASS_THRESHOLD;
   if (!livenessOk) {
     await logFail("not_real_pet", { regionCode: geo.regionCode, regionMatched: true, m });

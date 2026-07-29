@@ -7,6 +7,7 @@
 //   ③ Gemini(영상+프레임 한 호출): 실제 살아있는 개/고양이 + 영상 내내 동일 개체
 //      + frames[] 가 그 영상에서 나온 장면인지(frames_from_video) — 기준셋 바꿔치기 차단.
 //      frames[] 는 클라이언트 주장일 뿐이므로 영상과 바인딩 검증 없이는 신뢰 금지.
+//      ※ frames_from_video 는 섀도 모드(기록만, 거절 안 함) — FRAMES_FROM_VIDEO_ENFORCE 참조.
 //   ④ 등록정보 교차검증(종=하드 게이트(개↔고양이 불일치 거절), 품종=소프트 경고, 색=기록)
 //   ⑤ 통과: 프레임 N장만 media 업로드 + enroll_pet_identity RPC.  ★ 영상은 저장하지 않음
 //
@@ -24,6 +25,17 @@ const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY");
 
 const ENROLL_REAL_THRESHOLD = 0.70;
 const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 영상/이미지 멀티모달
+
+// frames_from_video 하드 리젝 스위치. challenge 를 오탐으로 걷어낸 전례가 있어 동종
+// AI 판단을 측정 없이 하드 게이트로 켜지 않는다 — 2026-07-29부터 섀도 모드로
+// photo_verifications(fail_reason='frames_not_from_video') 에 기록만 하고, 오탐률
+// 확인 후 true 로 전환. 오탐 소지: 클라 프레임 추출 시각(800/2500/4000/5500ms)이
+// Gemini 의 1fps 영상 샘플링 순간과 어긋나 정상 영상도 false 가 뜰 수 있다.
+const FRAMES_FROM_VIDEO_ENFORCE = false;
+
+// Gemini inline 요청 총량 한도(요청당 20MB) 보호선. 초과 시 Gemini 400 이
+// ai_unavailable 로 뭉개지지 않도록 video_too_large 로 구분해 반환한다.
+const MAX_INLINE_B64_CHARS = 19_000_000;
 
 /// Gemini 구조화 출력 호출 + 429(한도) 재시도(backoff).
 async function geminiGenerate(parts: unknown[], schema: object): Promise<any> {
@@ -232,6 +244,10 @@ Deno.serve(async (req: Request) => {
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
   if (frames.length < 3) return json({ enrolled: false, reason: "too_few_frames" }, 400);
+  const inlineChars = videoBase64.length + frames.reduce((n, f) => n + f.length, 0);
+  if (inlineChars > MAX_INLINE_B64_CHARS) {
+    return json({ enrolled: false, reason: "video_too_large" }, 400);
+  }
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
@@ -275,9 +291,12 @@ Deno.serve(async (req: Request) => {
   // ★ 기준셋 바꿔치기 차단 — 검증한 영상과 저장할 프레임이 같은 출처여야 한다.
   //   이 게이트가 없으면 "아무 라이브 영상 + 다른 개체 사진 frames[]" 조합으로
   //   타 개체가 기준셋으로 등록되어 이후 모든 게시글 매칭이 무력화된다.
+  //   현재는 섀도 모드: 기록만 남기고 통과시킨다(FRAMES_FROM_VIDEO_ENFORCE 주석 참조).
   if (!ai.frames_from_video) {
     await logEnrollFail(admin, uid, petId, "frames_not_from_video", ai);
-    return json({ enrolled: false, reason: "frames_not_from_video", ai });
+    if (FRAMES_FROM_VIDEO_ENFORCE) {
+      return json({ enrolled: false, reason: "frames_not_from_video", ai });
+    }
   }
 
   const species = ai.dog_real >= ai.cat_real ? "dog" : "cat";
