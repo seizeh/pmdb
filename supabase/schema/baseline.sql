@@ -2352,7 +2352,7 @@ CREATE TABLE public.device_tokens (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
     CONSTRAINT device_tokens_failure_count_check CHECK ((failure_count >= 0)),
-    CONSTRAINT device_tokens_platform_check CHECK (((platform)::text = ANY ((ARRAY['ios'::character varying, 'android'::character varying])::text[])))
+    CONSTRAINT device_tokens_platform_check CHECK (((platform)::text = ANY ((ARRAY['ios'::character varying, 'android'::character varying, 'web'::character varying])::text[])))
 );
 
 
