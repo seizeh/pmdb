@@ -73,7 +73,9 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
-          pg_dump --version
+          # 러너에 16 이 먼저 깔려 있어 PATH 앞자리를 차지한다 — 17 을 앞에 세운다.
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
 
       - name: Postgres 기동 (cron.database_name = 작업용 DB)
         run: |

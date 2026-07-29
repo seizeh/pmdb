@@ -24,7 +24,7 @@ set -euo pipefail
 ADMIN_URL="${1:?사용법: replay_check.sh <db-url>}"
 REPLAY_DB="${REPLAY_DB:-pmdb_replay}"
 cd "$(dirname "$0")/.."
-export PATH="/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
+export PATH="/usr/lib/postgresql/17/bin:/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
 . scripts/_schema_dump.sh
 
 # 같은 서버의 작업용 DB 로 연결문자열을 갈아끼운다(쿼리스트링은 유지).
