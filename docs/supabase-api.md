@@ -23,7 +23,7 @@
 | `reset-password` | 전화 OTP 인증 후 비밀번호 재설정 | 없음 (선행 전화 인증 필요) | false | ACTIVE v3 |
 | `verify-location` | GPS 현장 동네(행정동) 인증 | 커스텀 JWT Bearer | false | ACTIVE v10 |
 | `verify-post-photo` | 게시글 사진 동일개체 매칭 + 라이브니스(Gemini) | 커스텀 JWT Bearer | false | ACTIVE v9 |
-| `enroll-pet-identity` | 펫 신원 등록 (임무 영상 → AI 검증 → 기준 프레임) | 커스텀 JWT Bearer | false | ACTIVE v8 |
+| `enroll-pet-identity` | 펫 신원 등록 (인증 영상 → AI 검증(+프레임 출처) → 기준 프레임) | 커스텀 JWT Bearer | false | ACTIVE v8 |
 | `search-petcafe` | 애견카페 실시간 검색 (네이버 지역검색 프록시) | 커스텀 JWT Bearer | false | ACTIVE v9 |
 | `resolve-region` | 좌표 → 행정동 역지오코딩 (부수효과 없음) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS) | 커스텀 JWT Bearer | false | ACTIVE v1 |
@@ -250,23 +250,23 @@
   - 200 실패 `{ pass: false, reason: "not_verified" | "mock_location" | "geocode_failed" | "region_mismatch"(+expected/got) | "pet_not_enrolled" | "ai_unavailable" | "not_real_pet"(+ai) | "identity_mismatch"(+ai) }`
   - 400 `invalid_json` / `missing_image` / `missing_pet` / `invalid_coords`
   - 401 `unauthorized`, 403 `forbidden`(보호자 아님), 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ⓪ `pet_guardians`에서 uid가 petId의 보호자인지 확인 ① `users`의 활동지역 인증 상태 확인 — `is_location_verified`, `last_verified_at`(30일 경과 시 만료 취급), `region_code` ② 모의위치 거절(+`record_photo_verification` 실패 기록) ③ 촬영 좌표를 네이버 역지오코딩 → 행정동 코드가 `users.region_code`와 일치해야 함 ④ `pet_identity_frames`에서 기준 프레임 목록 조회 + Storage `media` 버킷에서 다운로드(없으면 `pet_not_enrolled`) ⑤ **Gemini 2.5 Pro**(구조화 JSON 출력, temperature 0, 429 시 최대 2회 backoff 재시도)로 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 `identity_score` + 라이브니스(`is_real`, dog/cat_real/fake) 판정 ⑥ `is_real && real>fake`(라이브니스) AND `identity_score >= 0.63`(동일 개체) 통과 시 → 사진을 `media/<uid>/posts/<ts>.jpg`로 업로드 → `record_photo_verification` RPC(p_result='pass', p_ttl_min=15, p_pet_id, p_match_score, p_matched=true 등)가 **검증 토큰** 반환(게시글 작성 시 제출). 실패 경로 중 `mock_location`/`geocode_failed`/`region_mismatch`/`not_real_pet`/`identity_mismatch`는 RPC로 실패 기록을 남기지만, `not_verified`/`pet_not_enrolled`/`ai_unavailable`은 기록 없이 반환한다.
+- **내부 로직**: ⓪ `pet_guardians`에서 uid가 petId의 보호자인지 확인 ① `users`의 활동지역 인증 상태 확인 — `is_location_verified`, `last_verified_at`(30일 경과 시 만료 취급), `region_code` ② 모의위치 거절(+`record_photo_verification` 실패 기록) ③ 촬영 좌표를 네이버 역지오코딩 → 행정동 코드가 `users.region_code`와 일치해야 함 ④ `pet_identity_frames`에서 기준 프레임 목록 조회 + Storage `media` 버킷에서 다운로드(없으면 `pet_not_enrolled`) ⑤ **Gemini 2.5 Pro**(구조화 JSON 출력, temperature 0, 429 시 최대 2회 backoff 재시도)로 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 `identity_score` + 라이브니스(`is_real`, dog/cat_real/fake) 판정 ⑥ `is_real && real>=0.70 && real>fake`(라이브니스) AND `identity_score >= 0.63`(동일 개체) 통과 시 → 사진을 `media/<uid>/posts/<ts>.jpg`로 업로드 → `record_photo_verification` RPC(p_result='pass', p_ttl_min=15, p_pet_id, p_match_score, p_matched=true 등)가 **검증 토큰** 반환(게시글 작성 시 제출). 실패 경로 중 `mock_location`/`geocode_failed`/`region_mismatch`/`not_real_pet`/`identity_mismatch`는 RPC로 실패 기록을 남기지만, `not_verified`/`pet_not_enrolled`/`ai_unavailable`은 기록 없이 반환한다.
 - **시크릿**: `JWT_SECRET`, `NAVER_MAP_KEY_ID`, `NAVER_MAP_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
-- **정책**: 지역 재인증 주기 30일(`REVERIFY_DAYS`, 위치기반서비스 이용약관 제7조와 일치), 검증 토큰 TTL 15분, 라이브니스 하한 0.70(상수 `AI_REAL_THRESHOLD` — 실제 판정은 `is_real && real>fake` 사용), 동일 개체 통과선 0.63.
+- **정책**: 지역 재인증 주기 30일(`REVERIFY_DAYS`, 위치기반서비스 이용약관 제7조와 일치), 검증 토큰 TTL 15분, 라이브니스 하한 0.70(`AI_REAL_THRESHOLD`, `is_real && real>=0.70 && real>fake`), 동일 개체 통과선 0.63. **신뢰 경계 주의**: `lat`/`lng`/`accuracy`/`isMocked`는 클라이언트 자기신고 값이라 직접 POST로 위조 가능 — 서버 권위 판정은 Gemini 이미지 판별뿐이며, 기기 증명(App Attest/Play Integrity)·좌표 타당성 교차검증은 출시 전 과제.
 
 ### enroll-pet-identity
 
 - **엔드포인트**: `POST /functions/v1/enroll-pet-identity` — verify_jwt=false(수동 검증)
 - **인증**: **커스텀 JWT Bearer**.
-- **요청 바디**: `{ petId: string(필수), challenge: string[](필수, 1개 이상. 알려진 코드: pat_head|hold_paw|scratch_chin|stroke_back|hand_in_frame — 단 서버는 목록을 강제하지 않으며 미지 코드는 문자열 그대로 Gemini 프롬프트에 들어감), videoBase64: string(필수), videoMime?: string(기본 'video/mp4'), frames: string[](필수, base64 3장 이상), mimeType?: string(기본 'image/jpeg') }`
+- **요청 바디**: `{ petId: string(필수), videoBase64: string(필수), videoMime?: string(기본 'video/mp4'), frames: string[](필수, base64 3장 이상), mimeType?: string(기본 'image/jpeg') }` — 동작 미션(challenge)은 AI 판별 오탐이 커서 제거됨(스푸핑 차단은 실물·라이브 판별로 유지).
 - **응답**:
-  - 200 성공 `{ enrolled: true, species, breed, colors, frameCount, frames: [url...], infoMatch: { species_kind, breed, color, warnings }, warnings, challengePassed: true }`
-  - 400 `{ enrolled: false, reason: "missing_pet" | "no_video" | "too_few_frames" | "no_challenge" }` / `invalid_json`
-  - 200 실패 `{ enrolled: false, reason: "ai_unavailable"(+detail/videoKb 진단) | "not_real_pet"(+ai) | "not_consistent_pet"(+ai) | "challenge_failed"(+missing, ai) }`
+  - 200 성공 `{ enrolled: true, species, breed, colors, frameCount, frames: [url...], infoMatch: { species_kind, breed, color, warnings }, warnings }`
+  - 400 `{ enrolled: false, reason: "missing_pet" | "no_video" | "too_few_frames" }` / `invalid_json`
+  - 200 실패 `{ enrolled: false, reason: "ai_unavailable" | "not_real_pet"(+ai) | "not_consistent_pet"(+ai) | "frames_not_from_video"(+ai) | "species_mismatch"(+ai) }`
   - 401 `unauthorized`, 403 `{ enrolled:false, reason:"not_guardian" }`, 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ① `pet_guardians` 보호자 확인 ② `pets`에서 등록 종(`species_kind`)/품종(`species`)을 **서버가 직접 읽음**(클라 입력 불신) ③ **Gemini 2.5 Pro 영상 판별**(구조화 출력): 실제 살아있는 개/고양이 여부(dog/cat_real/fake ≥ 0.70 & real>fake), 영상 내내 동일 개체(`consistent`), 지시된 무작위 임무(challenge) 수행 여부(`challenges_done`), 추정 품종/털색 ④ 등록정보 교차검증 — 종/품종 불일치는 **소프트 경고**(통과에 영향 없음, `looseBreedMatch` 느슨 비교: 소문자·공백 제거 후 부분 포함, 믹스는 관대) ⑤ 통과 시 **프레임 N장만** `media/<uid>/pet_identity/<petId>/<i>.jpg`로 업로드(upsert) + `enroll_pet_identity` RPC(p_pet, p_species, p_breed, p_colors, p_info_match, p_paths, p_urls). **★ 영상은 저장하지 않음**(Gemini 인라인 전송 후 메모리에서 소멸 — Storage/DB 미기록).
+- **내부 로직**: ① `pet_guardians` 보호자 확인 ② `pets`에서 등록 종(`species_kind`)/품종(`species`)을 **서버가 직접 읽음**(클라 입력 불신) ③ **Gemini 2.5 Pro 영상+프레임 한 호출 판별**(구조화 출력): 실제 살아있는 개/고양이 여부(dog/cat_real/fake ≥ 0.70 & real>fake), 영상 내내 동일 개체(`consistent`), **`frames[]`가 그 영상의 장면인지(`frames_from_video`) — 검증한 영상과 저장할 기준 프레임의 바꿔치기 차단**, 추정 품종/털색 ④ 등록정보 교차검증 — 종(개↔고양이) 불일치는 **하드 게이트**(`species_mismatch` 거절), 품종 불일치는 소프트 경고(`looseBreedMatch` 느슨 비교: 소문자·공백 제거 후 부분 포함, 믹스는 관대) ⑤ 통과 시 **프레임 N장만** `media/<uid>/pet_identity/<petId>/<i>.jpg`로 업로드(upsert) + `enroll_pet_identity` RPC(p_pet, p_species, p_breed, p_colors, p_info_match, p_paths, p_urls). **★ 영상은 저장하지 않음**(Gemini 인라인 전송 후 메모리에서 소멸 — Storage/DB 미기록). 실패 시에도 `photo_verifications(purpose='pet_identity')`에 1행 기록(관리자 실패 조회용).
 - **시크릿**: `JWT_SECRET`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
-- **정책**: 라이브니스 하한 0.70(`ENROLL_REAL_THRESHOLD`), 프레임 최소 3장, 임무 최소 1개(전부 수행돼야 통과). Gemini 429 시 1.5s/3s backoff 최대 2회 재시도.
+- **정책**: 라이브니스 하한 0.70(`ENROLL_REAL_THRESHOLD`), 프레임 최소 3장, 프레임↔영상 동일 출처 필수(`frames_from_video`). Gemini 429 시 1.5s/3s backoff 최대 2회 재시도.
 
 ### search-petcafe
 

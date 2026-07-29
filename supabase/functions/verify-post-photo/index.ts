@@ -6,7 +6,7 @@
 //   ① 활동지역 인증 + 모의위치 + 촬영지 행정동==users.region_code (0018 유지)
 //   ② 대상 펫의 기준 프레임(pet_identity_frames) 조회 — 없으면 pet_not_enrolled
 //   ③ Gemini: 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 여부 + 라이브니스
-//   ④ identity_score>=IDENTITY_PASS_THRESHOLD AND is_real AND real>fake → 통과
+//   ④ identity_score>=IDENTITY_PASS_THRESHOLD AND is_real AND real>=AI_REAL_THRESHOLD AND real>fake → 통과
 //   ⑤ 통과: 사진 업로드 + record_photo_verification 토큰(pet_id, ai_match_score, ai_matched)
 //
 //   --no-verify-jwt 배포. 신원 등록은 enroll-pet-identity(영상)에서 처리(0020).
@@ -238,6 +238,9 @@ Deno.serve(async (req: Request) => {
     return json({ error: "invalid_coords" }, 400);
   }
   const accuracy = Math.round(Number(p.accuracy ?? 0)) || 0;
+  // ※ isMocked/lat/lng/accuracy 는 클라이언트 자기신고 값 — 정상 앱의 모의위치 앱만
+  //   걸러진다(직접 POST 로 위조 가능). 서버 권위 방어는 Gemini 판정뿐이며,
+  //   위조 좌표 차단(App Attest/Play Integrity, 이동속도 타당성)은 출시 전 과제.
   const isMocked = p.isMocked === true;
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
@@ -345,7 +348,7 @@ Deno.serve(async (req: Request) => {
   }
   const real = Math.max(m.dog_real, m.cat_real);
   const fake = Math.max(m.dog_fake, m.cat_fake);
-  const livenessOk = m.is_real && real > fake;
+  const livenessOk = m.is_real && real >= AI_REAL_THRESHOLD && real > fake;
   const idOk = m.identity_score >= IDENTITY_PASS_THRESHOLD;
   if (!livenessOk) {
     await logFail("not_real_pet", { regionCode: geo.regionCode, regionMatched: true, m });

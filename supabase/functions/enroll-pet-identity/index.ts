@@ -4,7 +4,9 @@
 //        Authorization: Bearer <login JWT>
 //
 //   ① 보호자 확인  ② pets 에서 등록 종/품종 읽기(클라 입력 불신)
-//   ③ Gemini(영상): 실제 살아있는 개/고양이 + 영상 내내 동일 개체 (+ 참고 품종/털색)
+//   ③ Gemini(영상+프레임 한 호출): 실제 살아있는 개/고양이 + 영상 내내 동일 개체
+//      + frames[] 가 그 영상에서 나온 장면인지(frames_from_video) — 기준셋 바꿔치기 차단.
+//      frames[] 는 클라이언트 주장일 뿐이므로 영상과 바인딩 검증 없이는 신뢰 금지.
 //   ④ 등록정보 교차검증(종=하드 게이트(개↔고양이 불일치 거절), 품종=소프트 경고, 색=기록)
 //   ⑤ 통과: 프레임 N장만 media 업로드 + enroll_pet_identity RPC.  ★ 영상은 저장하지 않음
 //
@@ -112,27 +114,38 @@ const ENROLL_SCHEMA = {
     dog_fake: { type: "number" },
     cat_fake: { type: "number" },
     consistent: { type: "boolean" },
+    frames_from_video: { type: "boolean" },
     detected_breed: { type: "string" },
     coat_colors: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
   },
   required: [
     "species", "dog_real", "cat_real", "dog_fake", "cat_fake",
-    "consistent", "detected_breed", "coat_colors", "reason",
+    "consistent", "frames_from_video", "detected_breed", "coat_colors", "reason",
   ],
 };
 
-async function verifyEnrollmentVideo(videoBase64: string, videoMime: string) {
+async function verifyEnrollmentVideo(
+  videoBase64: string,
+  videoMime: string,
+  frames: string[],
+  frameMime: string,
+) {
   const prompt =
-    `이 영상은 반려동물 등록 인증용이다. 판단하라:
+    `이 영상은 반려동물 등록 인증용이다. 영상 뒤의 정지 이미지들은 이 영상에서 추출했다고 주장되는 프레임이다. 판단하라:
 (1) 실제 살아있는 개/고양이인가(화면 재촬영·인쇄물·일러스트·인형·AI 생성은 fake) — dog_real/cat_real/dog_fake/cat_fake(0~1).
 (2) 영상 내내 같은 한 마리(동일 개체)인가 → consistent.
-(3) (참고) 추정 품종 detected_breed(한국어, 확실치 않으면 "믹스") 와 주요 털색 coat_colors(예: ["white","tan"]).
+(3) 정지 이미지들이 전부 이 영상의 장면인가(같은 개체·같은 배경·같은 촬영 세션) → frames_from_video. 한 장이라도 다른 개체거나 다른 촬영이면 false.
+(4) (참고) 추정 품종 detected_breed(한국어, 확실치 않으면 "믹스") 와 주요 털색 coat_colors(예: ["white","tan"]).
 reason 한국어 80자 이내.`;
-  const body = await geminiGenerate([
+  const parts: unknown[] = [
     { text: prompt },
     { inline_data: { mime_type: videoMime, data: videoBase64 } },
-  ], ENROLL_SCHEMA);
+  ];
+  for (const f of frames) {
+    parts.push({ inline_data: { mime_type: frameMime, data: f } });
+  }
+  const body = await geminiGenerate(parts, ENROLL_SCHEMA);
   const txt = body?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
   const v = JSON.parse(txt);
   return {
@@ -142,6 +155,7 @@ reason 한국어 80자 이내.`;
     dog_fake: clamp01(v.dog_fake),
     cat_fake: clamp01(v.cat_fake),
     consistent: v.consistent === true,
+    frames_from_video: v.frames_from_video === true,
     detected_breed: String(v.detected_breed ?? "").slice(0, 50),
     coat_colors: Array.isArray(v.coat_colors)
       ? v.coat_colors.map((s: unknown) => String(s)).slice(0, 6)
@@ -239,10 +253,10 @@ Deno.serve(async (req: Request) => {
   const regType = (pet?.species_kind ?? "").toLowerCase(); // 'dog'|'cat'
   const regBreed = (pet?.species ?? "").trim();
 
-  // 2) Gemini 영상 판별 (실물·라이브 + 동일 개체)
+  // 2) Gemini 영상 판별 (실물·라이브 + 동일 개체 + 프레임↔영상 동일 출처)
   let ai: Awaited<ReturnType<typeof verifyEnrollmentVideo>>;
   try {
-    ai = await verifyEnrollmentVideo(videoBase64, videoMime);
+    ai = await verifyEnrollmentVideo(videoBase64, videoMime, frames, mimeType);
   } catch (e) {
     console.error("gemini enroll failed", e);
     await logEnrollFail(admin, uid, petId, "ai_unavailable");
@@ -257,6 +271,13 @@ Deno.serve(async (req: Request) => {
   if (!ai.consistent) {
     await logEnrollFail(admin, uid, petId, "not_consistent_pet", ai);
     return json({ enrolled: false, reason: "not_consistent_pet", ai });
+  }
+  // ★ 기준셋 바꿔치기 차단 — 검증한 영상과 저장할 프레임이 같은 출처여야 한다.
+  //   이 게이트가 없으면 "아무 라이브 영상 + 다른 개체 사진 frames[]" 조합으로
+  //   타 개체가 기준셋으로 등록되어 이후 모든 게시글 매칭이 무력화된다.
+  if (!ai.frames_from_video) {
+    await logEnrollFail(admin, uid, petId, "frames_not_from_video", ai);
+    return json({ enrolled: false, reason: "frames_not_from_video", ai });
   }
 
   const species = ai.dog_real >= ai.cat_real ? "dog" : "cat";
