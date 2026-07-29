@@ -14,6 +14,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { alertAdmins } from "../_shared/edge_alert.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -347,6 +348,8 @@ Deno.serve(async (req: Request) => {
     m = await matchIdentity(refB64, imageBase64, mimeType);
   } catch (e) {
     console.error("gemini match failed", e);
+    await alertAdmins(admin, "verify_ai_unavailable", "[운영] 게시글 사진 인증 AI 장애",
+      `verify-post-photo: Gemini 호출 실패 — ${String(e).slice(0, 140)}`);
     return json({ pass: false, reason: "ai_unavailable" });
   }
   const real = Math.max(m.dog_real, m.cat_real);
@@ -372,6 +375,8 @@ Deno.serve(async (req: Request) => {
   );
   if (upErr) {
     console.error("media upload failed", upErr);
+    await alertAdmins(admin, "verify_internal_error", "[운영] 게시글 사진 인증 내부 오류",
+      `verify-post-photo: 사진 업로드 실패 — ${String(upErr.message ?? upErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
   }
   const imageUrl = admin.storage.from("media").getPublicUrl(path).data.publicUrl;
@@ -403,6 +408,8 @@ Deno.serve(async (req: Request) => {
   });
   if (recErr) {
     console.error("record failed", recErr);
+    await alertAdmins(admin, "verify_internal_error", "[운영] 게시글 사진 인증 내부 오류",
+      `verify-post-photo: record_photo_verification RPC 실패 — ${String(recErr.message ?? recErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
   }
 
