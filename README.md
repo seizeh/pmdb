@@ -58,6 +58,10 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 `supabase_admin` 소유라 스텁을 얹을 수 없다. `cron.database_name` 을 그 DB 로 지정하는
 이유도 같다(pg_cron 은 그 DB 에서만 설치된다).
 
+작업용 DB 를 두 개 만들어 **양쪽 다 복원→덤프를 거친 뒤** 비교한다 —
+`pg_dump` 출력은 되먹였을 때 글자 그대로 재현되지 않아서(파서가 배열 캐스트를 접는 등)
+스냅샷 파일과 직접 비교하면 의미가 같은데도 차이가 난다.
+
 적용 순서와 각 조각의 역할:
 
 | 파일 | 역할 |
