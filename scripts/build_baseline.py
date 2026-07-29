@@ -490,6 +490,37 @@ def strip_inline_constraint(stmt: str, name: str) -> str:
     return stmt[: span[0] + 1] + ",".join(kept) + stmt[span[1] :]
 
 
+def usage_order(files: list[Path]) -> tuple[dict, dict]:
+    """마이그레이션 전체를 한 줄로 늘어놓고 각 객체의
+    (처음 만들어지는 문장 번호, 처음 참조되는 문장 번호)를 잰다.
+
+    `create or replace` 로 갱신되는 뷰·함수라도, 그 앞 마이그레이션이 이미 쓰고
+    있으면 베이스라인에 있어야 한다(app.uid() 가 그렇다 — 두 번째 마이그레이션부터
+    쓰는데 재정의는 한참 뒤다).
+    """
+    first_create: dict[tuple, int] = {}
+    first_ref: dict[str, int] = {}
+    idx = 0
+    for f in files:
+        for raw in split_statements(f.read_text()):
+            s = strip_comments(raw).strip()
+            if not s:
+                continue
+            idx += 1
+            for action, key, _, _ in parse_migration_actions([raw]):
+                if action == "create":
+                    first_create.setdefault(key, idx)
+            # DROP 은 '사용'이 아니고(재정의 직전 정리), COMMENT 는 설명문일 뿐이다.
+            if re.match(r"(drop|comment)\b", s, re.I):
+                continue
+            # 문자열 리터럴 안의 이름도 사용이 아니다
+            # (`comment … '… (app.has_license).'` 같은 설명에 걸린다).
+            body = re.sub(r"'(?:[^']|'')*'", " ", s.lower())
+            for m in re.finditer(r"\b([a-z_][a-z_0-9]*)\.([a-z_][a-z_0-9]*)\b", body):
+                first_ref.setdefault(m.group(0), idx)
+    return first_create, first_ref
+
+
 def extract_paren(s: str, open_idx: int) -> str:
     depth = 0
     for i in range(open_idx, len(s)):
@@ -718,9 +749,11 @@ def main() -> int:
     for b in blocks:
         classify(b)
 
+    files = sorted(MIGRATIONS.glob("*.sql"))
     acts: list[tuple] = []
-    for f in sorted(MIGRATIONS.glob("*.sql")):
+    for f in files:
         acts += parse_migration_actions(split_statements(f.read_text()))
+    first_create, first_ref = usage_order(files)
 
     deps = view_dependencies(blocks)
     owner_of = {b.key: b.owner for b in blocks if b.key and b.owner and b.key != b.owner}
@@ -756,8 +789,40 @@ def main() -> int:
     #   · 함수 — 인자 이름을 바꿀 수 없다(cannot change name of input parameter)
     # 최종본 위에 옛 정의를 replace 하는 순간 깨지므로, 마이그레이션이 만드는
     # 뷰·함수는 전부 빼고 리플레이가 처음부터 쌓게 한다.
-    # (베이스라인에 남는 건 결국 "마이그레이션이 한 번도 건드리지 않은 것" 뿐이다.)
-    excluded |= {k for k in migration_creates if k[0] in ("view", "function")}
+    # 단, 만들어지기 전에 이미 쓰이는 것은 베이스라인에 있어야 한다(app.uid()).
+    # 참조는 이름만 보이고 시그니처는 안 보이므로(오버로드 구분 불가), 같은 이름의
+    # 오버로드 중 가장 이른 생성 시점과 비교한다 — 안 그러면 4인자 버전의 생성을
+    # 7인자 버전에 대한 '조기 사용' 으로 잘못 읽는다.
+    earliest_create: dict[str, int] = {}
+    for k, i in first_create.items():
+        if k[0] in ("view", "function"):
+            name = f"{k[1]}.{k[2]}"
+            earliest_create[name] = min(earliest_create.get(name, i), i)
+
+    # baseline-manual.sql 이 손으로 복원해 둔 객체는 자동 파트에서 뺀다(중복 정의 방지).
+    manual_path = ROOT / "supabase" / "schema" / "baseline-manual.sql"
+    manual_creates = set()
+    if manual_path.exists():
+        manual_creates = {
+            key
+            for action, key, _, _ in parse_migration_actions(
+                split_statements(manual_path.read_text())
+            )
+            if action == "create"
+        }
+        excluded |= manual_creates
+
+    kept_early = set()
+    for k in migration_creates:
+        if k in manual_creates:
+            continue
+        if k[0] not in ("view", "function"):
+            continue
+        name = f"{k[1]}.{k[2]}"
+        if first_ref.get(name, 1 << 30) < earliest_create.get(name, 1 << 30):
+            kept_early.add(k)
+        else:
+            excluded.add(k)
     for _ in range(10):
         names = set()
         for k in excluded:
@@ -776,7 +841,11 @@ def main() -> int:
                 continue
             if not pattern.search(b.name + " " + strip_comments(b.body)):
                 continue
-            if b.key in migration_creates:
+            if b.key in kept_early:
+                # 만들어지기 전에 쓰이는 객체라 뺄 수 없다 — 빼면 앞 마이그레이션이 깨진다.
+                if b.key not in [u[0] for u in unresolved]:
+                    unresolved.append((b.key, b.type + " (조기 사용)"))
+            elif b.key in migration_creates:
                 excluded.add(b.key)
                 grew = True
             elif b.key not in [u[0] for u in unresolved]:
@@ -840,6 +909,9 @@ def main() -> int:
             print("  ", k)
         print(f"\n== 없는 객체를 drop(IF EXISTS 없음) {len(set(missing_drops))}건 ==")
         for k in sorted(set(missing_drops), key=str):
+            print("  ", k)
+        print(f"\n== 만들어지기 전에 쓰여 베이스라인에 남긴 뷰·함수 {len(kept_early)}개 ==")
+        for k in sorted(kept_early, key=str):
             print("  ", k)
         print(f"\n== 제외 대상을 참조하는데 마이그레이션이 안 만드는 블록 {len(unresolved)}개 ==")
         for k, t in sorted(unresolved, key=str):

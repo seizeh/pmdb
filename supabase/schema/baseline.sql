@@ -1047,6 +1047,23 @@ $$;
 
 
 --
+-- Name: uid(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.uid() RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select u.id
+  from public.users u
+  where u.id = nullif((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'sub','')::uuid
+    and u.status = 'active'
+    and u.token_version = coalesce(
+      ((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'tv')::int, 0)
+$$;
+
+
+--
 -- Name: uid_lite(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1068,6 +1085,29 @@ $$;
 --
 
 COMMENT ON FUNCTION app.uid_lite() IS '후기 작성 전용 uid — active + lite 허용. 이 함수를 다른 기능에 쓰지 말 것(간이 회원은 후기 외 모든 기능에서 비회원이어야 한다).';
+
+
+--
+-- Name: facility_sibling_ids(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.facility_sibling_ids(p_id uuid) RETURNS uuid[]
+    LANGUAGE sql STABLE
+    SET search_path TO 'public'
+    AS $$
+  select coalesce(array_agg(s.id), array[p_id])
+    from facilities f
+    join facilities s
+      on s.id = f.id
+      or (f.geom is not null and s.geom is not null
+          and st_dwithin(s.geom, f.geom, 50)
+          and (s.name = f.name
+               or (f.phone is not null and s.phone = f.phone)
+               or (length(f.name) >= 3 and length(s.name) >= 3
+                   and (s.name ilike '%' || f.name || '%'
+                        or f.name ilike '%' || s.name || '%'))))
+   where f.id = p_id;
+$$;
 
 
 --
@@ -2023,6 +2063,13 @@ CREATE TABLE public.users (
 --
 
 COMMENT ON TABLE public.users IS '사용자(커스텀 인증). password_hash 노출 금지 → 외부는 public_profiles 뷰 조회';
+
+
+--
+-- Name: COLUMN users.status; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.status IS 'active=정식 회원 · lite=후기 전용 간이 회원(비회원 취급, app.uid() 에서 제외) · inactive=휴면 · suspended=정지 · deleted=탈퇴';
 
 
 --
@@ -3726,10 +3773,31 @@ CREATE POLICY admin_logs_select ON public.admin_logs FOR SELECT USING (app.is_ad
 ALTER TABLE public.applications ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: applications applications_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY applications_insert ON public.applications FOR INSERT WITH CHECK ((applicant_id = app.uid()));
+
+
+--
 -- Name: appointments; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: appointments appointments_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY appointments_select ON public.appointments FOR SELECT USING (((post_owner_id = app.uid()) OR (applicant_id = app.uid()) OR app.is_admin()));
+
+
+--
+-- Name: appointments appointments_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY appointments_update ON public.appointments FOR UPDATE USING (((post_owner_id = app.uid()) OR (applicant_id = app.uid()) OR app.is_admin())) WITH CHECK (((post_owner_id = app.uid()) OR (applicant_id = app.uid()) OR app.is_admin()));
+
 
 --
 -- Name: business_profiles; Type: ROW SECURITY; Schema: public; Owner: -
@@ -3738,16 +3806,44 @@ ALTER TABLE public.appointments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.business_profiles ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: business_profiles business_profiles_select_own; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY business_profiles_select_own ON public.business_profiles FOR SELECT TO authenticated USING ((user_id = app.uid()));
+
+
+--
 -- Name: chat_message_deletions; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.chat_message_deletions ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: chat_message_deletions chat_message_deletions_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_message_deletions_insert ON public.chat_message_deletions FOR INSERT WITH CHECK ((user_id = app.uid()));
+
+
+--
+-- Name: chat_message_deletions chat_message_deletions_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_message_deletions_select ON public.chat_message_deletions FOR SELECT USING ((user_id = app.uid()));
+
+
+--
 -- Name: chat_messages; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.chat_messages ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: chat_messages chat_messages_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_messages_insert ON public.chat_messages FOR INSERT WITH CHECK (((sender_id = app.uid()) AND app.is_room_member(room_id)));
+
 
 --
 -- Name: chat_messages chat_messages_select; Type: POLICY; Schema: public; Owner: -
@@ -3770,10 +3866,38 @@ CREATE POLICY chat_messages_update ON public.chat_messages FOR UPDATE USING (app
 ALTER TABLE public.chat_room_members ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: chat_room_members chat_room_members_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_room_members_insert ON public.chat_room_members FOR INSERT WITH CHECK (((user_id = app.uid()) OR app.is_admin()));
+
+
+--
+-- Name: chat_room_members chat_room_members_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_room_members_select ON public.chat_room_members FOR SELECT USING (((user_id = app.uid()) OR app.is_room_member(room_id) OR app.is_admin()));
+
+
+--
+-- Name: chat_room_members chat_room_members_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_room_members_update ON public.chat_room_members FOR UPDATE USING ((user_id = app.uid())) WITH CHECK ((user_id = app.uid()));
+
+
+--
 -- Name: chat_rooms; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.chat_rooms ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: chat_rooms chat_rooms_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY chat_rooms_insert ON public.chat_rooms FOR INSERT WITH CHECK ((app.uid() IS NOT NULL));
+
 
 --
 -- Name: chat_rooms chat_rooms_select; Type: POLICY; Schema: public; Owner: -
@@ -3796,6 +3920,13 @@ CREATE POLICY chat_rooms_update ON public.chat_rooms FOR UPDATE USING (app.is_ad
 ALTER TABLE public.comments ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: comments comments_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY comments_insert ON public.comments FOR INSERT WITH CHECK ((user_id = app.uid()));
+
+
+--
 -- Name: comments comments_select; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -3803,10 +3934,24 @@ CREATE POLICY comments_select ON public.comments FOR SELECT USING (((is_deleted 
 
 
 --
+-- Name: comments comments_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY comments_update ON public.comments FOR UPDATE USING (((user_id = app.uid()) OR app.is_admin())) WITH CHECK (((user_id = app.uid()) OR app.is_admin()));
+
+
+--
 -- Name: device_tokens; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.device_tokens ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: device_tokens device_tokens_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY device_tokens_all ON public.device_tokens USING ((user_id = app.uid())) WITH CHECK ((user_id = app.uid()));
+
 
 --
 -- Name: facility_cache; Type: ROW SECURITY; Schema: public; Owner: -
@@ -3828,10 +3973,31 @@ CREATE POLICY facility_cache_select ON public.facility_cache FOR SELECT USING (t
 ALTER TABLE public.location_verifications ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: location_verifications location_verifications_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY location_verifications_insert ON public.location_verifications FOR INSERT WITH CHECK ((user_id = app.uid()));
+
+
+--
+-- Name: location_verifications location_verifications_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY location_verifications_select ON public.location_verifications FOR SELECT USING (((user_id = app.uid()) OR app.is_admin()));
+
+
+--
 -- Name: notification_preferences; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.notification_preferences ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: notification_preferences notification_preferences_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY notification_preferences_all ON public.notification_preferences USING ((user_id = app.uid())) WITH CHECK ((user_id = app.uid()));
+
 
 --
 -- Name: notifications; Type: ROW SECURITY; Schema: public; Owner: -
@@ -3847,10 +4013,38 @@ CREATE POLICY notifications_insert ON public.notifications FOR INSERT WITH CHECK
 
 
 --
+-- Name: notifications notifications_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY notifications_select ON public.notifications FOR SELECT USING (((user_id = app.uid()) OR app.is_admin()));
+
+
+--
+-- Name: notifications notifications_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY notifications_update ON public.notifications FOR UPDATE USING (((user_id = app.uid()) OR app.is_admin())) WITH CHECK (((user_id = app.uid()) OR app.is_admin()));
+
+
+--
 -- Name: pawings; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.pawings ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: pawings pawings_delete; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pawings_delete ON public.pawings FOR DELETE USING ((follower_id = app.uid()));
+
+
+--
+-- Name: pawings pawings_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pawings_insert ON public.pawings FOR INSERT WITH CHECK ((follower_id = app.uid()));
+
 
 --
 -- Name: pawings pawings_select; Type: POLICY; Schema: public; Owner: -
@@ -3906,6 +4100,13 @@ CREATE POLICY pet_guardians_update ON public.pet_guardians FOR UPDATE USING ((ap
 ALTER TABLE public.pets ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: pets pets_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pets_insert ON public.pets FOR INSERT WITH CHECK ((primary_guardian_id = app.uid()));
+
+
+--
 -- Name: pets pets_select; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -3917,6 +4118,27 @@ CREATE POLICY pets_select ON public.pets FOR SELECT USING ((((pet_status)::text 
 --
 
 CREATE POLICY pets_update ON public.pets FOR UPDATE USING ((app.is_pet_guardian(id, 'owner'::text) OR app.is_admin())) WITH CHECK ((app.is_pet_guardian(id, 'owner'::text) OR app.is_admin()));
+
+
+--
+-- Name: pet_guardian_invites pgi_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pgi_insert ON public.pet_guardian_invites FOR INSERT WITH CHECK (((inviter_id = app.uid()) AND ((((kind)::text = 'invite'::text) AND app.is_pet_guardian(pet_id, 'owner'::text)) OR ((kind)::text = 'request'::text))));
+
+
+--
+-- Name: pet_guardian_invites pgi_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pgi_select ON public.pet_guardian_invites FOR SELECT USING (((inviter_id = app.uid()) OR (invitee_user_id = app.uid()) OR app.is_pet_guardian(pet_id, 'owner'::text) OR app.is_admin()));
+
+
+--
+-- Name: pet_guardian_invites pgi_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY pgi_update ON public.pet_guardian_invites FOR UPDATE USING ((app.is_admin() OR (((kind)::text = 'invite'::text) AND (invitee_user_id = app.uid())) OR (((kind)::text = 'request'::text) AND app.is_pet_guardian(pet_id, 'owner'::text))));
 
 
 --
@@ -3932,6 +4154,20 @@ ALTER TABLE public.phone_verifications ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.post_hearts ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: post_hearts post_hearts_delete; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY post_hearts_delete ON public.post_hearts FOR DELETE USING ((user_id = app.uid()));
+
+
+--
+-- Name: post_hearts post_hearts_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY post_hearts_insert ON public.post_hearts FOR INSERT WITH CHECK ((user_id = app.uid()));
+
+
+--
 -- Name: post_hearts post_hearts_select; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -3945,10 +4181,44 @@ CREATE POLICY post_hearts_select ON public.post_hearts FOR SELECT USING (true);
 ALTER TABLE public.post_pets ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: post_pets post_pets_delete; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY post_pets_delete ON public.post_pets FOR DELETE USING (((EXISTS ( SELECT 1
+   FROM public.posts p
+  WHERE ((p.id = post_pets.post_id) AND (p.user_id = app.uid())))) OR app.is_admin()));
+
+
+--
+-- Name: post_pets post_pets_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY post_pets_insert ON public.post_pets FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.posts p
+  WHERE ((p.id = post_pets.post_id) AND (p.user_id = app.uid())))));
+
+
+--
+-- Name: post_pets post_pets_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY post_pets_select ON public.post_pets FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM public.posts p
+  WHERE ((p.id = post_pets.post_id) AND (((p.visibility_status)::text = 'visible'::text) OR (p.user_id = app.uid()) OR app.is_admin())))));
+
+
+--
 -- Name: post_views; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.post_views ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: post_views post_views_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY post_views_insert ON public.post_views FOR INSERT WITH CHECK ((user_id = app.uid()));
+
 
 --
 -- Name: post_views post_views_select; Type: POLICY; Schema: public; Owner: -
@@ -3971,10 +4241,45 @@ CREATE POLICY posts_delete ON public.posts FOR DELETE USING (app.is_admin());
 
 
 --
+-- Name: posts posts_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY posts_insert ON public.posts FOR INSERT WITH CHECK ((user_id = app.uid()));
+
+
+--
+-- Name: posts posts_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY posts_select ON public.posts FOR SELECT USING ((((visibility_status)::text = 'visible'::text) OR (((visibility_status)::text = 'hidden_by_user'::text) AND (user_id = app.uid())) OR app.is_admin()));
+
+
+--
+-- Name: posts posts_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY posts_update ON public.posts FOR UPDATE USING (((user_id = app.uid()) OR app.is_admin())) WITH CHECK (((user_id = app.uid()) OR app.is_admin()));
+
+
+--
 -- Name: reports; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.reports ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: reports reports_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY reports_insert ON public.reports FOR INSERT WITH CHECK ((reporter_id = app.uid()));
+
+
+--
+-- Name: reports reports_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY reports_select ON public.reports FOR SELECT USING (((reporter_id = app.uid()) OR app.is_admin()));
+
 
 --
 -- Name: reports reports_update; Type: POLICY; Schema: public; Owner: -
@@ -4003,6 +4308,13 @@ CREATE POLICY review_category_counts_select ON public.review_category_counts FOR
 ALTER TABLE public.reviews ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: reviews reviews_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY reviews_insert ON public.reviews FOR INSERT WITH CHECK ((reviewer_id = app.uid()));
+
+
+--
 -- Name: reviews reviews_select; Type: POLICY; Schema: public; Owner: -
 --
 
@@ -4016,10 +4328,45 @@ CREATE POLICY reviews_select ON public.reviews FOR SELECT USING (true);
 ALTER TABLE public.user_blocks ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: user_blocks user_blocks_delete; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_blocks_delete ON public.user_blocks FOR DELETE USING ((blocker_id = app.uid()));
+
+
+--
+-- Name: user_blocks user_blocks_insert; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_blocks_insert ON public.user_blocks FOR INSERT WITH CHECK ((blocker_id = app.uid()));
+
+
+--
+-- Name: user_blocks user_blocks_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY user_blocks_select ON public.user_blocks FOR SELECT USING ((blocker_id = app.uid()));
+
+
+--
 -- Name: users; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: users users_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY users_select ON public.users FOR SELECT USING ((((status)::text <> 'suspended'::text) OR (id = app.uid()) OR app.is_admin()));
+
+
+--
+-- Name: users users_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY users_update ON public.users FOR UPDATE USING (((id = app.uid()) OR app.is_admin())) WITH CHECK (((id = app.uid()) OR app.is_admin()));
+
 
 --
 -- Name: SCHEMA app; Type: ACL; Schema: -; Owner: -
@@ -4101,6 +4448,24 @@ GRANT ALL ON FUNCTION app.mark_push_skipped(p_notification_id uuid, p_reason tex
 
 GRANT ALL ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION uid(); Type: ACL; Schema: app; Owner: -
+--
+
+GRANT ALL ON FUNCTION app.uid() TO anon;
+GRANT ALL ON FUNCTION app.uid() TO authenticated;
+GRANT ALL ON FUNCTION app.uid() TO service_role;
+
+
+--
+-- Name: FUNCTION facility_sibling_ids(p_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON FUNCTION public.facility_sibling_ids(p_id uuid) TO anon;
+GRANT ALL ON FUNCTION public.facility_sibling_ids(p_id uuid) TO authenticated;
+GRANT ALL ON FUNCTION public.facility_sibling_ids(p_id uuid) TO service_role;
 
 
 --
