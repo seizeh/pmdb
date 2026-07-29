@@ -749,6 +749,12 @@ def main() -> int:
     # 다시 만들어 주므로 같이 빼야 리플레이가 굴러간다.
     migration_creates = {key for action, key, _, _ in acts if action == "create"}
     unresolved: list[tuple] = []
+
+    # 뷰는 최종 정의를 두면 안 된다. `create or replace view` 는 컬럼을 지우거나
+    # 순서를 바꿀 수 없어서(ERROR: cannot drop columns from view), 컬럼이 늘어난
+    # 최종 뷰 위에 옛 정의를 replace 하는 순간 깨진다. 마이그레이션이 만드는
+    # 뷰는 전부 빼고 리플레이가 처음부터 쌓게 한다.
+    excluded |= {k for k in migration_creates if k[0] == "view"}
     for _ in range(10):
         names = set()
         for k in excluded:
