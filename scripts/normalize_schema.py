@@ -20,8 +20,8 @@ stdin → stdout.
    달려 있어(원본 마이그레이션 문장 vs 덤프를 되먹인 문장) 리플레이 비교에서 가짜 차이를
    만든다. 원소별 꼴을 배열 통째 꼴로 모은다.
 
-3) 빈 줄 압축 — 블록을 걷어내면 앞뒤 빈 줄 개수가 어긋난다. 의미가 없으므로
-   연속 빈 줄은 한 줄로 모은다.
+3) 빈 줄 제거 — 블록을 걷어내면 앞뒤 빈 줄 개수가 어긋난다. 빈 줄은 의미가 없으므로
+   아예 지우고 비교한다.
 
 4) GRANT/REVOKE 나열 순서 정렬
    한 객체의 ACL 나열 순서는 권한을 어떤 차례로 준 적 있는지에 따라 갈린다(ACL 배열
@@ -68,14 +68,9 @@ def drop_default_acl_blocks(lines: list[str]) -> list[str]:
 def main() -> int:
     lines = drop_default_acl_blocks(sys.stdin.readlines())
     run: list[str] = []
-    blank = False
     for line in lines:
         if line.strip() == "":
-            if blank:
-                continue
-            blank = True
-        else:
-            blank = False
+            continue
         line = FOLDED.sub(unfold, line)
         if ACL_LINE.match(line):
             run.append(line)
