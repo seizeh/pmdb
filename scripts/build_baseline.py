@@ -853,7 +853,15 @@ def main() -> int:
         "-- schema.sql 스냅샷과 같은 스키마가 나온다(CI replay 잡이 매번 검증).\n"
         "--\n\n"
     )
-    OUT.write_text(header + preamble + "".join(b.text() for b in kept))
+    manual = ROOT / "supabase" / "schema" / "baseline-manual.sql"
+    tail = ""
+    if manual.exists():
+        tail = (
+            "\n--\n-- 여기부터는 baseline-manual.sql — 스냅샷에서 역산할 수 없어\n"
+            "-- 손으로 복원한 조각이다(이유는 그 파일 주석 참고).\n--\n\n"
+            + manual.read_text()
+        )
+    OUT.write_text(header + preamble + "".join(b.text() for b in kept) + tail)
     print(f"written: {OUT} ({len(OUT.read_text().splitlines())} lines)")
     print(f"제외 {len(removed)} 블록 / 유지 {len(kept)} 블록")
     if missing_drops:
