@@ -68,19 +68,27 @@ dump_schema_to "$DB_URL" "$WORK/replayed.sql"
 normalize_dump "$WORK/replayed.sql"          > "$WORK/a.sql"
 normalize_dump "$SCHEMA_DIR/schema.sql"      > "$WORK/b.sql"
 
+# 전체 diff 는 파일로 남긴다(CI 는 아티팩트로 올린다) — 콘솔은 잘리기 때문에
+# 여기서 앞부분만 보고 나머지는 파일에서 확인한다.
+OUT_DIFF="${REPLAY_DIFF_OUT:-replay-diff.txt}"
+
 if diff -u "$WORK/b.sql" "$WORK/a.sql" > "$WORK/diff.txt"; then
   echo "✅ 리플레이 결과가 스냅샷과 일치 ($(wc -l < "$WORK/a.sql" | tr -d ' ') 줄)"
+  : > "$OUT_DIFF"
   exit 0
 fi
 
+cp "$WORK/diff.txt" "$OUT_DIFF"
 echo "❌ 리플레이 결과가 스냅샷과 다름 — 아래 중 하나다:"
 echo "   · 마이그레이션 없이 운영 DB 에 직접 친 DDL 이 있다 → 마이그레이션으로 남길 것"
 echo "   · 스냅샷 갱신을 잊었다 → ./scripts/dump_schema.sh"
 echo "   · 베이스라인이 어긋났다 → ./scripts/build_baseline.py"
 echo
-echo "(-- 는 스냅샷에만, ++ 는 리플레이 결과에만 있는 줄)"
-head -400 "$WORK/diff.txt"
+echo "(-- 는 스냅샷=운영에만, ++ 는 리플레이 결과에만 있는 줄)"
+echo "전체 diff: $OUT_DIFF"
+echo
+sed -n '1,150p' "$WORK/diff.txt"
 total=$(grep -cE '^[-+][^-+]' "$WORK/diff.txt" || true)
 echo
-echo "차이 있는 줄 $total 개"
+echo "… (앞 150줄만 표시) 차이 있는 줄 $total 개"
 exit 1

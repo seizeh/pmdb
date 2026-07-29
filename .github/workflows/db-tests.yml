@@ -120,6 +120,15 @@ jobs:
       - name: 리플레이 + 스냅샷 대조
         run: ./scripts/replay_check.sh "$DB_URL"
 
+      # 실패했을 때 전체 diff 를 받아 볼 수 있게(콘솔에는 앞부분만 찍는다).
+      - name: 스키마 diff 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-diff
+          path: replay-diff.txt
+          if-no-files-found: ignore
+
       # 재생된 스키마가 형태만 맞고 의미가 틀린 경우를 막기 위해, 스냅샷 경로와
       # 같은 불변식 테스트를 리플레이 결과 DB 에도 한 번 더 돌린다.
       - name: 재생된 DB 에서 pgTAP 테스트
