@@ -788,8 +788,10 @@ def main() -> int:
 
     # 부속 블록(제약·FK·기본값·시퀀스·인덱스·GRANT…)이 제외 대상을 참조하면 같이 뺀다.
     # 남아 있는 테이블에서 마이그레이션 소관 테이블로 거는 FK 가 대표적인 경우다.
+    # 함수도 포함한다 — 제외된 트리거 함수를 참조하는 CREATE TRIGGER 가 남으면
+    # `function app.tg_… does not exist` 로 깨진다(그 트리거는 마이그레이션이 만든다).
     attach_names = {
-        f"{k[1]}.{k[2]}" for k in excluded if k[0] in ("table", "view", "type")
+        f"{k[1]}.{k[2]}" for k in excluded if k[0] in ("table", "view", "type", "function")
     }
     attach_re = (
         re.compile(r"(?<![A-Za-z_0-9.])(" + "|".join(re.escape(n) for n in sorted(attach_names)) + r")\b")

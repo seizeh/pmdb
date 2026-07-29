@@ -5952,13 +5952,6 @@ CREATE TRIGGER trg_posts_block_trader BEFORE INSERT OR UPDATE OF category ON pub
 
 
 --
--- Name: posts trg_posts_check_write; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER trg_posts_check_write BEFORE INSERT ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_check_write();
-
-
---
 -- Name: posts trg_posts_deleted_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -7162,13 +7155,6 @@ GRANT USAGE ON SCHEMA public TO service_role;
 --
 
 REVOKE ALL ON FUNCTION app.cleanup_auth() FROM PUBLIC;
-
-
---
--- Name: FUNCTION cleanup_retention(); Type: ACL; Schema: app; Owner: -
---
-
-REVOKE ALL ON FUNCTION app.cleanup_retention() FROM PUBLIC;
 
 
 --
