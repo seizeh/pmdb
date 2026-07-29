@@ -77,20 +77,34 @@ jobs:
 
       - name: Postgres 기동 (cron.database_name = 작업용 DB)
         run: |
+          wait_ready() {
+            # 컨테이너 안에서 재는 건 소용없다 — 엔트리포인트가 초기화용 임시 서버를
+            # 먼저 띄우고 죽이므로 그때 준비된 것처럼 보인다. 호스트에서 실제 포트로 잰다.
+            for _ in $(seq 1 60); do
+              pg_isready -h localhost -p 54323 -U postgres -q && return 0
+              sleep 2
+            done
+            docker logs --tail 50 pmdb-replay
+            return 1
+          }
+
           docker run -d --name pmdb-replay \
             -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
-            supabase/postgres:17.6.1.121 \
-            postgres -c cron.database_name="$REPLAY_DB"
-          # 컨테이너 안에서 재는 건 소용없다 — 엔트리포인트가 초기화용 임시 서버를
-          # 먼저 띄우고 죽이므로 그때 준비된 것처럼 보인다. 호스트에서 실제 포트로 잰다.
-          for i in $(seq 1 60); do
-            pg_isready -h localhost -p 54323 -U postgres -q && break
-            sleep 2
-          done
-          pg_isready -h localhost -p 54323 -U postgres || {
-            docker logs --tail 50 pmdb-replay
-            exit 1
-          }
+            supabase/postgres:17.6.1.121
+          wait_ready
+
+          # pg_cron 은 cron.database_name 이 가리키는 DB 에서만 create extension 이 된다.
+          # 기본값은 postgres 라 작업용 DB 로 바꿔야 하는데,
+          #   · 실행 인자로 넘기면(postgres -c …) 이미지 기본 커맨드를 덮어써 설정 경로가
+          #     날아간다(pg_stat_statements must be loaded via shared_preload_libraries)
+          #   · ALTER SYSTEM 은 수퍼유저 전용인데 postgres 롤은 수퍼유저가 아니다
+          # 그래서 설정 파일에 직접 덧붙이고 재기동한다.
+          CONF=$(psql "$DB_URL" -tAc 'show config_file')
+          docker exec -u root pmdb-replay \
+            bash -c "printf \"\ncron.database_name = '%s'\n\" '$REPLAY_DB' >> '$CONF'"
+          docker restart pmdb-replay
+          wait_ready
+          psql "$DB_URL" -tAc 'show cron.database_name'
 
       - name: 베이스라인이 스냅샷과 동기 상태인지 확인
         run: |
