@@ -2586,48 +2586,6 @@ COMMENT ON COLUMN public.pets.primary_guardian_id IS '현재 소유자(owner) us
 
 
 --
--- Name: COLUMN pets.ai_ref_image_path; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.pets.ai_ref_image_path IS 'AI 인증 기준 사진의 media 경로(개체 대조 baseline). 대표사진 image_url 과 별개 (0019)';
-
-
---
--- Name: COLUMN pets.pet_match_count; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.pets.pet_match_count IS '검증 카테고리 게시글에서 개체 일치가 누적된 횟수(펫 신뢰도) (0019)';
-
-
---
--- Name: COLUMN pets.species_kind; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.pets.species_kind IS '종 분류 강아지(dog)/고양이(cat). species 는 품종 자유텍스트.';
-
-
---
--- Name: COLUMN pets.identity_verified; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.pets.identity_verified IS '신원 영상 인증(기준 프레임 등록) 완료 여부. 게시글 사진 매칭의 전제 (0020).';
-
-
---
--- Name: COLUMN pets.info_match; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.pets.info_match IS '등록정보 대조 결과. 예: {"species_kind":true,"breed":false,"color":false,"warnings":["breed"]}.';
-
-
---
--- Name: COLUMN pets.verify_post_count; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.pets.verify_post_count IS '검증 카테고리(walk/care/give_away) 게시글 누적 수 — 사진 인증 요구 순번(1·4·10) 판정용. 게시글 삭제로 줄지 않음';
-
-
---
 -- Name: phone_verifications; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2765,13 +2723,6 @@ COMMENT ON COLUMN public.posts.display_lat IS '공개 좌표(50~200m 랜덤 offs
 
 
 --
--- Name: COLUMN posts.is_pet_verified; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.posts.is_pet_verified IS '서버 검증(촬영위치 일치 + AI 실제 반려동물) 통과 사진으로 작성된 글 (0018)';
-
-
---
 -- Name: reviews; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2863,13 +2814,6 @@ COMMENT ON COLUMN public.users.unread_chat_count IS 'DB source of truth (트리�
 --
 
 COMMENT ON COLUMN public.users.phone IS '인증된 전화번호(신원/공동보호자 초대 매칭 키). PII → 컬럼 GRANT 미부여로 클라이언트 비공개';
-
-
---
--- Name: COLUMN users.region_code; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.users.region_code IS '인증된 활동 지역의 행정동코드(Naver admcode, 10자리). is_location_verified=true 일 때 채워짐';
 
 
 --
@@ -5541,14 +5485,6 @@ GRANT ALL ON TABLE public.comments TO service_role;
 
 
 --
--- Name: COLUMN comments.authored_as; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT(authored_as) ON TABLE public.comments TO authenticated;
-GRANT SELECT(authored_as) ON TABLE public.comments TO anon;
-
-
---
 -- Name: TABLE device_tokens; Type: ACL; Schema: public; Owner: -
 --
 
@@ -5725,29 +5661,6 @@ GRANT INSERT(bio),UPDATE(bio) ON TABLE public.pets TO authenticated;
 --
 
 GRANT UPDATE(pet_status) ON TABLE public.pets TO authenticated;
-
-
---
--- Name: COLUMN pets.species_kind; Type: ACL; Schema: public; Owner: -
---
-
-GRANT INSERT(species_kind),UPDATE(species_kind) ON TABLE public.pets TO authenticated;
-
-
---
--- Name: COLUMN pets.trust_score; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT(trust_score) ON TABLE public.pets TO anon;
-GRANT SELECT(trust_score) ON TABLE public.pets TO authenticated;
-
-
---
--- Name: COLUMN pets.verify_post_count; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT(verify_post_count) ON TABLE public.pets TO anon;
-GRANT SELECT(verify_post_count) ON TABLE public.pets TO authenticated;
 
 
 --
@@ -6018,22 +5931,6 @@ GRANT SELECT(updated_at),UPDATE(updated_at) ON TABLE public.posts TO authenticat
 
 
 --
--- Name: COLUMN posts.edited_at; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT(edited_at) ON TABLE public.posts TO anon;
-GRANT SELECT(edited_at) ON TABLE public.posts TO authenticated;
-
-
---
--- Name: COLUMN posts.authored_as; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT(authored_as) ON TABLE public.posts TO authenticated;
-GRANT SELECT(authored_as) ON TABLE public.posts TO anon;
-
-
---
 -- Name: TABLE reviews; Type: ACL; Schema: public; Owner: -
 --
 
@@ -6141,13 +6038,6 @@ GRANT UPDATE(push_enabled) ON TABLE public.users TO authenticated;
 
 GRANT SELECT(created_at) ON TABLE public.users TO anon;
 GRANT SELECT(created_at) ON TABLE public.users TO authenticated;
-
-
---
--- Name: COLUMN users.active_mode; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT(active_mode) ON TABLE public.users TO authenticated;
 
 
 --

@@ -597,6 +597,7 @@ class Block:
         self.key: tuple | None = None      # 이 블록이 정의하는 객체
         self.owner: tuple | None = None    # 이 블록이 딸린 릴레이션(있으면)
         self.inline: list[tuple] = []      # CREATE TABLE 안의 인라인 제약 키
+        self.column: str | None = None     # 컬럼에 딸린 블록(COMMENT/DEFAULT)일 때 그 컬럼
 
     def text(self) -> str:
         return self.header + self.body
@@ -669,6 +670,13 @@ def classify(b: Block) -> None:
             b.owner = ("table",) + tbl
             if mc:
                 b.key = ("constraint",) + tbl + (mc.group(1).strip('"').lower(),)
+    elif b.type == "DEFAULT":
+        m = re.search(rf"alter table (?:only )?({QUAL})", flat, re.I)
+        mc = re.search(rf"alter column ({IDENT})", flat, re.I)
+        if m:
+            b.owner = ("table",) + qname(m.group(1))
+        if mc:
+            b.column = mc.group(1).strip('"').lower()
     elif b.type == "ROW SECURITY":
         m = re.search(rf"alter table ({QUAL})", flat, re.I)
         if m:
@@ -687,6 +695,7 @@ def classify(b: Block) -> None:
                 b.owner = ("table",) + q(target)
             elif kind == "COLUMN":
                 b.owner = ("table",) + q(target.rsplit(".", 1)[0])
+                b.column = target.rsplit(".", 1)[1].strip('"').lower()
             elif kind == "TYPE":
                 b.key = ("type",) + q(target)
             elif kind == "FUNCTION":
@@ -969,6 +978,11 @@ def main() -> int:
             removed.append(b)
             continue
         if attach_re and b.type in ATTACH_TYPES and attach_re.search(strip_comments(b.body)):
+            removed.append(b)
+            continue
+        # 베이스라인에서 뺀 컬럼에 딸린 COMMENT/DEFAULT 도 같이 뺀다
+        # (그 컬럼은 마이그레이션이 add column 으로 붙이고 코멘트도 거기서 단다).
+        if b.column and b.owner and b.column in mig_columns.get((b.owner[1], b.owner[2]), ()):
             removed.append(b)
             continue
         if b.type == "TABLE" and b.key:
