@@ -3122,14 +3122,6 @@ ALTER TABLE ONLY public.pawings
 
 
 --
--- Name: pawings pawings_uq; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pawings
-    ADD CONSTRAINT pawings_uq UNIQUE (follower_id, following_id, context);
-
-
---
 -- Name: pet_guardian_invites pet_guardian_invites_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3506,13 +3498,6 @@ CREATE INDEX pawings_following_idx ON public.pawings USING btree (following_id);
 
 
 --
--- Name: pawings_unnotified_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX pawings_unnotified_idx ON public.pawings USING btree (created_at) WHERE (NOT notified);
-
-
---
 -- Name: pet_guardians_one_owner_uq; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3587,13 +3572,6 @@ CREATE INDEX phone_verifications_expires_idx ON public.phone_verifications USING
 --
 
 CREATE INDEX phone_verifications_lookup_idx ON public.phone_verifications USING btree (phone, purpose, created_at DESC);
-
-
---
--- Name: post_hearts_unnotified_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX post_hearts_unnotified_idx ON public.post_hearts USING btree (created_at) WHERE (NOT notified);
 
 
 --
@@ -3674,13 +3652,6 @@ CREATE INDEX posts_trgm_idx ON public.posts USING gin (((((COALESCE(title, ''::c
 
 
 --
--- Name: posts_unnotified_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX posts_unnotified_idx ON public.posts USING btree (created_at) WHERE (NOT pawing_notified);
-
-
---
 -- Name: posts_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3748,13 +3719,6 @@ CREATE UNIQUE INDEX users_lower_username_uq ON public.users USING btree (lower((
 --
 
 CREATE UNIQUE INDEX users_phone_uq ON public.users USING btree (phone) WHERE (phone IS NOT NULL);
-
-
---
--- Name: users_region_code_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX users_region_code_idx ON public.users USING btree (region_code);
 
 
 --
@@ -4349,14 +4313,6 @@ ALTER TABLE ONLY public.chat_room_members
 
 ALTER TABLE ONLY public.chat_room_members
     ADD CONSTRAINT chat_room_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
-
-
---
--- Name: chat_rooms chat_rooms_business_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.chat_rooms
-    ADD CONSTRAINT chat_rooms_business_user_id_fkey FOREIGN KEY (business_user_id) REFERENCES public.users(id);
 
 
 --

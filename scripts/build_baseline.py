@@ -980,11 +980,23 @@ def main() -> int:
         if attach_re and b.type in ATTACH_TYPES and attach_re.search(strip_comments(b.body)):
             removed.append(b)
             continue
-        # 베이스라인에서 뺀 컬럼에 딸린 COMMENT/DEFAULT 도 같이 뺀다
-        # (그 컬럼은 마이그레이션이 add column 으로 붙이고 코멘트도 거기서 단다).
-        if b.column and b.owner and b.column in mig_columns.get((b.owner[1], b.owner[2]), ()):
-            removed.append(b)
-            continue
+        # 베이스라인에서 뺀 컬럼에 딸린 블록은 같이 뺀다 — COMMENT/DEFAULT 뿐 아니라
+        # 그 컬럼을 쓰는 인덱스·제약·정책까지(pawings_uq 가 context 를 포함하는 식).
+        # 전부 컬럼과 함께 마이그레이션이 다시 붙인다.
+        if b.owner and b.type != "TABLE":
+            cols = mig_columns.get((b.owner[1], b.owner[2]))
+            if cols:
+                if b.column and b.column in cols:
+                    removed.append(b)
+                    continue
+                colre = re.compile(
+                    r"(?<![A-Za-z_0-9])("
+                    + "|".join(re.escape(c) for c in sorted(cols))
+                    + r")(?![A-Za-z_0-9])"
+                )
+                if colre.search(strip_comments(b.body)):
+                    removed.append(b)
+                    continue
         if b.type == "TABLE" and b.key:
             cols = mig_columns.get((b.key[1], b.key[2]))
             if cols:
