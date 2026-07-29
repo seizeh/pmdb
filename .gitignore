@@ -16,3 +16,6 @@ backups/
 
 # 설계 PDF 등 문서 부산물
 /*.pdf
+
+# 리플레이 검증 산출물(로컬 실행 시 생성)
+replay-diff.txt
