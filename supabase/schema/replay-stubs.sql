@@ -38,29 +38,10 @@ returns text[] language sql immutable as $$
 $$;
 
 -- ── pg_cron ────────────────────────────────────────────────────────────────
--- retention-purge / business-docs-purge 스케줄 등록(20260711130000, 20260715100000).
--- pg_cron 은 shared_preload_libraries 설정이 필요해 서비스 컨테이너에 올릴 수 없다.
--- 스케줄 등록이 성공하기만 하면 되므로 잡 목록만 흉내 낸다.
-create schema if not exists cron;
-
-create table if not exists cron.job (
-  jobid    bigserial primary key,
-  jobname  text unique,
-  schedule text,
-  command  text
-);
-
-create or replace function cron.schedule(job_name text, schedule text, command text)
-returns bigint language sql as $$
-  insert into cron.job (jobname, schedule, command) values (job_name, schedule, command)
-  on conflict (jobname) do update set schedule = excluded.schedule, command = excluded.command
-  returning jobid
-$$;
-
-create or replace function cron.unschedule(job_name text)
-returns boolean language sql as $$
-  delete from cron.job where jobname = job_name returning true
-$$;
+-- 스텁이 없다. 20260701150000 이 `create extension if not exists pg_cron` 으로
+-- 진짜 확장을 올리고, cron 스케줄을 쓰는 마이그레이션은 전부 그 뒤에 온다.
+-- (그러려면 서버의 cron.database_name 이 이 DB 여야 한다 — CI 가 설정해 준다.
+--  로컬은 README 의 docker 실행 예시 참고.)
 
 -- ── realtime ───────────────────────────────────────────────────────────────
 -- alter publication supabase_realtime add table …(20260608071651 등)
