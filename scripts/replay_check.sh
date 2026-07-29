@@ -2,7 +2,7 @@
 # ============================================================================
 # 마이그레이션 리플레이 검증 — 빈 DB 에 처음부터 다시 쌓아 스냅샷과 대조한다.
 #
-#   ./scripts/replay_check.sh "<빈 postgres 연결문자열>"
+#   ./scripts/replay_check.sh "<postgres 연결문자열>"
 #
 #   prelude.sql → replay-stubs.sql → baseline.sql → migrations/*.sql
 #     == supabase/schema/schema.sql
@@ -12,18 +12,35 @@
 #   ② 드리프트 감지 — 마이그레이션 없이 운영 DB 에 직접 친 DDL(psql 직행)이나
 #      갱신을 잊은 스냅샷이 있으면 diff 로 드러난다.
 #
-# ⚠ 대상 DB 는 비어 있어야 한다. 절대 운영 DB 를 넘기지 말 것.
+# 넘긴 연결문자열의 DB 를 직접 쓰지 않고 그 옆에 작업용 DB($REPLAY_DB, 기본
+# pmdb_replay)를 새로 만들어 거기서 돌린다. supabase/postgres 이미지의 기본 DB 에는
+# storage 스키마 같은 플랫폼 객체가 이미 들어 있어 "빈 DB" 가 아니고, 그 소유자도
+# postgres 가 아니라 스텁을 얹을 수 없기 때문이다.
+#
+# ⚠ 작업용 DB 는 매번 drop 후 재생성한다. 운영 연결문자열을 넘기지 말 것.
 # ============================================================================
 set -euo pipefail
 
-DB_URL="${1:?사용법: replay_check.sh <빈 db-url>}"
+ADMIN_URL="${1:?사용법: replay_check.sh <db-url>}"
+REPLAY_DB="${REPLAY_DB:-pmdb_replay}"
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
 . scripts/_schema_dump.sh
 
+# 같은 서버의 작업용 DB 로 연결문자열을 갈아끼운다(쿼리스트링은 유지).
+base="${ADMIN_URL%%\?*}"
+query=""
+[ "$base" != "$ADMIN_URL" ] && query="?${ADMIN_URL#*\?}"
+DB_URL="${base%/*}/${REPLAY_DB}${query}"
+
 SCHEMA_DIR=supabase/schema
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+echo "== 0/4 작업용 DB 재생성 ($REPLAY_DB)"
+psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
+  -c "drop database if exists ${REPLAY_DB} with (force)" \
+  -c "create database ${REPLAY_DB}"
 
 psql_run() { psql "$DB_URL" -X -q -v ON_ERROR_STOP=1 "$@"; }
 

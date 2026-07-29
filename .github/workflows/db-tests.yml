@@ -59,7 +59,9 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     env:
+      # replay_check.sh 는 이 서버에 작업용 DB(pmdb_replay)를 새로 만들어 거기서 돈다.
       DB_URL: postgresql://postgres:postgres@localhost:54323/postgres
+      REPLAY_URL: postgresql://postgres:postgres@localhost:54323/pmdb_replay
     steps:
       - uses: actions/checkout@v4
 
@@ -91,4 +93,4 @@ jobs:
       # 재생된 스키마가 형태만 맞고 의미가 틀린 경우를 막기 위해, 스냅샷 경로와
       # 같은 불변식 테스트를 리플레이 결과 DB 에도 한 번 더 돌린다.
       - name: 재생된 DB 에서 pgTAP 테스트
-        run: ./scripts/run_db_tests.sh "$DB_URL"
+        run: ./scripts/run_db_tests.sh "$REPLAY_URL"

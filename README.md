@@ -52,6 +52,10 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 supabase/pos
 ./scripts/replay_check.sh "postgresql://postgres:postgres@localhost:54323/postgres"
 ```
 
+넘긴 연결문자열의 DB 를 쓰는 게 아니라 그 옆에 작업용 DB(`pmdb_replay`)를 새로 만들어
+거기서 돈다 — 이미지 기본 DB 에는 `storage` 같은 플랫폼 스키마가 이미 들어 있어
+"빈 DB" 가 아니기 때문이다.
+
 적용 순서와 각 조각의 역할:
 
 | 파일 | 역할 |
