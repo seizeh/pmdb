@@ -750,11 +750,14 @@ def main() -> int:
     migration_creates = {key for action, key, _, _ in acts if action == "create"}
     unresolved: list[tuple] = []
 
-    # 뷰는 최종 정의를 두면 안 된다. `create or replace view` 는 컬럼을 지우거나
-    # 순서를 바꿀 수 없어서(ERROR: cannot drop columns from view), 컬럼이 늘어난
-    # 최종 뷰 위에 옛 정의를 replace 하는 순간 깨진다. 마이그레이션이 만드는
-    # 뷰는 전부 빼고 리플레이가 처음부터 쌓게 한다.
-    excluded |= {k for k in migration_creates if k[0] == "view"}
+    # 뷰·함수는 최종 정의를 두면 안 된다. `or replace` 가 제자리 갱신이라 옛 정의로
+    # 되돌릴 수 없는 변경이 있기 때문이다:
+    #   · 뷰   — 컬럼을 지우거나 순서를 바꿀 수 없다(cannot drop columns from view)
+    #   · 함수 — 인자 이름을 바꿀 수 없다(cannot change name of input parameter)
+    # 최종본 위에 옛 정의를 replace 하는 순간 깨지므로, 마이그레이션이 만드는
+    # 뷰·함수는 전부 빼고 리플레이가 처음부터 쌓게 한다.
+    # (베이스라인에 남는 건 결국 "마이그레이션이 한 번도 건드리지 않은 것" 뿐이다.)
+    excluded |= {k for k in migration_creates if k[0] in ("view", "function")}
     for _ in range(10):
         names = set()
         for k in excluded:
