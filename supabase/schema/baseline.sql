@@ -303,13 +303,6 @@ COMMENT ON FUNCTION app.mask_phone(p_phone text) IS '간이 회원 표시명 —
 
 
 --
--- Name: FUNCTION needs_photo_gate(p_verify_post_count integer); Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON FUNCTION app.needs_photo_gate(p_verify_post_count integer) IS '사진 촬영 인증이 필요한 게시글 순번(1·4·10번째)인지 — 앱 MyPet.needsPhotoGate 와 같은 규칙';
-
-
---
 -- Name: on_notification_push(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -5369,20 +5362,6 @@ GRANT USAGE ON SCHEMA public TO postgres;
 GRANT USAGE ON SCHEMA public TO anon;
 GRANT USAGE ON SCHEMA public TO authenticated;
 GRANT USAGE ON SCHEMA public TO service_role;
-
-
---
--- Name: FUNCTION cleanup_auth(); Type: ACL; Schema: app; Owner: -
---
-
-REVOKE ALL ON FUNCTION app.cleanup_auth() FROM PUBLIC;
-
-
---
--- Name: FUNCTION cleanup_retention(); Type: ACL; Schema: app; Owner: -
---
-
-REVOKE ALL ON FUNCTION app.cleanup_retention() FROM PUBLIC;
 
 
 --

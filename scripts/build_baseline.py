@@ -668,17 +668,24 @@ def classify(b: Block) -> None:
             b.owner = ("table",) + qname(m.group(1))
     elif b.type in ("ACL", "COMMENT", "DEFAULT ACL"):
         # `TABLE users` / `FUNCTION uid()` / `COLUMN users.phone` 형태의 이름에서 대상 추론
+        # 이름이 스키마 없이 오는 경우가 많다(`FUNCTION uid()`), 그때는 블록의 스키마를 쓴다.
+        def q(raw: str) -> tuple:
+            s2, n2 = qname(raw)
+            return (sch, n2) if "." not in raw else (s2, n2)
+
         m = re.match(r"(TABLE|VIEW|SEQUENCE|COLUMN|FUNCTION|TYPE|SCHEMA)\s+(.+)", b.name)
         if m:
             kind, target = m.group(1), m.group(2).strip()
             if kind in ("TABLE", "VIEW", "SEQUENCE"):
-                b.owner = ("table",) + qname(target)
+                b.owner = ("table",) + q(target)
             elif kind == "COLUMN":
-                b.owner = ("table",) + qname(target.rsplit(".", 1)[0])
+                b.owner = ("table",) + q(target.rsplit(".", 1)[0])
+            elif kind == "TYPE":
+                b.key = ("type",) + q(target)
             elif kind == "FUNCTION":
                 fm = re.match(rf"({QUAL})\s*\(", target)
                 if fm:
-                    fs, fn = qname(fm.group(1))
+                    fs, fn = q(fm.group(1))
                     b.key = func_key(fs, fn, extract_paren(target, target.index("(")))
         else:
             # GRANT ... ON TABLE x / ON FUNCTION x(...) 본문에서 직접
