@@ -32,9 +32,24 @@ def unfold(m: re.Match) -> str:
     return "((ARRAY[" + ", ".join(elems) + "])::text[])"
 
 
+# 한 객체의 GRANT/REVOKE 나열 순서는 권한을 어떤 차례로 준 적 있는지에 따라 갈린다
+# (ACL 배열 순서 그대로 덤프된다). 의미와 무관하므로 줄 단위로 정렬해 맞춘다.
+ACL_LINE = re.compile(r"^(GRANT|REVOKE)\b")
+
+
 def main() -> int:
+    run: list[str] = []
     for line in sys.stdin:
-        sys.stdout.write(FOLDED.sub(unfold, line))
+        line = FOLDED.sub(unfold, line)
+        if ACL_LINE.match(line):
+            run.append(line)
+            continue
+        if run:
+            sys.stdout.writelines(sorted(run))
+            run = []
+        sys.stdout.write(line)
+    if run:
+        sys.stdout.writelines(sorted(run))
     return 0
 
 

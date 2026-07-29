@@ -521,9 +521,10 @@ def strip_inline_constraint(stmt: str, name: str) -> str:
 
 
 def added_columns(statements: list[str]) -> dict:
-    """마이그레이션이 `alter table … add column` 으로 붙이는 (스키마, 테이블) → 컬럼 집합."""
+    """마이그레이션이 `alter table … add column` 으로 붙이는
+    (스키마, 테이블) → {컬럼: 그 ALTER 가 나온 순서}."""
     out: dict = {}
-    for raw in statements:
+    for idx, raw in enumerate(statements):
         s = strip_comments(raw).strip()
         flat = re.sub(r"\s+", " ", s)
         m = re.match(rf"alter table (?:only )?(?:if exists )?({QUAL})", flat, re.I)
@@ -531,8 +532,48 @@ def added_columns(statements: list[str]) -> dict:
             continue
         tbl = qname(m.group(1))
         for cm in re.finditer(rf"\badd column (?:if not exists )?({IDENT})", flat, re.I):
-            out.setdefault(tbl, set()).add(cm.group(1).strip('"').lower())
+            out.setdefault(tbl, {}).setdefault(cm.group(1).strip('"').lower(), idx)
     return out
+
+
+def table_columns(stmt: str) -> list[str]:
+    """CREATE TABLE 의 컬럼 이름을 정의 순서대로."""
+    span = table_body(stmt)
+    if not span:
+        return []
+    cols = []
+    for item in split_top_level(stmt[span[0] + 1 : span[1]]):
+        if CONSTRAINT_ITEM.match(item) or TABLE_LEVEL_KW.match(item):
+            continue
+        m = re.match(rf"^\s*({IDENT})", item)
+        if m:
+            cols.append(m.group(1).strip('"').lower())
+    return cols
+
+
+def migration_added_suffix(cols: list[str], order: dict) -> set:
+    """실제로 마이그레이션이 붙인 컬럼만 골라낸다.
+
+    ALTER TABLE ADD COLUMN 은 항상 맨 뒤에 붙으므로, 마이그레이션이 붙인 컬럼은
+    운영 스키마에서 '마이그레이션 순서대로 늘어선 꼬리' 를 이룬다. 뒤에서부터
+    그 조건이 깨지는 지점까지만 취한다.
+
+    이 판별이 필요한 이유: 마이그레이션에는 방어적으로 `add column if not exists`
+    를 써 둔 것이 있어서, 이미 기반 스키마에 있던 컬럼도 '마이그레이션이 붙인 것'
+    처럼 보인다. 그걸 베이스라인에서 빼면 리플레이에서 컬럼 순서가 어긋난다
+    (pawings.notified — 운영은 context 앞, 마이그레이션 순서로는 뒤).
+    """
+    take: list[str] = []
+    prev = None
+    for c in reversed(cols):
+        o = order.get(c)
+        if o is None:
+            break
+        if prev is not None and o > prev:
+            break
+        take.append(c)
+        prev = o
+    return set(take)
 
 
 def usage_order(files: list[Path]) -> tuple[dict, dict]:
@@ -971,9 +1012,20 @@ def main() -> int:
                     excluded.discard(k)
                     restored_funcs.add(k)
 
+    # 부속 블록 판정에 쓰려면 테이블 블록을 만나기 전에 값이 있어야 하므로 먼저 계산한다.
+    strip_cols_pre: dict = {}
+    for b in blocks:
+        if b.type == "TABLE" and b.key:
+            order = mig_columns.get((b.key[1], b.key[2]))
+            if order:
+                strip_cols_pre[(b.key[1], b.key[2])] = migration_added_suffix(
+                    table_columns(b.body), order
+                )
+
     kept: list[Block] = []
     removed: list[Block] = []
     col_removed: set = set()   # 컬럼을 빼면서 같이 빠진 제약·인덱스
+    strip_cols: dict = {}      # (스키마, 테이블) → 실제로 뺀 컬럼
     for b in blocks:
         if (b.key and b.key in excluded) or (b.owner and b.owner in excluded_tables):
             removed.append(b)
@@ -985,7 +1037,7 @@ def main() -> int:
         # 그 컬럼을 쓰는 인덱스·제약·정책까지(pawings_uq 가 context 를 포함하는 식).
         # 전부 컬럼과 함께 마이그레이션이 다시 붙인다.
         if b.owner and b.type != "TABLE":
-            cols = mig_columns.get((b.owner[1], b.owner[2]))
+            cols = strip_cols_pre.get((b.owner[1], b.owner[2]))
             if cols:
                 if b.column and b.column in cols:
                     removed.append(b)
@@ -1001,9 +1053,12 @@ def main() -> int:
                     removed.append(b)
                     continue
         if b.type == "TABLE" and b.key:
-            cols = mig_columns.get((b.key[1], b.key[2]))
-            if cols:
-                b.body = strip_columns(b.body, cols)
+            order = mig_columns.get((b.key[1], b.key[2]))
+            if order:
+                cols = migration_added_suffix(table_columns(b.body), order)
+                strip_cols[(b.key[1], b.key[2])] = cols
+                if cols:
+                    b.body = strip_columns(b.body, cols)
             for name in sorted(strip_targets.get(b.key, ())):
                 b.body = strip_inline_constraint(b.body, name)
         kept.append(b)
@@ -1029,9 +1084,18 @@ def main() -> int:
         print(f"\n== 남은 블록이 참조해 베이스라인에 되살린 함수 {len(restored_funcs)}개 ==")
         for k in sorted(restored_funcs, key=str):
             print("  ", k)
-        print(f"\n== 베이스라인 테이블에서 뺀 컬럼(마이그레이션이 add column) ==")
-        for t, cs in sorted(mig_columns.items()):
-            print("  ", f"{t[0]}.{t[1]}", sorted(cs))
+        print(f"\n== 베이스라인 테이블에서 뺀 컬럼(마이그레이션이 붙이는 꼬리) ==")
+        for t, cs in sorted(strip_cols_pre.items()):
+            if cs:
+                print("  ", f"{t[0]}.{t[1]}", sorted(cs))
+        skipped = {
+            t: sorted(set(mig_columns[t]) - strip_cols_pre.get(t, set()))
+            for t in mig_columns
+        }
+        skipped = {t: v for t, v in skipped.items() if v}
+        print(f"\n== add column 문은 있지만 기반 스키마에 이미 있던 컬럼(그대로 둠) ==")
+        for t, cs in sorted(skipped.items()):
+            print("  ", f"{t[0]}.{t[1]}", cs)
         need_pre = sorted(
             {
                 key

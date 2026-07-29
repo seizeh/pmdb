@@ -2493,6 +2493,7 @@ CREATE TABLE public.pawings (
     follower_id uuid NOT NULL,
     following_id uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    notified boolean DEFAULT false NOT NULL,
     CONSTRAINT pawings_self_chk CHECK ((follower_id <> following_id))
 );
 
@@ -3495,6 +3496,13 @@ CREATE INDEX notifications_user_created_idx ON public.notifications USING btree 
 --
 
 CREATE INDEX pawings_following_idx ON public.pawings USING btree (following_id);
+
+
+--
+-- Name: pawings_unnotified_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX pawings_unnotified_idx ON public.pawings USING btree (created_at) WHERE (NOT notified);
 
 
 --
