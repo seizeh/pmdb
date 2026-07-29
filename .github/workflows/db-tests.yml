@@ -46,24 +46,33 @@ jobs:
   replay:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    services:
-      db:
-        image: supabase/postgres:17.6.1.121
-        env:
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 54323:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 30
     env:
       # replay_check.sh 는 이 서버에 작업용 DB(pmdb_replay)를 새로 만들어 거기서 돈다.
       DB_URL: postgresql://postgres:postgres@localhost:54323/postgres
       REPLAY_URL: postgresql://postgres:postgres@localhost:54323/pmdb_replay
+      REPLAY_DB: pmdb_replay
     steps:
       - uses: actions/checkout@v4
+
+      # services: 대신 직접 띄운다 — pg_cron 을 작업용 DB 에 설치하려면
+      # cron.database_name 을 넘겨야 하는데(기본값은 postgres), 서비스 컨테이너로는
+      # postgres 실행 인자를 줄 수 없다.
+      #
+      # 이미지 기본 DB 를 쓰지 않는 이유: postgres 롤이 수퍼유저가 아니고
+      # storage 스키마는 supabase_admin 소유라 그 안에 스텁을 만들 수 없다
+      # (storage 에는 테이블이 하나도 없어서 그대로 쓸 수도 없다).
+      # 새 DB 에서는 우리가 소유자라 둘 다 해결된다.
+      - name: Postgres 기동 (cron.database_name = 작업용 DB)
+        run: |
+          docker run -d --name pmdb-replay \
+            -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
+            supabase/postgres:17.6.1.121 \
+            postgres -c cron.database_name="$REPLAY_DB"
+          for i in $(seq 1 60); do
+            docker exec pmdb-replay pg_isready -U postgres -q && break
+            sleep 2
+          done
+          docker exec pmdb-replay pg_isready -U postgres
 
       # pg_dump 는 서버와 같은 메이저(17)여야 한다. 우분투 기본 패키지는 16 이라
       # 덤프 형식이 달라져 없는 차이가 생긴다 — PGDG 저장소에서 17 을 받는다.
