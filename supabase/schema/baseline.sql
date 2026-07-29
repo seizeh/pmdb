@@ -6096,3 +6096,11 @@ CREATE VIEW public.public_profiles AS
 
 GRANT SELECT ON TABLE public.public_profiles TO anon;
 GRANT SELECT ON TABLE public.public_profiles TO authenticated;
+
+
+-- pawings_uq — 20260717010000 이 `drop constraint pawings_uq`(IF EXISTS 없음) 로 시작한다.
+-- 그 제약은 기반 스키마에 (follower_id, following_id) 2컬럼으로 있었고, 마이그레이션이
+-- context 를 넣은 3컬럼으로 바꾼다(두 얼굴 독립 팔로우). context 컬럼 자체도
+-- 마이그레이션이 붙이므로 베이스라인에는 2컬럼 형태가 있어야 drop 이 성립한다.
+ALTER TABLE ONLY public.pawings
+    ADD CONSTRAINT pawings_uq UNIQUE (follower_id, following_id);

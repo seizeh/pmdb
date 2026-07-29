@@ -973,6 +973,7 @@ def main() -> int:
 
     kept: list[Block] = []
     removed: list[Block] = []
+    col_removed: set = set()   # 컬럼을 빼면서 같이 빠진 제약·인덱스
     for b in blocks:
         if (b.key and b.key in excluded) or (b.owner and b.owner in excluded_tables):
             removed.append(b)
@@ -995,6 +996,8 @@ def main() -> int:
                     + r")(?![A-Za-z_0-9])"
                 )
                 if colre.search(strip_comments(b.body)):
+                    if b.key:
+                        col_removed.add(b.key)
                     removed.append(b)
                     continue
         if b.type == "TABLE" and b.key:
@@ -1029,6 +1032,18 @@ def main() -> int:
         print(f"\n== 베이스라인 테이블에서 뺀 컬럼(마이그레이션이 add column) ==")
         for t, cs in sorted(mig_columns.items()):
             print("  ", f"{t[0]}.{t[1]}", sorted(cs))
+        need_pre = sorted(
+            {
+                key
+                for action, key, idem, _ in acts
+                if action == "drop" and not idem and key in col_removed
+                and key not in manual_creates
+            },
+            key=str,
+        )
+        print(f"\n== 이전 형태를 baseline-manual.sql 에 넣어야 하는 것 {len(need_pre)}개 ==")
+        for k in need_pre:
+            print("  ", k, "— 마이그레이션이 IF EXISTS 없이 drop 하는데 베이스라인에서 빠짐")
         print(f"\n== 제외 대상을 참조하는데 마이그레이션이 안 만드는 블록 {len(unresolved)}개 ==")
         for k, t in sorted(unresolved, key=str):
             print("  ", t, k)
