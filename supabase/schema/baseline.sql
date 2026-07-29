@@ -45,6 +45,63 @@ COMMENT ON SCHEMA public IS 'standard public schema';
 
 
 --
+-- Name: applications_block_business_mode(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.applications_block_business_mode() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_mode text;
+begin
+  select u.active_mode into v_mode
+    from public.users u where u.id = new.applicant_id;
+  if v_mode = 'business' then
+    raise exception 'business_mode_not_allowed' using errcode = 'P0001';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: chat_block_left_room(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.chat_block_left_room() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if exists (
+    select 1 from public.chat_room_members m
+    where m.room_id = new.room_id and m.left_at is not null
+  ) then
+    raise exception '상대가 채팅방을 나가 메시지를 보낼 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: comments_set_authored_as(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.comments_set_authored_as() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  select u.active_mode into new.authored_as
+    from public.users u where u.id = new.user_id;
+  new.authored_as := coalesce(new.authored_as, 'personal');
+  return new;
+end;
+$$;
+
+
+--
 -- Name: deactivate_device_token(text, text); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -99,6 +156,29 @@ CREATE FUNCTION app.is_pet_guardian(p_pet uuid, p_role text DEFAULT NULL::text) 
       and g.user_id = app.uid()
       and (p_role is null or g.role = p_role)
   )
+$$;
+
+
+--
+-- Name: is_post_manager(uuid); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.is_post_manager(p_post uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select
+    exists (
+      select 1 from public.posts p
+       where p.id = p_post and p.user_id = app.uid()
+    )
+    or exists (
+      select 1
+        from public.post_pets pp
+        join public.pet_guardians g on g.pet_id = pp.pet_id
+       where pp.post_id = p_post and g.user_id = app.uid()
+    )
+    or app.is_admin()
 $$;
 
 
@@ -220,6 +300,63 @@ $$;
 --
 
 COMMENT ON FUNCTION app.mask_phone(p_phone text) IS '간이 회원 표시명 — 010 전체 마스킹 + 가운데 앞 1자리 + 끝 2자리(***-1***-**78).';
+
+
+--
+-- Name: FUNCTION needs_photo_gate(p_verify_post_count integer); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.needs_photo_gate(p_verify_post_count integer) IS '사진 촬영 인증이 필요한 게시글 순번(1·4·10번째)인지 — 앱 MyPet.needsPhotoGate 와 같은 규칙';
+
+
+--
+-- Name: on_notification_push(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.on_notification_push() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_url text; v_secret text;
+begin
+  if new.push_status = 'pending' and coalesce(new.is_silent, false) = false then
+    select function_url, trigger_secret into v_url, v_secret from app.push_config limit 1;
+    if v_url is not null then
+      perform net.http_post(
+        url := v_url,
+        headers := jsonb_build_object('Content-Type', 'application/json', 'x-push-secret', v_secret),
+        body := jsonb_build_object('notification_id', new.id)
+      );
+    end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: posts_set_authored_as(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.posts_set_authored_as() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  select u.active_mode into new.authored_as
+    from public.users u where u.id = new.user_id;
+  new.authored_as := coalesce(new.authored_as, 'personal');
+
+  -- 업체 모드 글은 카테고리 무관 항상 '소식' — 매칭 카테고리 사용 불가.
+  -- 개인 모드 글의 news 는 거부(소식은 업체 전용 분류).
+  if new.authored_as = 'business' then
+    new.category := 'news';
+  elsif new.category = 'news' then
+    raise exception 'posts: 소식 카테고리는 업체 계정 전용이에요';
+  end if;
+
+  return new;
+end;
+$$;
 
 
 --
@@ -391,6 +528,112 @@ begin
   if old.offered_pet_id is distinct from new.offered_pet_id then
     raise exception 'applications: offered_pet_id 는 지원 후 변경할 수 없습니다';
   end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_applications_on_accept(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_applications_on_accept() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_post       public.posts%rowtype;
+  v_locked_id  uuid;
+  v_conflict   int;
+  v_actor      uuid;
+  v_owner_side uuid;
+begin
+  if not (old.status = 'pending' and new.status = 'accepted') then
+    return new;
+  end if;
+
+  select * into v_post from public.posts where id = new.post_id for update;
+  if v_post.id is null then
+    raise exception 'applications: 게시글이 존재하지 않습니다';
+  end if;
+
+  -- 이 application 의 관련 펫 = post_pets ∪ {offered_pet_id} 가 다른 scheduled 약속에 잡혀 있나
+  with new_pets as (
+    select pp.pet_id from public.post_pets pp where pp.post_id = new.post_id
+    union
+    select new.offered_pet_id where new.offered_pet_id is not null
+  )
+  select count(*) into v_conflict
+    from public.appointments a2
+   where a2.status = 'scheduled'
+     and (
+       exists (
+         select 1 from public.post_pets pp2
+          where pp2.post_id = a2.post_id and pp2.pet_id in (select pet_id from new_pets)
+       )
+       or exists (
+         select 1 from public.applications app2
+          where app2.id = a2.application_id
+            and app2.offered_pet_id is not null
+            and app2.offered_pet_id in (select pet_id from new_pets)
+       )
+     );
+  if v_conflict > 0 then
+    raise exception '이 반려동물은 이미 다른 약속이 진행 중입니다. 해당 약속을 완료/취소한 뒤 수락해주세요';
+  end if;
+
+  update public.posts
+     set progress_status = 'matched'
+   where id = new.post_id and progress_status = 'recruiting'
+  returning id into v_locked_id;
+  if v_locked_id is null then
+    raise exception '다른 사용자가 먼저 수락하였습니다';
+  end if;
+
+  -- 약속의 보호자 측 = 실제 수락한 사람.
+  -- 작성자 본인 또는 게시글 펫의 공동보호자가 수락하면 그 사람이 약속 당사자가 된다.
+  -- (admin 등 보호자가 아닌 주체가 수락한 예외는 작성자로 fallback)
+  v_actor := app.uid();
+  if v_actor is not null and (
+       v_actor = v_post.user_id
+       or exists (
+         select 1
+           from public.post_pets pp
+           join public.pet_guardians g on g.pet_id = pp.pet_id
+          where pp.post_id = new.post_id and g.user_id = v_actor
+       )
+     ) then
+    v_owner_side := v_actor;
+  else
+    v_owner_side := v_post.user_id;
+  end if;
+
+  insert into public.appointments
+    (application_id, post_id, post_owner_id, applicant_id, status, scheduled_at)
+  values
+    (new.id, new.post_id, v_owner_side, new.applicant_id, 'scheduled', v_post.scheduled_at);
+
+  -- 나머지 대기 지원자 자동 거절
+  update public.applications
+     set status = 'rejected'
+   where post_id = new.post_id
+     and id <> new.id
+     and status = 'pending';
+
+  -- 공동보호자가 작성자 대신 수락한 경우, 작성자에게 알림 (작성자는 약속 당사자가 아님 = 평가 불가)
+  if v_owner_side is distinct from v_post.user_id then
+    begin
+      insert into public.notifications
+        (user_id, actor_user_id, notification_type, title, body, resource_type, resource_id)
+      values
+        (v_post.user_id, v_actor, 'application_accepted_by_co',
+         '공동보호자가 지원을 수락했어요',
+         '내 게시글의 지원이 공동보호자에 의해 수락되었습니다',
+         'post', new.post_id);
+    exception when others then null;
+    end;
+  end if;
+
   return new;
 end;
 $$;
@@ -587,6 +830,21 @@ $$;
 
 
 --
+-- Name: tg_block_business_actor(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_block_business_actor() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  perform app.assert_personal_actor();
+  return case tg_op when 'DELETE' then old else new end;
+end;
+$$;
+
+
+--
 -- Name: tg_chat_members_read(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -634,6 +892,43 @@ begin
        where id = new.user_id;
     end if;
   end if;
+
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_chat_messages_after_insert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_chat_messages_after_insert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_preview text;
+begin
+  if new.content is not null then v_preview := left(new.content, 100);
+  elsif new.image_mime_type like 'video/%' then v_preview := '[동영상]';
+  else v_preview := '[사진]'; end if;
+
+  update public.chat_rooms
+     set last_message_id = new.id, last_message_at = new.created_at, last_message_preview = v_preview
+   where id = new.room_id;
+
+  update public.users u
+     set unread_chat_count = unread_chat_count + 1
+    from public.chat_room_members m
+   where m.room_id = new.room_id and m.user_id = u.id and m.user_id <> new.sender_id;
+
+  insert into public.notifications(
+    user_id, actor_user_id, notification_type, title, body, resource_type, resource_id
+  )
+  select m.user_id, new.sender_id, 'chat_message',
+         coalesce(su.nickname, '새 메시지'), v_preview, 'chat_room', new.room_id
+    from public.chat_room_members m
+    left join public.users su on su.id = new.sender_id
+   where m.room_id = new.room_id and m.user_id <> new.sender_id;
 
   return new;
 end;
@@ -723,6 +1018,22 @@ $$;
 
 
 --
+-- Name: tg_log_location_usage(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_log_location_usage() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  insert into app.location_usage_logs (user_id, purpose)
+  values (new.user_id, tg_argv[0]);
+  return null;
+end;
+$$;
+
+
+--
 -- Name: tg_notifications_read_ts(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -733,6 +1044,177 @@ CREATE FUNCTION app.tg_notifications_read_ts() RETURNS trigger
 begin
   if old.is_read = false and new.is_read = true and new.read_at is null then
     new.read_at := now();
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_notifications_unread_count(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_notifications_unread_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if tg_op = 'INSERT' then
+    if new.is_read = false then
+      update public.users set unread_notification_count = unread_notification_count + 1
+       where id = new.user_id;
+    end if;
+    return new;
+  elsif tg_op = 'UPDATE' then
+    if old.is_read = false and new.is_read = true then
+      update public.users set unread_notification_count = greatest(unread_notification_count - 1, 0)
+       where id = new.user_id;
+    elsif old.is_read = true and new.is_read = false then
+      update public.users set unread_notification_count = unread_notification_count + 1
+       where id = new.user_id;
+    end if;
+    return new;
+  elsif tg_op = 'DELETE' then
+    if old.is_read = false then
+      update public.users set unread_notification_count = greatest(unread_notification_count - 1, 0)
+       where id = old.user_id;
+    end if;
+    return old;
+  end if;
+  return null;
+end;
+$$;
+
+
+--
+-- Name: tg_notify_guardian_invite(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_notify_guardian_invite() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_pet     text;
+  v_inviter text;
+begin
+  begin
+    if new.kind = 'invite'
+       and new.invitee_user_id is not null
+       and new.invitee_user_id <> new.inviter_id then
+      select name     into v_pet     from public.pets  where id = new.pet_id;
+      select nickname  into v_inviter from public.users where id = new.inviter_id;
+      insert into public.notifications(user_id, actor_user_id, notification_type, title, body)
+      values (
+        new.invitee_user_id, new.inviter_id, 'guardian_invite',
+        '공동보호자 초대가 왔어요',
+        coalesce(v_inviter,'') || '님이 ' || coalesce(v_pet,'') || '의 공동보호자로 초대했어요'
+      );
+    end if;
+  exception when others then null;
+  end;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_notify_pet_in_post(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_notify_pet_in_post() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_author uuid;
+  v_title  text;
+  v_pet    text;
+  v_actor  text;
+begin
+  select p.user_id, p.title into v_author, v_title
+    from public.posts p where p.id = new.post_id;
+  if v_author is null then return new; end if;
+
+  select pt.name into v_pet from public.pets pt where pt.id = new.pet_id;
+  select u.nickname into v_actor from public.users u where u.id = v_author;
+
+  insert into public.notifications
+    (user_id, actor_user_id, notification_type, title, body, resource_type, resource_id)
+  select g.user_id, v_author, 'pet_in_post',
+         '🐾 ' || coalesce(v_actor, '누군가') || '님이 '
+              || coalesce(v_pet, '반려동물') || '(을)를 게시글에 등록했어요',
+         app.notif_trunc(v_title), 'post', new.post_id
+    from public.pet_guardians g
+   where g.pet_id = new.pet_id
+     and g.user_id <> v_author
+     and not exists (
+       select 1 from public.notifications n
+        where n.notification_type = 'pet_in_post'
+          and n.user_id = g.user_id and n.resource_id = new.post_id);
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_pawings_recall(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_pawings_recall() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  delete from public.notifications
+   where notification_type = 'pawing_follow'
+     and user_id = old.following_id
+     and actor_user_id = old.follower_id
+     and is_read = false;
+  return old;
+end;
+$$;
+
+
+--
+-- Name: tg_pet_guardian_invites_respond(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_pet_guardian_invites_respond() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_new_guardian uuid;
+begin
+  if old.status = 'pending' and new.status = 'accepted' then
+    if new.kind = 'invite' then
+      v_new_guardian := new.invitee_user_id;   -- owner 가 초대 → 대상이 보호자
+    else
+      v_new_guardian := new.inviter_id;          -- 신청자가 요청 → 신청자가 보호자
+    end if;
+    if v_new_guardian is null then
+      raise exception 'pet_guardian_invites: 수락 대상 사용자가 확정되지 않았습니다(미가입 전화)';
+    end if;
+
+    -- 진행 중 약속의 지원자가 그 펫의 보호자가 되려는 경우 차단
+    if exists (
+      select 1
+        from public.appointments a
+        join public.post_pets pp on pp.post_id = a.post_id
+       where a.status = 'scheduled'
+         and a.applicant_id = v_new_guardian
+         and pp.pet_id = new.pet_id
+    ) then
+      raise exception '진행 중인 약속을 완료한 뒤에 보호자 초대를 수락할 수 있습니다';
+    end if;
+
+    insert into public.pet_guardians (pet_id, user_id, role, invited_by)
+    values (new.pet_id, v_new_guardian, 'co_guardian', new.inviter_id)
+    on conflict (pet_id, user_id) do nothing;
+    new.responded_at := now();
+  elsif old.status = 'pending' and new.status in ('declined','expired') then
+    new.responded_at := now();
   end if;
   return new;
 end;
@@ -759,6 +1241,55 @@ $$;
 
 
 --
+-- Name: tg_pets_after_insert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_pets_after_insert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  insert into public.pet_guardians (pet_id, user_id, role)
+  values (new.id, new.primary_guardian_id, 'owner')
+  on conflict (pet_id, user_id) do nothing;
+
+  -- 펫을 등록하면 소유자가 되므로 작성 권한을 위해 user_type 승격
+  update public.users
+     set user_type = 'pet_owner'
+   where id = new.primary_guardian_id
+     and user_type is distinct from 'pet_owner';
+
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_pgi_resolve_invitee(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_pgi_resolve_invitee() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if new.invitee_user_id is null and new.invitee_phone is not null then
+    select id into new.invitee_user_id
+      from public.users
+     where phone = new.invitee_phone;
+  end if;
+
+  -- 자기 자신 초대/요청 차단 (전화번호 resolve 후 최종 값 기준).
+  if new.invitee_user_id = new.inviter_id then
+    raise exception 'self_invite';
+  end if;
+
+  return new;
+end;
+$$;
+
+
+--
 -- Name: tg_post_hearts_count(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -777,6 +1308,45 @@ begin
   return null;
 end;
 $$;
+
+
+--
+-- Name: tg_post_hearts_recall(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_post_hearts_recall() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  delete from public.notifications
+   where notification_type = 'post_heart'
+     and actor_user_id = old.user_id
+     and resource_id = old.post_id
+     and is_read = false;
+  return old;
+end;
+$$;
+
+
+--
+-- Name: tg_post_pets_bump_verify_count(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_post_pets_bump_verify_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  update public.pets
+     set verify_post_count = verify_post_count + 1
+   where id = new.pet_id
+     and exists (
+           select 1 from public.posts p
+            where p.id = new.post_id
+              and p.category in ('walk_together','walk_proxy','care','give_away'));
+  return new;
+end $$;
 
 
 --
@@ -836,6 +1406,113 @@ $$;
 
 
 --
+-- Name: tg_posts_block_trader(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_posts_block_trader() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if new.category in ('adoption', 'give_away') and exists (
+    select 1 from public.business_profiles b
+    where b.user_id = new.user_id and b.status = 'approved'
+  ) then
+    raise exception 'posts: 영업자 계정은 분양·입양 글을 작성할 수 없어요';
+  end if;
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_posts_check_write(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_posts_check_write() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_user_type text;
+  v_cnt       int;
+  v_token     uuid := nullif(current_setting('app.photo_token', true), '')::uuid;
+  v_pv        public.photo_verifications%rowtype;
+begin
+  select user_type into v_user_type from public.users where id = new.user_id;
+  if v_user_type is null then
+    raise exception 'posts: 존재하지 않는 작성자';
+  end if;
+
+  if new.category in ('walk_together','walk_proxy','care','give_away') then
+    if v_user_type <> 'pet_owner' then
+      raise exception 'posts: % 카테고리는 pet_owner 만 작성 가능', new.category;
+    end if;
+  end if;
+
+  if new.category = 'give_away' then
+    select count(*) into v_cnt
+      from public.pet_guardians g
+      join public.pets p on p.id = g.pet_id
+     where g.user_id = new.user_id and g.role = 'owner' and p.pet_status = 'active';
+    if v_cnt < 1 then
+      raise exception 'posts: 분양은 본인이 소유자(owner)인 활성 반려동물이 있어야 작성 가능';
+    end if;
+  elsif new.category in ('walk_together','walk_proxy','care') then
+    select count(*) into v_cnt
+      from public.pet_guardians g
+      join public.pets p on p.id = g.pet_id
+     where g.user_id = new.user_id and p.pet_status = 'active';
+    if v_cnt < 1 then
+      raise exception 'posts: % 카테고리는 보호 중인 활성 반려동물이 있어야 작성 가능', new.category;
+    end if;
+  end if;
+
+  if new.category in ('walk_together','walk_proxy','care') and new.scheduled_at is null then
+    raise exception 'posts: % 카테고리는 약속 일정(scheduled_at) 필수', new.category;
+  end if;
+  if new.category in ('give_away','adoption') and new.scheduled_at is not null then
+    raise exception 'posts: % 카테고리는 게시 시 약속 일정을 둘 수 없음', new.category;
+  end if;
+
+  if new.category in ('walk_together','walk_proxy','care','give_away') then
+    if coalesce(current_setting('app.photo_trusted', true), '') = 'true' then
+      new.is_pet_verified := true;
+    else
+      if new.image_url is null then
+        raise exception 'posts: % 카테고리는 사진 등록이 필요합니다', new.category;
+      end if;
+      if v_token is null then
+        raise exception 'posts: 사진 실존 검증이 필요합니다';
+      end if;
+      select * into v_pv from public.photo_verifications
+        where id = v_token
+          and user_id = new.user_id
+          and purpose = 'post'
+          and pet_id is not null
+          and result = 'pass'
+          and ai_pass = true
+          and region_matched = true
+          and consumed_at is null
+          and expires_at > now()
+          and image_url = new.image_url;
+      if not found then
+        raise exception 'posts: 유효하지 않거나 만료된 사진 검증입니다';
+      end if;
+
+      update public.photo_verifications set consumed_at = now() where id = v_pv.id;
+      new.photo_verification_id := v_pv.id;
+      new.ai_pet_species        := v_pv.ai_species;
+      new.is_pet_verified       := v_pv.ai_matched;
+    end if;
+  end if;
+
+  return new;
+end;
+$$;
+
+
+--
 -- Name: tg_posts_deleted_at(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -854,6 +1531,71 @@ begin
   return new;
 end;
 $$;
+
+
+--
+-- Name: tg_posts_set_region(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_posts_set_region() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $_$
+declare
+  v_user record;
+  v_biz  record;
+  v_parts text[];
+  v_dong text;
+begin
+  if new.authored_as = 'business' then
+    select business_region_code,
+           coalesce(business_address_jibun, business_address) as addr
+      into v_biz
+      from public.business_profiles
+     where user_id = new.user_id and status = 'approved';
+    if not found then
+      raise exception 'posts: 승인된 업체만 소식을 작성할 수 있어요';
+    end if;
+    if new.region_code is null then
+      new.region_code := coalesce(
+        v_biz.business_region_code,
+        (select region_code from public.users where id = new.user_id));
+    end if;
+    if new.display_address is null and v_biz.addr is not null then
+      select t into v_dong
+        from unnest(regexp_split_to_array(btrim(v_biz.addr), '\s+'))
+             with ordinality as u(t, ord)
+       where t ~ '(동|읍|면|가|리)$'
+       order by ord limit 1;
+      new.display_address := v_dong;
+    end if;
+    return new;
+  end if;
+
+  select region_code, address, is_location_verified, last_verified_at
+    into v_user
+    from public.users where id = new.user_id;
+
+  if not app.is_admin() then
+    if v_user.region_code is null
+       or not coalesce(v_user.is_location_verified, false)
+       or v_user.last_verified_at is null
+       or v_user.last_verified_at < now() - interval '30 days' then
+      raise exception 'posts: 동네 인증 후 게시글을 작성할 수 있어요';
+    end if;
+  end if;
+
+  if new.region_code is null then
+    new.region_code := v_user.region_code;
+  end if;
+
+  if new.display_address is null and v_user.address is not null
+     and length(btrim(v_user.address)) > 0 then
+    v_parts := regexp_split_to_array(btrim(v_user.address), '\s+');
+    new.display_address := v_parts[cardinality(v_parts)];
+  end if;
+  return new;
+end $_$;
 
 
 --
@@ -922,6 +1664,32 @@ $$;
 
 
 --
+-- Name: tg_reviews_grant_pet_trust(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_reviews_grant_pet_trust() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_post uuid;
+begin
+  update public.appointments
+     set trust_awarded = true
+   where id = new.appointment_id
+     and status = 'completed'
+     and trust_awarded = false
+  returning post_id into v_post;
+
+  if v_post is not null then
+    update public.pets p
+       set trust_score = p.trust_score + 1
+     where p.id in (select pp.pet_id from public.post_pets pp where pp.post_id = v_post);
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: tg_reviews_validate(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -974,6 +1742,66 @@ CREATE FUNCTION app.tg_set_updated_at() RETURNS trigger
     AS $$
 begin
   new.updated_at := now();
+  return new;
+end;
+$$;
+
+
+--
+-- Name: tg_users_after_insert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_users_after_insert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_room_id uuid;
+begin
+  -- 알림 설정 기본 행
+  insert into public.notification_preferences (user_id)
+  values (new.id)
+  on conflict (user_id) do nothing;
+
+  -- 관리자 문의 채팅방 (admin 계정 제외)
+  if new.user_type <> 'admin' then
+    insert into public.chat_rooms (room_type, canonical_key)
+    values ('admin_inquiry', 'admin_' || new.id::text)
+    on conflict (canonical_key) do nothing
+    returning id into v_room_id;
+
+    if v_room_id is not null then
+      insert into public.chat_room_members (room_id, user_id)
+      values (v_room_id, new.id)
+      on conflict (room_id, user_id) do nothing;
+    end if;
+  end if;
+
+  -- 내 전화번호로 와 있던 대기 초대(invite)에 invitee_user_id 연결 → 가입 후 수락 가능
+  if new.phone is not null then
+    update public.pet_guardian_invites
+       set invitee_user_id = new.id
+     where invitee_phone = new.phone
+       and status = 'pending'
+       and invitee_user_id is null;
+
+    -- 방금 연결된 대기 초대들에 대해 알림 생성
+    begin
+      insert into public.notifications(user_id, actor_user_id, notification_type, title, body)
+      select i.invitee_user_id, i.inviter_id, 'guardian_invite',
+             '공동보호자 초대가 왔어요',
+             coalesce(u.nickname,'') || '님이 ' || coalesce(p.name,'') || '의 공동보호자로 초대했어요'
+        from public.pet_guardian_invites i
+        join public.pets  p on p.id = i.pet_id
+        left join public.users u on u.id = i.inviter_id
+       where i.invitee_user_id = new.id
+         and i.status = 'pending'
+         and i.kind = 'invite'
+         and i.invitee_user_id <> i.inviter_id;
+    exception when others then null;
+    end;
+  end if;
+
   return new;
 end;
 $$;
@@ -1377,7 +2205,6 @@ CREATE TABLE public.appointments (
     completed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
-    trust_awarded boolean DEFAULT false NOT NULL,
     CONSTRAINT appointments_completed_at_chk CHECK ((((status)::text <> 'completed'::text) OR (completed_at IS NOT NULL))),
     CONSTRAINT appointments_participants_distinct CHECK ((post_owner_id <> applicant_id)),
     CONSTRAINT appointments_status_check CHECK (((status)::text = ANY ((ARRAY['scheduled'::character varying, 'completed'::character varying, 'cancelled'::character varying])::text[])))
@@ -1418,9 +2245,6 @@ CREATE TABLE public.business_profiles (
     reviewed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    photo_url text,
-    photo_align_y real DEFAULT 0 NOT NULL,
-    business_hours character varying(100),
     CONSTRAINT business_profiles_business_reg_no_check CHECK (((business_reg_no)::text ~ '^\d{10}$'::text)),
     CONSTRAINT business_profiles_contact_email_check CHECK ((contact_email ~* '^[^@\s]+@[^@\s]+\.[^@\s]+$'::text)),
     CONSTRAINT business_profiles_declared_category_check CHECK (((declared_category)::text = ANY ((ARRAY['pet_sales'::character varying, 'pet_hotel'::character varying, 'animal_hospital'::character varying, 'grooming'::character varying, 'other'::character varying])::text[]))),
@@ -1487,9 +2311,7 @@ CREATE TABLE public.chat_room_members (
     user_id uuid NOT NULL,
     last_read_message_id uuid,
     joined_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone,
-    left_at timestamp with time zone
-);
+    updated_at timestamp with time zone);
 
 
 --
@@ -1504,8 +2326,6 @@ CREATE TABLE public.chat_rooms (
     last_message_at timestamp with time zone,
     last_message_preview character varying(100),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    context character varying DEFAULT 'personal'::character varying NOT NULL,
-    business_user_id uuid,
     CONSTRAINT chat_rooms_context_check CHECK (((context)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT chat_rooms_room_type_check CHECK (((room_type)::text = ANY ((ARRAY['direct'::character varying, 'admin_inquiry'::character varying])::text[])))
 );
@@ -1523,7 +2343,6 @@ CREATE TABLE public.comments (
     is_deleted boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    authored_as character varying DEFAULT 'personal'::character varying NOT NULL,
     CONSTRAINT comments_authored_as_check CHECK (((authored_as)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[])))
 );
 
@@ -1684,8 +2503,6 @@ CREATE TABLE public.pawings (
     follower_id uuid NOT NULL,
     following_id uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    notified boolean DEFAULT false NOT NULL,
-    context character varying DEFAULT 'personal'::character varying NOT NULL,
     CONSTRAINT pawings_context_check CHECK (((context)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT pawings_self_chk CHECK ((follower_id <> following_id))
 );
@@ -1761,20 +2578,6 @@ CREATE TABLE public.pets (
     pet_status character varying(20) DEFAULT 'active'::character varying NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
-    ai_ref_image_url text,
-    ai_ref_image_path text,
-    ai_ref_verification_id uuid,
-    ai_ref_verified_at timestamp with time zone,
-    pet_match_count integer DEFAULT 0 NOT NULL,
-    species_kind character varying(10),
-    identity_verified boolean DEFAULT false NOT NULL,
-    identity_verified_at timestamp with time zone,
-    ai_species character varying(10),
-    ai_breed character varying(50),
-    ai_colors text[],
-    info_match jsonb,
-    trust_score integer DEFAULT 0 NOT NULL,
-    verify_post_count integer DEFAULT 0 NOT NULL,
     CONSTRAINT pets_gender_check CHECK (((gender IS NULL) OR ((gender)::text = ANY ((ARRAY['male'::character varying, 'female'::character varying])::text[])))),
     CONSTRAINT pets_pet_status_check CHECK (((pet_status)::text = ANY ((ARRAY['active'::character varying, 'transferred'::character varying, 'deceased'::character varying, 'deleted'::character varying])::text[]))),
     CONSTRAINT pets_species_kind_check CHECK (((species_kind IS NULL) OR ((species_kind)::text = ANY ((ARRAY['dog'::character varying, 'cat'::character varying])::text[]))))
@@ -1868,9 +2671,7 @@ CREATE TABLE public.post_hearts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     post_id uuid NOT NULL,
     user_id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    notified boolean DEFAULT false NOT NULL
-);
+    created_at timestamp with time zone DEFAULT now() NOT NULL);
 
 
 --
@@ -1940,12 +2741,6 @@ CREATE TABLE public.posts (
     is_location_hidden boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
-    photo_verification_id uuid,
-    ai_pet_species character varying(10),
-    is_pet_verified boolean DEFAULT false NOT NULL,
-    edited_at timestamp with time zone,
-    authored_as character varying DEFAULT 'personal'::character varying NOT NULL,
-    pawing_notified boolean DEFAULT false NOT NULL,
     CONSTRAINT posts_authored_as_check CHECK (((authored_as)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT posts_category_check CHECK (((category)::text = ANY (ARRAY['walk_together'::text, 'walk_proxy'::text, 'care'::text, 'adoption'::text, 'give_away'::text, 'free'::text, 'news'::text]))),
     CONSTRAINT posts_comment_count_check CHECK ((comment_count >= 0)),
@@ -2041,13 +2836,6 @@ CREATE TABLE public.users (
     updated_at timestamp with time zone,
     phone character varying(20),
     phone_verified boolean DEFAULT false NOT NULL,
-    region_code character varying(20),
-    activity_radius_m smallint,
-    token_version integer DEFAULT 0 NOT NULL,
-    terms_agreed_at timestamp with time zone,
-    marketing_opt_in boolean DEFAULT false NOT NULL,
-    marketing_opt_in_at timestamp with time zone,
-    active_mode character varying DEFAULT 'personal'::character varying NOT NULL,
     CONSTRAINT users_active_mode_check CHECK (((active_mode)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT users_activity_radius_chk CHECK (((activity_radius_m IS NULL) OR ((activity_radius_m >= 5000) AND (activity_radius_m <= 15000)))),
     CONSTRAINT users_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying, 'suspended'::character varying, 'deleted'::character varying, 'lite'::character varying])::text[]))),
@@ -3049,6 +3837,34 @@ CREATE INDEX users_user_type_idx ON public.users USING btree (user_type);
 
 
 --
+-- Name: location_verifications log_location_usage; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER log_location_usage AFTER INSERT ON public.location_verifications FOR EACH ROW EXECUTE FUNCTION app.tg_log_location_usage('활동지역 인증(GPS 검증)');
+
+
+--
+-- Name: posts log_location_usage; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER log_location_usage AFTER INSERT ON public.posts FOR EACH ROW WHEN (((new.actual_lat IS NOT NULL) OR (new.actual_lng IS NOT NULL))) EXECUTE FUNCTION app.tg_log_location_usage('게시글 작성 위치 기록');
+
+
+--
+-- Name: applications trg_applications_block_business; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_applications_block_business BEFORE INSERT ON public.applications FOR EACH ROW EXECUTE FUNCTION app.applications_block_business_mode();
+
+
+--
+-- Name: applications trg_applications_block_business_update; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_applications_block_business_update BEFORE UPDATE ON public.applications FOR EACH ROW EXECUTE FUNCTION app.tg_block_business_actor();
+
+
+--
 -- Name: applications trg_applications_block_insert; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3060,6 +3876,13 @@ CREATE TRIGGER trg_applications_block_insert BEFORE INSERT ON public.application
 --
 
 CREATE TRIGGER trg_applications_immutable_offer BEFORE UPDATE ON public.applications FOR EACH ROW EXECUTE FUNCTION app.tg_applications_immutable_offer();
+
+
+--
+-- Name: applications trg_applications_on_accept; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_applications_on_accept AFTER UPDATE ON public.applications FOR EACH ROW EXECUTE FUNCTION app.tg_applications_on_accept();
 
 
 --
@@ -3081,6 +3904,13 @@ CREATE TRIGGER trg_appointments_after_update AFTER UPDATE ON public.appointments
 --
 
 CREATE TRIGGER trg_appointments_before_update BEFORE UPDATE ON public.appointments FOR EACH ROW EXECUTE FUNCTION app.tg_appointments_before_update();
+
+
+--
+-- Name: appointments trg_appointments_block_business; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_appointments_block_business BEFORE INSERT OR UPDATE ON public.appointments FOR EACH ROW EXECUTE FUNCTION app.tg_block_business_actor();
 
 
 --
@@ -3126,10 +3956,24 @@ CREATE TRIGGER trg_chat_members_read BEFORE UPDATE ON public.chat_room_members F
 
 
 --
+-- Name: chat_messages trg_chat_messages_after_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_chat_messages_after_insert AFTER INSERT ON public.chat_messages FOR EACH ROW EXECUTE FUNCTION app.tg_chat_messages_after_insert();
+
+
+--
 -- Name: chat_messages trg_chat_messages_after_softdelete; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_chat_messages_after_softdelete AFTER UPDATE ON public.chat_messages FOR EACH ROW EXECUTE FUNCTION app.tg_chat_messages_after_softdelete();
+
+
+--
+-- Name: chat_messages trg_chat_messages_block_left; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_chat_messages_block_left BEFORE INSERT ON public.chat_messages FOR EACH ROW EXECUTE FUNCTION app.chat_block_left_room();
 
 
 --
@@ -3151,6 +3995,13 @@ CREATE TRIGGER trg_chat_messages_updated BEFORE UPDATE ON public.chat_messages F
 --
 
 CREATE TRIGGER trg_chat_room_members_updated BEFORE UPDATE ON public.chat_room_members FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
+-- Name: comments trg_comments_authored_as; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_comments_authored_as BEFORE INSERT ON public.comments FOR EACH ROW EXECUTE FUNCTION app.comments_set_authored_as();
 
 
 --
@@ -3182,10 +4033,24 @@ CREATE TRIGGER trg_notification_preferences_upd BEFORE UPDATE ON public.notifica
 
 
 --
+-- Name: notifications trg_notifications_push; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_push AFTER INSERT ON public.notifications FOR EACH ROW EXECUTE FUNCTION app.on_notification_push();
+
+
+--
 -- Name: notifications trg_notifications_read_ts; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_notifications_read_ts BEFORE UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION app.tg_notifications_read_ts();
+
+
+--
+-- Name: notifications trg_notifications_unread_count; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_unread_count AFTER INSERT OR DELETE OR UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION app.tg_notifications_unread_count();
 
 
 --
@@ -3196,10 +4061,38 @@ CREATE TRIGGER trg_notifications_updated BEFORE UPDATE ON public.notifications F
 
 
 --
+-- Name: pet_guardian_invites trg_notify_guardian_invite; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notify_guardian_invite AFTER INSERT ON public.pet_guardian_invites FOR EACH ROW EXECUTE FUNCTION app.tg_notify_guardian_invite();
+
+
+--
+-- Name: post_pets trg_notify_pet_in_post; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notify_pet_in_post AFTER INSERT ON public.post_pets FOR EACH ROW EXECUTE FUNCTION app.tg_notify_pet_in_post();
+
+
+--
+-- Name: pawings trg_pawings_recall; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_pawings_recall AFTER DELETE ON public.pawings FOR EACH ROW EXECUTE FUNCTION app.tg_pawings_recall();
+
+
+--
 -- Name: pet_guardians trg_pet_guardians_owner_self_remove; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_pet_guardians_owner_self_remove BEFORE DELETE ON public.pet_guardians FOR EACH ROW EXECUTE FUNCTION app.tg_pet_guardians_prevent_owner_self_remove();
+
+
+--
+-- Name: pets trg_pets_after_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_pets_after_insert AFTER INSERT ON public.pets FOR EACH ROW EXECUTE FUNCTION app.tg_pets_after_insert();
 
 
 --
@@ -3210,10 +4103,38 @@ CREATE TRIGGER trg_pets_updated BEFORE UPDATE ON public.pets FOR EACH ROW EXECUT
 
 
 --
+-- Name: pet_guardian_invites trg_pgi_resolve_invitee; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_pgi_resolve_invitee BEFORE INSERT ON public.pet_guardian_invites FOR EACH ROW EXECUTE FUNCTION app.tg_pgi_resolve_invitee();
+
+
+--
+-- Name: pet_guardian_invites trg_pgi_respond; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_pgi_respond BEFORE UPDATE ON public.pet_guardian_invites FOR EACH ROW EXECUTE FUNCTION app.tg_pet_guardian_invites_respond();
+
+
+--
 -- Name: post_hearts trg_post_hearts_count; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_post_hearts_count AFTER INSERT OR DELETE ON public.post_hearts FOR EACH ROW EXECUTE FUNCTION app.tg_post_hearts_count();
+
+
+--
+-- Name: post_hearts trg_post_hearts_recall; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_post_hearts_recall AFTER DELETE ON public.post_hearts FOR EACH ROW EXECUTE FUNCTION app.tg_post_hearts_recall();
+
+
+--
+-- Name: post_pets trg_post_pets_bump_verify_count; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_post_pets_bump_verify_count AFTER INSERT ON public.post_pets FOR EACH ROW EXECUTE FUNCTION app.tg_post_pets_bump_verify_count();
 
 
 --
@@ -3231,10 +4152,38 @@ CREATE TRIGGER trg_post_views_count AFTER INSERT ON public.post_views FOR EACH R
 
 
 --
+-- Name: posts trg_posts_authored_as; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_posts_authored_as BEFORE INSERT ON public.posts FOR EACH ROW EXECUTE FUNCTION app.posts_set_authored_as();
+
+
+--
+-- Name: posts trg_posts_block_trader; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_posts_block_trader BEFORE INSERT OR UPDATE OF category ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_block_trader();
+
+
+--
+-- Name: posts trg_posts_check_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_posts_check_write BEFORE INSERT ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_check_write();
+
+
+--
 -- Name: posts trg_posts_deleted_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_posts_deleted_at BEFORE INSERT OR UPDATE ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_deleted_at();
+
+
+--
+-- Name: posts trg_posts_set_region; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_posts_set_region BEFORE INSERT ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_set_region();
 
 
 --
@@ -3273,10 +4222,31 @@ CREATE TRIGGER trg_reviews_aggregate AFTER INSERT ON public.reviews FOR EACH ROW
 
 
 --
+-- Name: reviews trg_reviews_block_business; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_reviews_block_business BEFORE INSERT ON public.reviews FOR EACH ROW EXECUTE FUNCTION app.tg_block_business_actor();
+
+
+--
+-- Name: reviews trg_reviews_grant_pet_trust; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_reviews_grant_pet_trust AFTER INSERT ON public.reviews FOR EACH ROW EXECUTE FUNCTION app.tg_reviews_grant_pet_trust();
+
+
+--
 -- Name: reviews trg_reviews_validate; Type: TRIGGER; Schema: public; Owner: -
 --
 
 CREATE TRIGGER trg_reviews_validate BEFORE INSERT ON public.reviews FOR EACH ROW EXECUTE FUNCTION app.tg_reviews_validate();
+
+
+--
+-- Name: users trg_users_after_insert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_users_after_insert AFTER INSERT ON public.users FOR EACH ROW EXECUTE FUNCTION app.tg_users_after_insert();
 
 
 --
@@ -3777,6 +4747,20 @@ ALTER TABLE public.applications ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY applications_insert ON public.applications FOR INSERT WITH CHECK ((applicant_id = app.uid()));
+
+
+--
+-- Name: applications applications_select; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY applications_select ON public.applications FOR SELECT USING (((applicant_id = app.uid()) OR app.is_post_manager(post_id)));
+
+
+--
+-- Name: applications applications_update; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY applications_update ON public.applications FOR UPDATE USING (((applicant_id = app.uid()) OR app.is_post_manager(post_id)));
 
 
 --
@@ -4388,6 +5372,20 @@ GRANT USAGE ON SCHEMA public TO service_role;
 
 
 --
+-- Name: FUNCTION cleanup_auth(); Type: ACL; Schema: app; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app.cleanup_auth() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION cleanup_retention(); Type: ACL; Schema: app; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app.cleanup_retention() FROM PUBLIC;
+
+
+--
 -- Name: FUNCTION deactivate_device_token(p_token text, p_reason text); Type: ACL; Schema: app; Owner: -
 --
 
@@ -4448,6 +5446,13 @@ GRANT ALL ON FUNCTION app.mark_push_skipped(p_notification_id uuid, p_reason tex
 
 GRANT ALL ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION tg_log_location_usage(); Type: ACL; Schema: app; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app.tg_log_location_usage() FROM PUBLIC;
 
 
 --

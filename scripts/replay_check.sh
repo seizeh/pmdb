@@ -6,7 +6,7 @@
 #
 # 작업용 DB 두 개를 새로 만들어 같은 조건에서 각각 채운 뒤, 양쪽을 pg_dump 해서 비교한다.
 #
-#   A(스냅샷)  prelude → replay-stubs → schema.sql
+#   A(스냅샷)  prelude → schema.sql
 #   B(리플레이) prelude → replay-stubs → baseline.sql → migrations/*.sql
 #
 # 스냅샷을 파일 그대로 비교하지 않고 A 로 한 번 복원했다 다시 덤프하는 이유:
@@ -58,9 +58,12 @@ psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
   -c "create database ${SNAPSHOT_DB}" \
   -c "create database ${REPLAY_DB}"
 
+# A 에는 replay-stubs 를 적용하지 않는다. 스텁의 기본 권한(ALTER DEFAULT PRIVILEGES)은
+# '마이그레이션이 만든 객체가 운영에서 어떤 ACL 을 갖게 되는지' 를 재현하는 장치라
+# 리플레이 쪽에만 필요하다. 스냅샷은 이미 그 결과(GRANT 문)를 담고 있으므로,
+# A 에 기본 권한을 걸면 그 위에 또 얹혀 운영보다 넓은 권한이 되어 버린다.
 echo "== 2/5 A: 스냅샷 복원"
 apply "$SNAPSHOT_URL" "$SCHEMA_DIR/prelude.sql"
-apply "$SNAPSHOT_URL" "$SCHEMA_DIR/replay-stubs.sql"
 apply "$SNAPSHOT_URL" "$SCHEMA_DIR/schema.sql"
 
 echo "== 3/5 B: 베이스라인 + 마이그레이션 리플레이"

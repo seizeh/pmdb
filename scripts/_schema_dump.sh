@@ -18,9 +18,12 @@ dump_schema_to() {
     > "$out"
 }
 
-# 비교용 정규화 — 첫 객체 블록(`-- Name: …`) 앞의 머리말을 떼어낸다.
-# 머리말은 SET 문 뿐이고 pg_dump 마이너 버전에 따라 줄이 늘고 줄어서
-# 스키마와 무관한 차이를 만든다.
+# 비교용 정규화.
+#  · 첫 객체 블록(`-- Name: …`) 앞의 머리말을 떼어낸다 — SET 문 뿐이고 pg_dump
+#    마이너 버전에 따라 줄이 늘고 줄어 스키마와 무관한 차이를 만든다.
+#  · IN 목록의 두 가지 표기를 한 꼴로 모은다(normalize_schema.py 주석 참고).
 normalize_dump() {
-  awk 'f || /^-- Name: /{f=1; print}' "$1"
+  local here
+  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  awk 'f || /^-- Name: /{f=1; print}' "$1" | python3 "$here/normalize_schema.py"
 }

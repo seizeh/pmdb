@@ -475,6 +475,29 @@ def inline_constraints(stmt: str, table: str | None = None) -> list[str]:
     return names
 
 
+def strip_columns(stmt: str, cols: set) -> str:
+    """CREATE TABLE 본문에서 지정 컬럼 정의를 제거한다.
+
+    마이그레이션이 `add column if not exists` 로 붙이는 컬럼은 베이스라인에 남겨 두면
+    ALTER 가 통째로 no-op 이 되어, 같은 문장에 달린 FK·CHECK·기본값까지 함께 사라진다
+    (posts.photo_verification_id → posts_photo_verification_id_fkey 유실 사례).
+    베이스라인은 '마이그레이션 이전 상태' 여야 하므로 빼는 게 원래 맞다.
+    """
+    span = table_body(stmt)
+    if not span:
+        return stmt
+    kept = []
+    for item in split_top_level(stmt[span[0] + 1 : span[1]]):
+        if CONSTRAINT_ITEM.match(item) or TABLE_LEVEL_KW.match(item):
+            kept.append(item)
+            continue
+        m = re.match(rf"^\s*({IDENT})", item)
+        if m and m.group(1).strip('"').lower() in cols:
+            continue
+        kept.append(item)
+    return stmt[: span[0] + 1] + ",".join(kept) + stmt[span[1] :]
+
+
 def strip_inline_constraint(stmt: str, name: str) -> str:
     """CREATE TABLE 본문에서 지정 제약 항목만 제거한다(마이그레이션이 다시 붙인다)."""
     span = table_body(stmt)
@@ -488,6 +511,21 @@ def strip_inline_constraint(stmt: str, name: str) -> str:
             continue
         kept.append(item)
     return stmt[: span[0] + 1] + ",".join(kept) + stmt[span[1] :]
+
+
+def added_columns(statements: list[str]) -> dict:
+    """마이그레이션이 `alter table … add column` 으로 붙이는 (스키마, 테이블) → 컬럼 집합."""
+    out: dict = {}
+    for raw in statements:
+        s = strip_comments(raw).strip()
+        flat = re.sub(r"\s+", " ", s)
+        m = re.match(rf"alter table (?:only )?(?:if exists )?({QUAL})", flat, re.I)
+        if not m:
+            continue
+        tbl = qname(m.group(1))
+        for cm in re.finditer(rf"\badd column (?:if not exists )?({IDENT})", flat, re.I):
+            out.setdefault(tbl, set()).add(cm.group(1).strip('"').lower())
+    return out
 
 
 def usage_order(files: list[Path]) -> tuple[dict, dict]:
@@ -754,6 +792,8 @@ def main() -> int:
     for f in files:
         acts += parse_migration_actions(split_statements(f.read_text()))
     first_create, first_ref = usage_order(files)
+    all_stmts = [st for f in files for st in split_statements(f.read_text())]
+    mig_columns = added_columns(all_stmts)
 
     deps = view_dependencies(blocks)
     owner_of = {b.key: b.owner for b in blocks if b.key and b.owner and b.key != b.owner}
@@ -856,6 +896,7 @@ def main() -> int:
     # 제외된 테이블에 딸린 인덱스·정책·트리거·제약·GRANT·COMMENT 도 함께 뺀다
     # (테이블 자체가 마이그레이션 소관이면 부속물도 전부 그쪽에서 만들어진다).
     excluded_tables = {k for k in excluded if k[0] == "table"}
+    restored_funcs: set = set()
     # 유지되는 테이블에 남은 인라인 제약 충돌은 CREATE TABLE 본문에서 잘라낸다.
     strip_targets: dict[tuple, set] = {}
     for k in excluded:
@@ -866,10 +907,12 @@ def main() -> int:
 
     # 부속 블록(제약·FK·기본값·시퀀스·인덱스·GRANT…)이 제외 대상을 참조하면 같이 뺀다.
     # 남아 있는 테이블에서 마이그레이션 소관 테이블로 거는 FK 가 대표적인 경우다.
-    # 함수도 포함한다 — 제외된 트리거 함수를 참조하는 CREATE TRIGGER 가 남으면
-    # `function app.tg_… does not exist` 로 깨진다(그 트리거는 마이그레이션이 만든다).
+    # 테이블·뷰·타입만 본다. 함수는 여기 넣으면 안 된다 — 트리거 함수를 참조하는
+    # CREATE TRIGGER 까지 같이 빠지는데, 그 트리거를 다시 만들어 주는 마이그레이션이
+    # 없어서 통째로 유실된다(trg_users_after_insert 등 6개 사례).
+    # 대신 아래에서 '남은 블록이 참조하는 함수' 를 베이스라인에 되살린다.
     attach_names = {
-        f"{k[1]}.{k[2]}" for k in excluded if k[0] in ("table", "view", "type", "function")
+        f"{k[1]}.{k[2]}" for k in excluded if k[0] in ("table", "view", "type")
     }
     attach_re = (
         re.compile(r"(?<![A-Za-z_0-9.])(" + "|".join(re.escape(n) for n in sorted(attach_names)) + r")\b")
@@ -881,6 +924,30 @@ def main() -> int:
         "INDEX", "TRIGGER", "POLICY", "ROW SECURITY", "ACL", "COMMENT",
     }
 
+    # 남아 있는 트리거·인덱스·정책이 참조하는 함수는 베이스라인 시점에 있어야 한다.
+    # (제외해 버리면 CREATE TRIGGER 가 function … does not exist 로 깨진다.)
+    excluded_func_by_name: dict = {}
+    for k in excluded:
+        if k[0] == "function":
+            excluded_func_by_name.setdefault(f"{k[1]}.{k[2]}", []).append(k)
+    if excluded_func_by_name:
+        need = re.compile(
+            r"(?<![A-Za-z_0-9.])("
+            + "|".join(re.escape(n) for n in sorted(excluded_func_by_name))
+            + r")\s*\("
+        )
+        for b in blocks:
+            if b.type not in ("TRIGGER", "INDEX", "POLICY", "CONSTRAINT"):
+                continue
+            if b.key and b.key in excluded:
+                continue
+            if b.owner and b.owner in excluded_tables:
+                continue
+            for m in need.finditer(strip_comments(b.body)):
+                for k in excluded_func_by_name.get(m.group(1), []):
+                    excluded.discard(k)
+                    restored_funcs.add(k)
+
     kept: list[Block] = []
     removed: list[Block] = []
     for b in blocks:
@@ -890,8 +957,11 @@ def main() -> int:
         if attach_re and b.type in ATTACH_TYPES and attach_re.search(strip_comments(b.body)):
             removed.append(b)
             continue
-        if b.type == "TABLE" and b.key in strip_targets:
-            for name in sorted(strip_targets[b.key]):
+        if b.type == "TABLE" and b.key:
+            cols = mig_columns.get((b.key[1], b.key[2]))
+            if cols:
+                b.body = strip_columns(b.body, cols)
+            for name in sorted(strip_targets.get(b.key, ())):
                 b.body = strip_inline_constraint(b.body, name)
         kept.append(b)
 
@@ -913,6 +983,12 @@ def main() -> int:
         print(f"\n== 만들어지기 전에 쓰여 베이스라인에 남긴 뷰·함수 {len(kept_early)}개 ==")
         for k in sorted(kept_early, key=str):
             print("  ", k)
+        print(f"\n== 남은 블록이 참조해 베이스라인에 되살린 함수 {len(restored_funcs)}개 ==")
+        for k in sorted(restored_funcs, key=str):
+            print("  ", k)
+        print(f"\n== 베이스라인 테이블에서 뺀 컬럼(마이그레이션이 add column) ==")
+        for t, cs in sorted(mig_columns.items()):
+            print("  ", f"{t[0]}.{t[1]}", sorted(cs))
         print(f"\n== 제외 대상을 참조하는데 마이그레이션이 안 만드는 블록 {len(unresolved)}개 ==")
         for k, t in sorted(unresolved, key=str):
             print("  ", t, k)
