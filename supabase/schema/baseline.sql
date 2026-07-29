@@ -3587,27 +3587,6 @@ CREATE TABLE app.auth_logs (
 
 
 --
--- Name: business_doc_purge_queue_id_seq; Type: SEQUENCE; Schema: app; Owner: -
---
-
-ALTER TABLE app.business_doc_purge_queue ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME app.business_doc_purge_queue_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
-);
-
-
---
--- Name: TABLE business_licenses; Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON TABLE app.business_licenses IS '업종별 등록·허가 증빙(0028 §1). approved 행 존재 = 해당 업종 모듈 ON(app.has_license).';
-
-
---
 -- Name: business_purge_config; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -3616,41 +3595,6 @@ CREATE TABLE app.business_purge_config (
     function_url text NOT NULL,
     trigger_secret text DEFAULT encode(extensions.gen_random_bytes(24), 'hex'::text) NOT NULL,
     CONSTRAINT business_purge_config_singleton CHECK (id)
-);
-
-
---
--- Name: TABLE care_reports; Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON TABLE app.care_reports IS '업체→보호자 케어 리포트(0028 §4 — 미용 전후 사진·P2 알림장 공용 원형).';
-
-
---
--- Name: TABLE care_threads; Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON TABLE app.care_threads IS '위탁 알림장 스레드(0028 §4.4) — 반려동물×업체 상시 1개, 건 엔티티 없음.';
-
-
---
--- Name: TABLE funnel_events; Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON TABLE app.funnel_events IS '오프라인 제휴 파일럿 퍼널 계측(0028 §7). 원시 이벤트 보존 1년.';
-
-
---
--- Name: funnel_events_id_seq; Type: SEQUENCE; Schema: app; Owner: -
---
-
-ALTER TABLE app.funnel_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
-    SEQUENCE NAME app.funnel_events_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1
 );
 
 
@@ -3713,20 +3657,6 @@ CREATE TABLE app.refresh_tokens (
     replaced_by uuid,
     user_agent text
 );
-
-
---
--- Name: TABLE share_links; Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON TABLE app.share_links IS '설치 전 가치 전달용 공유 링크(0028 §3). share-view Edge Function 이 서빙.';
-
-
---
--- Name: TABLE vaccination_events; Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON TABLE app.vaccination_events IS '분양 스타터 접종 리마인더(0028 §5) — 일정 콘텐츠는 앱, 서버는 저장·알림만.';
 
 
 --
@@ -6208,14 +6138,6 @@ ALTER TABLE ONLY public.appointments
 
 
 --
--- Name: business_profiles business_profiles_matched_facility_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.business_profiles
-    ADD CONSTRAINT business_profiles_matched_facility_id_fkey FOREIGN KEY (matched_facility_id) REFERENCES public.facilities(id) ON DELETE SET NULL;
-
-
---
 -- Name: business_profiles business_profiles_reviewed_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6424,14 +6346,6 @@ ALTER TABLE ONLY public.pet_guardians
 
 
 --
--- Name: pets pets_ai_ref_verification_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pets
-    ADD CONSTRAINT pets_ai_ref_verification_id_fkey FOREIGN KEY (ai_ref_verification_id) REFERENCES public.photo_verifications(id);
-
-
---
 -- Name: pets pets_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6485,14 +6399,6 @@ ALTER TABLE ONLY public.post_views
 
 ALTER TABLE ONLY public.post_views
     ADD CONSTRAINT post_views_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
-
-
---
--- Name: posts posts_photo_verification_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.posts
-    ADD CONSTRAINT posts_photo_verification_id_fkey FOREIGN KEY (photo_verification_id) REFERENCES public.photo_verifications(id);
 
 
 --
@@ -8528,15 +8434,6 @@ GRANT ALL ON TABLE public.v_chat_rooms TO service_role;
 GRANT SELECT,MAINTAIN ON TABLE public.v_comment_feed TO anon;
 GRANT SELECT,MAINTAIN ON TABLE public.v_comment_feed TO authenticated;
 GRANT ALL ON TABLE public.v_comment_feed TO service_role;
-
-
---
--- Name: TABLE v_facility_review_comment_feed; Type: ACL; Schema: public; Owner: -
---
-
-GRANT SELECT,MAINTAIN ON TABLE public.v_facility_review_comment_feed TO anon;
-GRANT SELECT,MAINTAIN ON TABLE public.v_facility_review_comment_feed TO authenticated;
-GRANT ALL ON TABLE public.v_facility_review_comment_feed TO service_role;
 
 
 --

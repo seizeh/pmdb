@@ -555,6 +555,13 @@ def classify(b: Block) -> None:
         b.key = ("type", sch, b.name.lower())
     elif b.type == "SEQUENCE":
         b.key = ("sequence", sch, b.name.lower())
+        # identity 컬럼의 시퀀스는 `ALTER TABLE … ADD GENERATED …` 로 나온다.
+        # 딸린 테이블이 제외 대상이면 이 블록도 같이 빠져야 한다.
+        m = re.search(rf"alter table (?:only )?({QUAL})", flat, re.I)
+        if not m:
+            m = re.search(rf"owned by ({QUAL})\.", flat, re.I)
+        if m:
+            b.owner = ("table",) + qname(m.group(1))
     elif b.type == "FUNCTION":
         m = re.match(rf"({IDENT})\s*\(", b.name)
         if m:
@@ -779,10 +786,28 @@ def main() -> int:
             if tk not in excluded_tables:
                 strip_targets.setdefault(tk, set()).add(k[3])
 
+    # 부속 블록(제약·FK·기본값·시퀀스·인덱스·GRANT…)이 제외 대상을 참조하면 같이 뺀다.
+    # 남아 있는 테이블에서 마이그레이션 소관 테이블로 거는 FK 가 대표적인 경우다.
+    attach_names = {
+        f"{k[1]}.{k[2]}" for k in excluded if k[0] in ("table", "view", "type")
+    }
+    attach_re = (
+        re.compile(r"(?<![A-Za-z_0-9.])(" + "|".join(re.escape(n) for n in sorted(attach_names)) + r")\b")
+        if attach_names
+        else None
+    )
+    ATTACH_TYPES = {
+        "CONSTRAINT", "FK CONSTRAINT", "DEFAULT", "SEQUENCE",
+        "INDEX", "TRIGGER", "POLICY", "ROW SECURITY", "ACL", "COMMENT",
+    }
+
     kept: list[Block] = []
     removed: list[Block] = []
     for b in blocks:
         if (b.key and b.key in excluded) or (b.owner and b.owner in excluded_tables):
+            removed.append(b)
+            continue
+        if attach_re and b.type in ATTACH_TYPES and attach_re.search(strip_comments(b.body)):
             removed.append(b)
             continue
         if b.type == "TABLE" and b.key in strip_targets:
