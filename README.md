@@ -69,6 +69,7 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 | `supabase/schema/prelude.sql` | 확장(postgis·pg_net·pgcrypto…)과 Supabase 기본 롤 |
 | `supabase/schema/replay-stubs.sql` | 컨테이너에 없는 플랫폼 객체 흉내(storage 버킷/정책, realtime 퍼블리케이션) |
 | `supabase/schema/baseline.sql` | 2026-06-08 이전, 저장소 밖에서 적용됐던 기반 스키마 |
+| `supabase/schema/replay-default-privs.sql` | Supabase 기본 권한(마이그레이션이 만드는 객체의 ACL 재현) |
 | `supabase/migrations/*.sql` | 파일명 순서대로 전부 |
 
 `baseline.sql` 은 손으로 쓴 게 아니라 스냅샷에서 역산한 자동 생성물이다

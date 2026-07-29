@@ -7,7 +7,7 @@
 # 작업용 DB 두 개를 새로 만들어 같은 조건에서 각각 채운 뒤, 양쪽을 pg_dump 해서 비교한다.
 #
 #   A(스냅샷)  prelude → schema.sql
-#   B(리플레이) prelude → replay-stubs → baseline.sql → migrations/*.sql
+#   B(리플레이) prelude → replay-stubs → baseline.sql → replay-default-privs → migrations/*.sql
 #
 # 스냅샷을 파일 그대로 비교하지 않고 A 로 한 번 복원했다 다시 덤프하는 이유:
 # pg_dump 출력은 되먹였을 때 글자 그대로 재현되지 않는다. 예컨대
@@ -70,6 +70,8 @@ echo "== 3/5 B: 베이스라인 + 마이그레이션 리플레이"
 apply "$REPLAY_URL" "$SCHEMA_DIR/prelude.sql"
 apply "$REPLAY_URL" "$SCHEMA_DIR/replay-stubs.sql"
 apply "$REPLAY_URL" "$SCHEMA_DIR/baseline.sql"
+# 기본 권한은 베이스라인 '다음' 에 건다 — 이유는 그 파일 주석 참고.
+apply "$REPLAY_URL" "$SCHEMA_DIR/replay-default-privs.sql"
 count=0
 for f in supabase/migrations/*.sql; do
   if ! out=$(psql "$REPLAY_URL" -X -q -v ON_ERROR_STOP=1 -f "$f" 2>&1); then
