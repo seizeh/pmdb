@@ -1,0 +1,31 @@
+name: diag
+on: workflow_dispatch
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      db:
+        image: supabase/postgres:17.6.1.121
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["54324:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 5s --health-retries 30
+    env:
+      U: postgresql://postgres:postgres@localhost:54324/postgres
+    steps:
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+      - name: 권한/확장 진단
+        run: |
+          psql "$U" -c "select current_user, usesuper from pg_user where usename=current_user;"
+          psql "$U" -c "select nspname, nspowner::regrole as owner from pg_namespace where nspname in ('storage','cron','extensions','public');"
+          psql "$U" -c "select extname from pg_extension order by 1;"
+          psql "$U" -c "select name, default_version, installed_version from pg_available_extensions where name in ('pg_cron','pg_net','postgis','pgtap');"
+          psql "$U" -c "select relname, relowner::regrole as owner from pg_class where relnamespace='storage'::regnamespace and relkind='r';"
+          psql "$U" -c "select r.rolname, m.rolname as member_of from pg_roles r left join pg_auth_members am on am.member=r.oid left join pg_roles m on m.oid=am.roleid where r.rolname='postgres';"
+          psql "$U" -c "show shared_preload_libraries;"
+          echo '--- 새 DB 에서 pg_cron ---'
+          psql "$U" -c "create database diagdb" -q
+          psql "postgresql://postgres:postgres@localhost:54324/diagdb" -c "create extension if not exists pg_cron;" || echo "→ 새 DB 에서는 불가(예상)"
