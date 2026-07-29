@@ -2319,7 +2319,6 @@ CREATE TABLE public.chat_rooms (
     last_message_at timestamp with time zone,
     last_message_preview character varying(100),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT chat_rooms_context_check CHECK (((context)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT chat_rooms_room_type_check CHECK (((room_type)::text = ANY ((ARRAY['direct'::character varying, 'admin_inquiry'::character varying])::text[])))
 );
 
@@ -2335,9 +2334,7 @@ CREATE TABLE public.comments (
     content text NOT NULL,
     is_deleted boolean DEFAULT false NOT NULL,
     deleted_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT comments_authored_as_check CHECK (((authored_as)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[])))
-);
+    created_at timestamp with time zone DEFAULT now() NOT NULL);
 
 
 --
@@ -2496,7 +2493,6 @@ CREATE TABLE public.pawings (
     follower_id uuid NOT NULL,
     following_id uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT pawings_context_check CHECK (((context)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT pawings_self_chk CHECK ((follower_id <> following_id))
 );
 
@@ -2572,9 +2568,7 @@ CREATE TABLE public.pets (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
     CONSTRAINT pets_gender_check CHECK (((gender IS NULL) OR ((gender)::text = ANY ((ARRAY['male'::character varying, 'female'::character varying])::text[])))),
-    CONSTRAINT pets_pet_status_check CHECK (((pet_status)::text = ANY ((ARRAY['active'::character varying, 'transferred'::character varying, 'deceased'::character varying, 'deleted'::character varying])::text[]))),
-    CONSTRAINT pets_species_kind_check CHECK (((species_kind IS NULL) OR ((species_kind)::text = ANY ((ARRAY['dog'::character varying, 'cat'::character varying])::text[]))))
-);
+    CONSTRAINT pets_pet_status_check CHECK (((pet_status)::text = ANY ((ARRAY['active'::character varying, 'transferred'::character varying, 'deceased'::character varying, 'deleted'::character varying])::text[]))));
 
 
 --
@@ -2734,7 +2728,6 @@ CREATE TABLE public.posts (
     is_location_hidden boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
-    CONSTRAINT posts_authored_as_check CHECK (((authored_as)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
     CONSTRAINT posts_category_check CHECK (((category)::text = ANY (ARRAY['walk_together'::text, 'walk_proxy'::text, 'care'::text, 'adoption'::text, 'give_away'::text, 'free'::text, 'news'::text]))),
     CONSTRAINT posts_comment_count_check CHECK ((comment_count >= 0)),
     CONSTRAINT posts_deleted_at_consistency CHECK ((((visibility_status)::text !~~ 'deleted_%'::text) OR (deleted_at IS NOT NULL))),
@@ -2829,8 +2822,6 @@ CREATE TABLE public.users (
     updated_at timestamp with time zone,
     phone character varying(20),
     phone_verified boolean DEFAULT false NOT NULL,
-    CONSTRAINT users_active_mode_check CHECK (((active_mode)::text = ANY ((ARRAY['personal'::character varying, 'business'::character varying])::text[]))),
-    CONSTRAINT users_activity_radius_chk CHECK (((activity_radius_m IS NULL) OR ((activity_radius_m >= 5000) AND (activity_radius_m <= 15000)))),
     CONSTRAINT users_status_check CHECK (((status)::text = ANY ((ARRAY['active'::character varying, 'inactive'::character varying, 'suspended'::character varying, 'deleted'::character varying, 'lite'::character varying])::text[]))),
     CONSTRAINT users_unread_chat_count_nonneg CHECK ((unread_chat_count >= 0)),
     CONSTRAINT users_unread_notification_count_nonneg CHECK ((unread_notification_count >= 0)),

@@ -486,10 +486,17 @@ def strip_columns(stmt: str, cols: set) -> str:
     span = table_body(stmt)
     if not span:
         return stmt
+    # 빠지는 컬럼을 참조하는 인라인 제약도 같이 빼야 한다
+    # (chat_rooms.context 를 빼면서 chat_rooms_context_check 를 남기면
+    #  ERROR: column "context" does not exist). 그 제약은 컬럼과 함께 마이그레이션이 붙인다.
+    col_re = re.compile(
+        r"(?<![A-Za-z_0-9])(" + "|".join(re.escape(c) for c in sorted(cols)) + r")(?![A-Za-z_0-9])"
+    )
     kept = []
     for item in split_top_level(stmt[span[0] + 1 : span[1]]):
         if CONSTRAINT_ITEM.match(item) or TABLE_LEVEL_KW.match(item):
-            kept.append(item)
+            if not col_re.search(item):
+                kept.append(item)
             continue
         m = re.match(rf"^\s*({IDENT})", item)
         if m and m.group(1).strip('"').lower() in cols:
