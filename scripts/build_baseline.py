@@ -4,29 +4,37 @@
 베이스라인 생성 — 마이그레이션 리플레이를 가능하게 만드는 조각.
 
 이 저장소는 2026-06-08 부터 마이그레이션을 관리하기 시작했고, 그 이전의 기반
-스키마(테이블 27개·함수·트리거·RLS)는 Supabase 프로젝트에 직접 적용되어
-저장소 밖(out-of-band)에 있었다. 그래서 "빈 DB 에 마이그레이션만 적용해서
-현재 스키마를 재현"하는 것이 불가능했고, CI 는 리플레이 대신 스냅샷
-(supabase/schema/schema.sql) 복원으로 우회하고 있었다.
+스키마는 Supabase 프로젝트에 직접 적용되어 저장소 밖(out-of-band)에 있었다.
+그래서 "빈 DB 에 마이그레이션만 적용해서 현재 스키마를 재현" 하는 것이 불가능했고,
+CI 는 리플레이 대신 스냅샷(supabase/schema/schema.sql) 복원으로 우회하고 있었다.
 
-이 스크립트는 그 빠진 조각을 스냅샷에서 역산한다:
+이 스크립트는 그 빠진 조각을 스냅샷에서 역산한다.
 
-    baseline = schema.sql − (마이그레이션이 만드는 객체)
+    baseline = schema.sql − (마이그레이션이 다시 만들어 주는 것)
 
-역산이 성립하는 근거(마이그레이션 175개 전수 확인):
-  · 기반 테이블에 대한 add column 은 전부 `if not exists`   → 최종 컬럼이 있어도 무해
-  · 제약 변경은 전부 `drop constraint` → `add constraint` 쌍 → 최종 상태에서 시작해도 통과
-  · 함수 239개가 `create or replace`                        → 최종 정의가 있어도 덮어써짐
-따라서 "마이그레이션이 새로 만드는(=이미 있으면 실패하는) 객체"만 빼내면
-나머지는 최종 정의 그대로 두어도 리플레이가 같은 결과에 수렴한다.
+무엇을 빼야 하는지는 마이그레이션을 순서대로 흘려 보며 판정한다.
 
-그 등식은 추측이 아니라 CI(.github/workflows/db-tests.yml 의 replay 잡)가
-매번 검증한다: 빈 DB → prelude+baseline+마이그레이션 → pg_dump → schema.sql 과 diff.
-불일치면 실패하므로, 스냅샷과 마이그레이션이 어긋나는 드리프트도 같이 잡힌다.
+  · 이미 있으면 실패하는 생성문(create table/type/index/trigger/policy …)의 대상
+  · 뷰·함수 전부 — `or replace` 로는 되돌릴 수 없는 변경이 있다
+      뷰   : 컬럼을 지우거나 순서를 바꿀 수 없다(cannot drop columns from view)
+      함수 : 인자 이름을 바꿀 수 없다(cannot change name of input parameter)
+    단, 만들어지기 전에 이미 쓰이는 것은 남긴다(app.uid()).
+  · 마이그레이션이 `add column` 으로 붙이는 컬럼과 거기 딸린 제약·인덱스·코멘트.
+    베이스라인에 남겨 두면 `add column if not exists` 가 통째로 no-op 이 되어
+    같은 문장의 REFERENCES·CHECK 까지 함께 사라진다.
+    무엇이 진짜 마이그레이션 소관인지는 운영 스키마의 컬럼 순서로 판별한다
+    (ADD COLUMN 은 항상 맨 뒤에 붙으므로 마이그레이션 순서대로 꼬리를 이룬다).
+
+역으로, 남은 블록이 참조하는 함수는 도로 살린다(트리거 함수 등).
+기계적으로 역산할 수 없는 것은 baseline-manual.sql 에 손으로 적어 둔다.
+
+이 등식은 추측이 아니라 CI 가 매번 검증한다 — db-tests.yml 의 replay 잡이 빈 DB
+두 개에 각각 스냅샷과 리플레이를 올려 pg_dump 결과를 비교한다. 어긋나면 실패하므로
+마이그레이션 없이 운영 DB 에 직접 친 DDL 도 같이 잡힌다.
 
 사용:
     ./scripts/build_baseline.py            # supabase/schema/baseline.sql 생성
-    ./scripts/build_baseline.py --report   # 제외된 객체 목록만 출력(적용 안 함)
+    ./scripts/build_baseline.py --report   # 판정 내역만 출력(파일은 안 건드림)
 ============================================================================
 """
 
