@@ -736,6 +736,38 @@ def main() -> int:
             break
         excluded |= soft
 
+    # 제외를 의존성 방향으로 전파한다. 예: app.has_license 는 `create or replace`
+    # 라 그 자체로는 충돌하지 않지만, 인자 타입 app.biz_license_type 이 마이그레이션
+    # 소관이라 베이스라인 시점에는 아직 없다. 이런 블록은 어차피 마이그레이션이
+    # 다시 만들어 주므로 같이 빼야 리플레이가 굴러간다.
+    migration_creates = {key for action, key, _, _ in acts if action == "create"}
+    unresolved: list[tuple] = []
+    for _ in range(10):
+        names = set()
+        for k in excluded:
+            if k[0] in ("table", "view", "type", "function"):
+                names.add(f"{k[1]}.{k[2]}")
+        if not names:
+            break
+        pattern = re.compile(
+            r"(?<![A-Za-z_0-9.])(" + "|".join(re.escape(n) for n in sorted(names)) + r")\b"
+        )
+        grew = False
+        for b in blocks:
+            if not b.key or b.key in excluded:
+                continue
+            if b.type not in ("FUNCTION", "VIEW", "TABLE"):
+                continue
+            if not pattern.search(b.name + " " + strip_comments(b.body)):
+                continue
+            if b.key in migration_creates:
+                excluded.add(b.key)
+                grew = True
+            elif b.key not in [u[0] for u in unresolved]:
+                unresolved.append((b.key, b.type))
+        if not grew:
+            break
+
     # 제외된 테이블에 딸린 인덱스·정책·트리거·제약·GRANT·COMMENT 도 함께 뺀다
     # (테이블 자체가 마이그레이션 소관이면 부속물도 전부 그쪽에서 만들어진다).
     excluded_tables = {k for k in excluded if k[0] == "table"}
@@ -773,6 +805,9 @@ def main() -> int:
         print(f"\n== 없는 객체를 drop(IF EXISTS 없음) {len(set(missing_drops))}건 ==")
         for k in sorted(set(missing_drops), key=str):
             print("  ", k)
+        print(f"\n== 제외 대상을 참조하는데 마이그레이션이 안 만드는 블록 {len(unresolved)}개 ==")
+        for k, t in sorted(unresolved, key=str):
+            print("  ", t, k)
         print(f"\n제외 블록 {len(removed)} / 유지 블록 {len(kept)}")
         return 0
 
