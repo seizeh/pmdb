@@ -27,10 +27,11 @@ const ENROLL_REAL_THRESHOLD = 0.70;
 const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 영상/이미지 멀티모달
 
 // frames_from_video 하드 리젝 스위치. challenge 를 오탐으로 걷어낸 전례가 있어 동종
-// AI 판단을 측정 없이 하드 게이트로 켜지 않는다 — 2026-07-29부터 섀도 모드로
-// photo_verifications(fail_reason='frames_not_from_video') 에 기록만 하고, 오탐률
-// 확인 후 true 로 전환. 오탐 소지: 클라 프레임 추출 시각(800/2500/4000/5500ms)이
-// Gemini 의 1fps 영상 샘플링 순간과 어긋나 정상 영상도 false 가 뜰 수 있다.
+// AI 판단을 측정 없이 하드 게이트로 켜지 않는다 — 2026-07-29부터 섀도 모드.
+// 성공 등록마다 판정 1행을 photo_verifications 에 남기고(분모=purpose='pet_identity'
+// AND result='pass' 전체, 분자=fail_reason='frames_not_from_video_shadow'),
+// 오탐률 확인 후 true 로 전환. 오탐 소지: 클라 프레임 추출 시각(800/2500/4000/5500ms)
+// 이 Gemini 의 1fps 영상 샘플링 순간과 어긋나 정상 영상도 false 가 뜰 수 있다.
 const FRAMES_FROM_VIDEO_ENFORCE = false;
 
 // Gemini inline 요청 총량 한도(요청당 20MB) 보호선. 초과 시 Gemini 400 이
@@ -244,10 +245,6 @@ Deno.serve(async (req: Request) => {
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
   if (frames.length < 3) return json({ enrolled: false, reason: "too_few_frames" }, 400);
-  const inlineChars = videoBase64.length + frames.reduce((n, f) => n + f.length, 0);
-  if (inlineChars > MAX_INLINE_B64_CHARS) {
-    return json({ enrolled: false, reason: "video_too_large" }, 400);
-  }
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
@@ -259,6 +256,15 @@ Deno.serve(async (req: Request) => {
     .eq("user_id", uid)
     .maybeSingle();
   if (!g) return json({ enrolled: false, reason: "not_guardian" }, 403);
+
+  // 1-0) 페이로드 한도 — 실측값과 실패 행을 남긴다(발생 빈도를 봐야 19M 이
+  //   맞는 선인지, 클라 압축/Files API 도입이 필요한지 판단할 수 있다).
+  const inlineChars = videoBase64.length + frames.reduce((n, f) => n + f.length, 0);
+  if (inlineChars > MAX_INLINE_B64_CHARS) {
+    console.error(`video_too_large inlineChars=${inlineChars} frames=${frames.length}`);
+    await logEnrollFail(admin, uid, petId, "video_too_large");
+    return json({ enrolled: false, reason: "video_too_large" }, 400);
+  }
 
   // 1-1) 등록값(대조 기준)은 서버가 직접 읽는다
   const { data: pet } = await admin
@@ -291,12 +297,10 @@ Deno.serve(async (req: Request) => {
   // ★ 기준셋 바꿔치기 차단 — 검증한 영상과 저장할 프레임이 같은 출처여야 한다.
   //   이 게이트가 없으면 "아무 라이브 영상 + 다른 개체 사진 frames[]" 조합으로
   //   타 개체가 기준셋으로 등록되어 이후 모든 게시글 매칭이 무력화된다.
-  //   현재는 섀도 모드: 기록만 남기고 통과시킨다(FRAMES_FROM_VIDEO_ENFORCE 주석 참조).
-  if (!ai.frames_from_video) {
+  //   섀도 모드에서는 거절하지 않는다 — 판정은 성공 경로에서 매 등록 1행 기록.
+  if (FRAMES_FROM_VIDEO_ENFORCE && !ai.frames_from_video) {
     await logEnrollFail(admin, uid, petId, "frames_not_from_video", ai);
-    if (FRAMES_FROM_VIDEO_ENFORCE) {
-      return json({ enrolled: false, reason: "frames_not_from_video", ai });
-    }
+    return json({ enrolled: false, reason: "frames_not_from_video", ai });
   }
 
   const species = ai.dog_real >= ai.cat_real ? "dog" : "cat";
@@ -348,6 +352,31 @@ Deno.serve(async (req: Request) => {
     console.error("enroll_pet_identity rpc failed", rpcErr);
     return json({ error: "internal_error" }, 500);
   }
+
+  // frames_from_video 판정을 성공 등록마다 1행 기록 — 섀도 오탐률의 분모
+  // (purpose='pet_identity' AND result='pass' 전체)와 분자
+  // (fail_reason='frames_not_from_video_shadow')를 함께 남긴다.
+  // _shadow 접미사로 강제 전환 후의 실제 거절 행(result='fail',
+  // fail_reason='frames_not_from_video')과 영구 구분된다.
+  // expires_at=now() 즉시 만료 + region_matched=false + image_url=null 이라
+  // 게시글 토큰 소비 조건(expires_at>now, region_matched, image_url 일치)에
+  // 걸리지 않는다 — 토큰 오용 불가.
+  const { error: verdictErr } = await admin.from("photo_verifications").insert({
+    user_id: uid,
+    pet_id: petId,
+    purpose: "pet_identity",
+    result: "pass",
+    fail_reason: ai.frames_from_video ? null : "frames_not_from_video_shadow",
+    expires_at: new Date().toISOString(),
+    ai_species: ai.species,
+    ai_dog_real: ai.dog_real,
+    ai_cat_real: ai.cat_real,
+    ai_dog_fake: ai.dog_fake,
+    ai_cat_fake: ai.cat_fake,
+    ai_pass: ai.frames_from_video,
+    ai_reason: ai.reason,
+  });
+  if (verdictErr) console.error("frames verdict insert failed", verdictErr);
 
   return json({
     enrolled: true,
