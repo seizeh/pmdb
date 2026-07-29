@@ -62,18 +62,6 @@ jobs:
       # storage 스키마는 supabase_admin 소유라 그 안에 스텁을 만들 수 없다
       # (storage 에는 테이블이 하나도 없어서 그대로 쓸 수도 없다).
       # 새 DB 에서는 우리가 소유자라 둘 다 해결된다.
-      - name: Postgres 기동 (cron.database_name = 작업용 DB)
-        run: |
-          docker run -d --name pmdb-replay \
-            -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
-            supabase/postgres:17.6.1.121 \
-            postgres -c cron.database_name="$REPLAY_DB"
-          for i in $(seq 1 60); do
-            docker exec pmdb-replay pg_isready -U postgres -q && break
-            sleep 2
-          done
-          docker exec pmdb-replay pg_isready -U postgres
-
       # pg_dump 는 서버와 같은 메이저(17)여야 한다. 우분투 기본 패키지는 16 이라
       # 덤프 형식이 달라져 없는 차이가 생긴다 — PGDG 저장소에서 17 을 받는다.
       - name: postgresql-client 17 설치
@@ -86,6 +74,23 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client-17
           pg_dump --version
+
+      - name: Postgres 기동 (cron.database_name = 작업용 DB)
+        run: |
+          docker run -d --name pmdb-replay \
+            -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
+            supabase/postgres:17.6.1.121 \
+            postgres -c cron.database_name="$REPLAY_DB"
+          # 컨테이너 안에서 재는 건 소용없다 — 엔트리포인트가 초기화용 임시 서버를
+          # 먼저 띄우고 죽이므로 그때 준비된 것처럼 보인다. 호스트에서 실제 포트로 잰다.
+          for i in $(seq 1 60); do
+            pg_isready -h localhost -p 54323 -U postgres -q && break
+            sleep 2
+          done
+          pg_isready -h localhost -p 54323 -U postgres || {
+            docker logs --tail 50 pmdb-replay
+            exit 1
+          }
 
       - name: 베이스라인이 스냅샷과 동기 상태인지 확인
         run: |
