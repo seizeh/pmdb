@@ -1,13 +1,14 @@
-# DB 테스트 — 스키마 스냅샷을 supabase/postgres 컨테이너에 복원한 뒤
-# pgTAP 불변식 테스트(supabase/tests)를 실행한다.
-# 베이스 스키마가 마이그레이션 밖(out-of-band)이라 리플레이 대신 스냅샷을 쓴다
-# (갱신: ./scripts/dump_schema.sh — README 참고).
+# DB CI — 두 잡이 서로 다른 걸 본다.
+#   pgtap  : 스키마 스냅샷을 복원한 뒤 pgTAP 불변식 테스트를 돌린다(빠른 회귀).
+#   replay : 빈 DB 에 baseline + 마이그레이션을 처음부터 다시 쌓아 스냅샷과 대조한다
+#            (재현성 + 스냅샷/마이그레이션 드리프트 감지 — scripts/replay_check.sh).
 name: DB Tests
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   pgtap:
@@ -40,4 +41,54 @@ jobs:
           psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/schema/schema.sql
 
       - name: pgTAP 테스트
+        run: ./scripts/run_db_tests.sh "$DB_URL"
+
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      db:
+        image: supabase/postgres:17.6.1.121
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 54323:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      DB_URL: postgresql://postgres:postgres@localhost:54323/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      # pg_dump 는 서버와 같은 메이저(17)여야 한다. 우분투 기본 패키지는 16 이라
+      # 덤프 형식이 달라져 없는 차이가 생긴다 — PGDG 저장소에서 17 을 받는다.
+      - name: postgresql-client 17 설치
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          pg_dump --version
+
+      - name: 베이스라인이 스냅샷과 동기 상태인지 확인
+        run: |
+          ./scripts/build_baseline.py
+          if ! git diff --quiet -- supabase/schema/baseline.sql; then
+            echo "::error::baseline.sql 이 schema.sql 과 어긋났다. ./scripts/build_baseline.py 로 재생성해 커밋할 것."
+            git diff --stat -- supabase/schema/baseline.sql
+            exit 1
+          fi
+
+      - name: 리플레이 + 스냅샷 대조
+        run: ./scripts/replay_check.sh "$DB_URL"
+
+      # 재생된 스키마가 형태만 맞고 의미가 틀린 경우를 막기 위해, 스냅샷 경로와
+      # 같은 불변식 테스트를 리플레이 결과 DB 에도 한 번 더 돌린다.
+      - name: 재생된 DB 에서 pgTAP 테스트
         run: ./scripts/run_db_tests.sh "$DB_URL"
