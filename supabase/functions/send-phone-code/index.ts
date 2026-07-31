@@ -1,11 +1,14 @@
 // ============================================================================
 // send-phone-code — 전화 인증번호(6자리·5분) 발급 + Solapi SMS 발송
-//   POST { phone: string, purpose?: 'signup' | 'password_reset' }
+//   POST { phone: string, purpose?: 'signup' | 'password_reset' | 'review' }
 //   흐름: 목적별 계정 존재 검증 → rate limit(동일 번호 60초 1회) → 코드 생성
 //         → phone_verifications INSERT → Solapi 발송. service_role 로만 DB 접근.
 //   가입: 이미 가입된 번호 차단(phone_taken) / 재설정: 미가입 번호 차단(user_not_found)
 //   — 불필요한 SMS 발송·오용 방지(같은 정보는 어차피 최종 단계에서 노출되므로
 //     계정 열거 위험이 새로 늘지 않음).
+//   review(간이 후기, 0029): 계정 존재 여부를 **보지 않는다** — 정식 회원도 간이
+//   경로로 후기를 쓸 수 있어야 하는데 signup 목적을 재사용하면 phone_taken 에
+//   막힌다. 목적을 나눠야 후기용 인증이 가입에 전용되는 것도 함께 막힌다.
 //   verify_jwt=false: 가입/비번재설정은 로그인 전 단계라 JWT 없음. 남용은 자체 rate limit 으로 방어.
 //
 //   데모 백도어(심사·테스트 서버용): DEMO_PHONES(콤마 구분)·DEMO_OTP(6자리) 시크릿이
@@ -19,7 +22,7 @@ import { loadSolapiConfig, normalizePhone, sendSms } from "../_shared/solapi.ts"
 
 const CODE_TTL_MIN = 5;
 const RATE_LIMIT_SEC = 60;
-const PURPOSES = new Set(["signup", "password_reset"]);
+const PURPOSES = new Set(["signup", "password_reset", "review"]);
 
 function genCode(): string {
   const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
@@ -66,6 +69,7 @@ Deno.serve(async (req: Request) => {
   );
 
   // 0) 목적별 계정 존재 검증 — 가입된 번호에 가입용 문자를 보내지 않는다.
+  //    review 는 어느 분기에도 걸리지 않는다(존재 여부 무관 발송).
   const { data: existing, error: exErr } = await supabase
     .from("users").select("id").eq("phone", phone).limit(1).maybeSingle();
   if (exErr) {

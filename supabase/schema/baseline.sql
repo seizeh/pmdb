@@ -277,32 +277,6 @@ $$;
 
 
 --
--- Name: mask_phone(text); Type: FUNCTION; Schema: app; Owner: -
---
-
-CREATE FUNCTION app.mask_phone(p_phone text) RETURNS text
-    LANGUAGE sql IMMUTABLE
-    SET search_path TO ''
-    AS $$
-  select case
-    when d is null or length(d) < 4 then '***-****-****'
-    when length(d) >= 11 then
-      '***-' || substr(d, 4, 1) || '***-**' || right(d, 2)
-    -- 10자리 등 비표준 번호는 끝 2자리만 — 자리수를 억지로 맞추지 않는다.
-    else '***-****-**' || right(d, 2)
-  end
-  from (select regexp_replace(coalesce(p_phone, ''), '\D', '', 'g') as d) t;
-$$;
-
-
---
--- Name: FUNCTION mask_phone(p_phone text); Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON FUNCTION app.mask_phone(p_phone text) IS '간이 회원 표시명 — 010 전체 마스킹 + 가운데 앞 1자리 + 끝 2자리(***-1***-**78).';
-
-
---
 -- Name: on_notification_push(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1885,30 +1859,6 @@ $$;
 
 
 --
--- Name: uid_lite(); Type: FUNCTION; Schema: app; Owner: -
---
-
-CREATE FUNCTION app.uid_lite() RETURNS uuid
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-  select u.id
-  from public.users u
-  where u.id = nullif((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'sub','')::uuid
-    and u.status in ('active', 'lite')
-    and u.token_version = coalesce(
-      ((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'tv')::int, 0)
-$$;
-
-
---
--- Name: FUNCTION uid_lite(); Type: COMMENT; Schema: app; Owner: -
---
-
-COMMENT ON FUNCTION app.uid_lite() IS '후기 작성 전용 uid — active + lite 허용. 이 함수를 다른 기능에 쓰지 말 것(간이 회원은 후기 외 모든 기능에서 비회원이어야 한다).';
-
-
---
 -- Name: facility_sibling_ids(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1962,82 +1912,6 @@ BEGIN
   END LOOP;
 END;
 $$;
-
-
---
--- Name: signup_lite_user(text, boolean); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean DEFAULT false) RETURNS uuid
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_id     uuid;
-  v_status text;
-  v_hex    text;
-begin
-  -- 개인정보(전화번호) 수집·이용 동의는 필수. 클라이언트 체크박스만 믿지 않는다.
-  if coalesce(p_privacy_consent, false) is not true then
-    raise exception 'privacy_consent_required' using errcode = 'P0001';
-  end if;
-
-  -- 후기 목적 전화 인증 확인(30분 이내). purpose 를 'signup' 과 분리하는 이유:
-  -- send-phone-code 가 signup 목적은 "이미 가입된 번호"에 발송을 거부하는데,
-  -- 간이 후기는 정식 회원이 쓸 수도 있어 그 차단에 걸리면 안 된다.
-  if not exists (
-    select 1 from public.phone_verifications
-    where phone = p_phone
-      and purpose = 'review'
-      and is_used = true
-      and created_at > now() - interval '30 minutes'
-  ) then
-    raise exception 'phone_not_verified' using errcode = 'P0001';
-  end if;
-
-  select id, status into v_id, v_status
-    from public.users where phone = p_phone;
-
-  if found then
-    -- 정지·탈퇴 계정이 간이 경로로 되살아나면 안 된다.
-    if v_status in ('suspended', 'deleted') then
-      raise exception 'account_unavailable' using errcode = 'P0001';
-    end if;
-    return v_id;
-  end if;
-
-  -- username/nickname 은 NOT NULL + 유니크라 값이 필요하지만 사용자에게는 보이지
-  -- 않는다(표시는 app.mask_phone). password_hash 는 argon2id/bcrypt 어느 쪽으로도
-  -- 검증에 성공할 수 없는 sentinel — 비밀번호 로그인 경로를 원천 차단한다.
-  -- gen_random_uuid() 는 pg_catalog 라 search_path='' 에서도 그냥 보인다.
-  -- (pgcrypto 의 gen_random_bytes 는 extensions 스키마라 여기서 안 보인다.)
-  v_hex := substr(replace(gen_random_uuid()::text, '-', ''), 1, 12);
-
-  insert into public.users (
-    username, password_hash, nickname, user_type, phone, phone_verified,
-    status, terms_agreed_at
-  ) values (
-    'lite_' || v_hex,
-    '!',
-    'lite_' || v_hex,
-    'no_pet',
-    p_phone,
-    true,
-    'lite',
-    now()
-  )
-  returning id into v_id;
-
-  return v_id;
-end;
-$$;
-
-
---
--- Name: FUNCTION signup_lite_user(p_phone text, p_privacy_consent boolean); Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean) IS '간이 회원 생성/조회 — 엣지 signup-lite 전용(service_role). 같은 번호는 항상 같은 계정.';
 
 
 --
@@ -5357,14 +5231,6 @@ GRANT ALL ON FUNCTION public.facility_sibling_ids(p_id uuid) TO service_role;
 
 REVOKE ALL ON FUNCTION public.rls_auto_enable() FROM PUBLIC;
 GRANT ALL ON FUNCTION public.rls_auto_enable() TO service_role;
-
-
---
--- Name: FUNCTION signup_lite_user(p_phone text, p_privacy_consent boolean); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.signup_lite_user(p_phone text, p_privacy_consent boolean) TO service_role;
 
 
 --

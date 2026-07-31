@@ -75,3 +75,7 @@ verify_jwt = true
 
 [functions.signup]
 verify_jwt = true
+
+# signup-lite: 간이 회원(후기 전용) — 코드 검증·계정·단명 토큰을 한 번에.
+[functions.signup-lite]
+verify_jwt = true

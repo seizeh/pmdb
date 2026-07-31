@@ -116,12 +116,17 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 
 ```bash
 # 마이그레이션
+# ⚠️ db push 는 쓰지 말 것 — 이력 테이블이 실제 적용 상태와 어긋나 있어 이미 적용된
+#    마이그레이션을 재실행하려 든다. psql 로 파일을 직접 적용하는 것이 현재 절차다.
+#      psql "$SUPABASE_DB_URL" -X -q -v ON_ERROR_STOP=1 -f supabase/migrations/<파일>.sql
+#    적용 전 검증은 같은 파일의 commit; 을 rollback; 으로 바꿔 한 번 돌려본다.
 supabase db push
 
 # 함수
 supabase functions deploy send-phone-code --no-verify-jwt
 supabase functions deploy verify-phone-code --no-verify-jwt
 supabase functions deploy signup --no-verify-jwt
+supabase functions deploy signup-lite --no-verify-jwt
 supabase functions deploy login --no-verify-jwt
 ```
 

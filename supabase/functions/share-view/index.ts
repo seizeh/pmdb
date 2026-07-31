@@ -407,6 +407,28 @@ Deno.serve(async (req) => {
   }
 
   const fac = data.facility ?? {};
+
+  // ── 매장 QR → 그 매장의 후기 작성 화면으로 직행 (0029) ──────────────────────
+  // 손님이 매장에서 QR 을 찍는 목적은 후기다. 미리보기를 한 번 거치게 하면 그만큼
+  // 이탈하므로 바로 작성 화면을 연다(작성 화면 상단에 매장 이름이 나온다).
+  //
+  // 대상이 업체 계정이 아니라 **시설(facility)** 인 게 중요하다. QR 을 나눠줄 매장
+  // 대부분은 아직 업체 인증 전이라 프로필이 없지만, 시설 행은 공공데이터로 이미
+  // 존재하고 후기도 시설에 달린다. 나중에 그 매장이 인증하면 같은 시설에 붙는다.
+  //
+  // 게시글 공유와 같은 규칙 — 크롤러는 아래 서버 렌더링을 받아야 링크 미리보기가 산다.
+  const facilityId = fac.id ? String(fac.id) : null;
+  if (WEB_APP_URL && facilityId && !isCrawler(ua)) {
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: `${WEB_APP_URL}/r/${facilityId}`,
+        // 동작이 바뀔 수 있으므로 브라우저가 리다이렉트를 캐시하지 않게 한다.
+        "cache-control": "no-store",
+      },
+    });
+  }
+
   const catLabel = CATEGORY_LABELS[String(fac.category)] ?? String(fac.category ?? "");
   const rating = Number(fac.avg_rating ?? 0);
   const reviewCount = Number(fac.review_count ?? 0);

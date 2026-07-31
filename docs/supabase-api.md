@@ -1,6 +1,7 @@
 # PawMate Supabase — API(Edge Functions) 문서
 
 - **조사일**: 2026-07-02 — 로컬 소스(`supabase/functions/`) + 원격 배포 상태 대조
+- **부분 갱신**: 2026-07-27 — `signup-lite` 신설(0029), 전화 인증 `review` 목적 추가, 배포 현황 주석. 그 외 항목은 2026-07-02 시점 그대로다
 - **짝 문서**: [supabase-db.md](supabase-db.md) — DB 스키마/로직 레퍼런스
 
 - 소스 위치: `/Users/seize_h/StudioProjects/pmdb/supabase/functions/`
@@ -13,10 +14,11 @@
 
 | 슬러그 | 용도 | 인증 | verify_jwt(배포) | 배포 상태 |
 |---|---|---|---|---|
-| `send-phone-code` | 전화 인증번호(6자리) 발급 + Solapi SMS 발송 | 없음 (전화번호 자체 레이트리밋) | **true** (의도적 — 남용 게이트, §6) | ACTIVE v12 |
-| `verify-phone-code` | 전화 인증번호 검증 (is_used 처리) | 없음 | **true** (의도적 — 남용 게이트, §6) | ACTIVE v12 |
-| `signup` | 회원가입 (전화 인증 완료 번호만) | 없음 | **true** (의도적 — 남용 게이트, §6) | ACTIVE v10 |
-| `login` | ID/비번 로그인 → access JWT(+refresh) 발급 | 없음 (토큰 발급 단계) | false | ACTIVE v18 |
+| `send-phone-code` | 전화 인증번호(6자리) 발급 + Solapi SMS 발송 | 없음 (전화번호 자체 레이트리밋) | **true** (의도적 — 남용 게이트, §6) | ACTIVE v20 |
+| `verify-phone-code` | 전화 인증번호 검증 (is_used 처리) | 없음 | **true** (의도적 — 남용 게이트, §6) | ACTIVE v19 |
+| `signup` | 회원가입 (전화 인증 완료 번호만) | 없음 | **true** (의도적 — 남용 게이트, §6) | ACTIVE v19 |
+| `signup-lite` | 간이 회원(후기 전용) 인증 + 계정 확보 + 단명 토큰 (0029) | 없음 | **true** (의도적 — 남용 게이트, §6) | ACTIVE v1 |
+| `login` | ID/비번 로그인 → access JWT(+refresh) 발급 | 없음 (토큰 발급 단계) | false | ACTIVE v26 |
 | `refresh` | refresh 토큰 회전 → 새 access+refresh 쌍 | refresh 토큰 (바디) | false | ACTIVE v6 |
 | `logout` | refresh family 전체 회수 (멱등) | refresh 토큰 (바디) | false | ACTIVE v3 |
 | `change-password` | 비밀번호 변경 + 전 세션 무효화 + 현 기기 재발급 | 커스텀 JWT Bearer | false | ACTIVE v6 |
@@ -30,11 +32,18 @@
 | `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `send-push` | pending 알림 FCM(HTTP v1) 발송 | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
-총 16개 함수. 로컬 소스 16개 = 원격 배포 16개 (1:1 일치, 누락/고아 없음).
+위 표는 17개. **원격 배포는 21개**로, 아래 4개는 이 문서에 아직 항목이 없다(0028 업체 인증·공유 뷰어 계열, 2026-07-27 확인).
+
+| 슬러그 | 용도 | verify_jwt | 배포 상태 | 설계 문서 |
+|---|---|---|---|---|
+| `apply-business` | 업체 인증 신청 | false | ACTIVE v6 | 0025 |
+| `check-business-no` | 사업자등록번호 국세청 조회 | false | ACTIVE v6 | 0025 |
+| `purge-business-docs` | 업체 증빙 서류 파기 배치 (pg_cron, `x-purge-secret`) | false | ACTIVE v6 | 0025 |
+| `share-view` | 공유 링크 뷰어 (QR·카톡 — 사람은 302, 크롤러는 서버 렌더링) | false | ACTIVE v18 | 0028 · 0029 |
 
 참고: `supabase/functions/supabase/` 디렉터리는 **함수가 아니라** Supabase CLI가 남긴 `.temp/linked-project.json`(프로젝트 링크 캐시) 아티팩트다. `verify-phone-code/supabase/.temp/`에도 동일 아티팩트가 하나 더 있다(함수 폴더 안에서 CLI를 실행한 흔적).
 
-인증 모델 요약: Supabase Auth(GoTrue)를 쓰지 않는 **완전 커스텀 인증**이다. `login`이 HS256 access JWT(프로젝트 JWT Secret으로 서명, `sub/role=authenticated/aud=authenticated/iss=supabase/tv` 클레임)를 직접 발급하고, PostgREST가 네이티브로 검증하며 `app.uid()`가 `status='active'` + `token_version(tv)` 일치를 매 요청 게이트한다. 엣지 함수들은 게이트웨이 `verify_jwt`를 끄고 `_shared/auth.ts`(또는 각 함수 내 동일 로직 복제본)로 **수동 검증**한다 — 함수별 `verify_jwt` 값은 `supabase/config.toml`(2026-07-02 추가)에 명시되어 재배포 시 결정론적으로 적용된다(12개 false, 전화인증/가입 3개만 true). DB 접근은 전부 `service_role` 클라이언트 경유(관련 테이블·RPC에 anon/authenticated GRANT 없음).
+인증 모델 요약: Supabase Auth(GoTrue)를 쓰지 않는 **완전 커스텀 인증**이다. `login`이 HS256 access JWT(프로젝트 JWT Secret으로 서명, `sub/role=authenticated/aud=authenticated/iss=supabase/tv` 클레임)를 직접 발급하고, PostgREST가 네이티브로 검증하며 `app.uid()`가 `status='active'` + `token_version(tv)` 일치를 매 요청 게이트한다. 엣지 함수들은 게이트웨이 `verify_jwt`를 끄고 `_shared/auth.ts`(또는 각 함수 내 동일 로직 복제본)로 **수동 검증**한다 — 함수별 `verify_jwt` 값은 `supabase/config.toml`(2026-07-02 추가)에 명시되어 재배포 시 결정론적으로 적용된다(전화인증/가입 계열 4개 — send-phone-code·verify-phone-code·signup·signup-lite — 만 true, 나머지 false). DB 접근은 전부 `service_role` 클라이언트 경유(관련 테이블·RPC에 anon/authenticated GRANT 없음).
 
 ## 2. 공용 모듈 (_shared)
 
@@ -90,6 +99,17 @@
 3. `signup` `{ username, password, nickname, user_type, phone, marketing_opt_in? }` → 엣지에서 argon2id 해싱(_shared/passwords) 후 `signup_user` RPC(SECURITY DEFINER, users INSERT + 약관 동의 시각 기록). 인증 안 된 번호면 `phone_not_verified`(403).
 4. 이후 `login`으로 토큰 획득.
 
+### 3.2-1 간이 회원 흐름 (0029 — 가입 없이 후기만)
+
+정식 가입과 **완전히 다른 경로**다. 3단계가 아니라 2단계이고, `verify-phone-code`를 거치지 않는다.
+
+1. `send-phone-code` `{ phone, purpose:'review' }` → 코드 SMS.
+2. `signup-lite` `{ phone, code, privacy_consent:true }` → 코드 검증 + 계정 확보 + **15분 JWT** 를 한 번에.
+
+발급된 토큰은 저장하지 않는다(앱 메모리 전용, 게시 직후 폐기). 계정은 `status='lite'`라 후기 작성 외 모든 기능에서 차단되고, 후기 1건마다 1·2단계를 다시 밟는다(`add_facility_review`가 최근 15분 내 `review` 인증을 서버에서 요구).
+
+나중에 **같은 번호로 정식 가입**하면 `signup_user`가 그 행을 승격시킨다(새 계정을 만들지 않는다) — 기존 후기와 방문 회차가 그대로 이어지고 작성자 표시가 마스크에서 닉네임으로 바뀐다.
+
 ### 3.3 로그인 → 갱신 → 로그아웃
 
 1. **login** `{ username, password }` (+헤더 `x-client-refresh: 1` = refresh 지원 capability):
@@ -117,14 +137,15 @@
 
 - **엔드포인트**: `POST /functions/v1/send-phone-code` — verify_jwt=**true** (config.toml로 고정. publishable 키 요구를 얇은 남용 게이트로 사용, §6 참고)
 - **인증**: 없음(로그인 전 단계). 남용은 자체 레이트리밋으로 방어.
-- **요청 바디**: `{ phone: string(필수, 정규화 후 /^01\d{8,9}$/), purpose?: 'signup' | 'password_reset' (기본 'signup') }`. 전화번호는 `normalizePhone`으로 정규화(+82→0).
+- **요청 바디**: `{ phone: string(필수, 정규화 후 /^01\d{8,9}$/), purpose?: 'signup' | 'password_reset' | 'review' (기본 'signup') }`. 전화번호는 `normalizePhone`으로 정규화(+82→0).
 - **응답**:
   - 200 `{ ok: true, expires_in_sec: 300 }`
   - 400 `invalid_json` / `invalid_phone` / `invalid_purpose`
   - 429 `{ error: "rate_limited", retry_after_sec: 60 }`
   - 500 `server_misconfigured`(Solapi env 누락) / `internal_error`
   - 502 `{ error: "sms_send_failed", detail: <Solapi 응답> }`
-- **내부 로직**: ① `phone_verifications` 테이블에서 같은 phone+purpose로 최근 60초 내 발급 이력 count → 있으면 429 ② 6자리 코드 생성(`crypto.getRandomValues` mod 1e6) + `phone_verifications` INSERT(`expires_at = now+5분`) ③ Solapi로 SMS 발송(`[PawMate] 인증번호 XXXXXX (5분 내 입력)`). DB는 service_role 전용(RLS 정책 없음).
+- **내부 로직**: ⓪ 목적별 계정 존재 검증 — `signup`은 가입된 번호면 409 `phone_taken`, `password_reset`은 미가입이면 404 `user_not_found`. **`review`는 어느 분기에도 걸리지 않는다**(존재 여부 무관 발송) ① `phone_verifications` 테이블에서 같은 phone+purpose로 최근 60초 내 발급 이력 count → 있으면 429 ② 6자리 코드 생성(`crypto.getRandomValues` mod 1e6) + `phone_verifications` INSERT(`expires_at = now+5분`) ③ Solapi로 SMS 발송(`[PawMate] 인증번호 XXXXXX (5분 내 입력)`). DB는 service_role 전용(RLS 정책 없음).
+- **`review` 목적(0029)**: 간이 후기용. `signup`을 재사용할 수 없다 — 그쪽은 이미 가입된 번호에 발송을 거부하는데 간이 후기는 **정식 회원도 써야** 하기 때문이다. 목적을 나누면 후기용 인증이 가입에 전용되는 것도 함께 막힌다. ⚠️ `phone_verifications_purpose_check` 제약에도 값을 추가해야 한다(안 하면 INSERT가 막힌다).
 - **시크릿/환경변수**: `SOLAPI_API_KEY`, `SOLAPI_API_SECRET`, `SOLAPI_SENDER`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`), (`DEMO_PHONES`, `DEMO_OTP` — 데모 백도어, 아래)
 - **정책**: 코드 TTL 5분. 동일 번호+목적 60초 1회 발급 제한.
 - **데모 백도어(심사·테스트 서버)**: `DEMO_PHONES`(콤마 구분 번호 목록)와 `DEMO_OTP`(6자리)가 **둘 다** 설정된 환경에서, 해당 번호 요청은 SMS 발송 없이 고정 코드를 저장하고 동일한 200 응답을 돌려준다(레이트리밋 면제, 목적별 계정 존재 검증은 동일 적용). `verify-phone-code` 이후 흐름은 실번호와 같다. 운영은 기본 미설정(비활성)이며 **앱 심사 기간에만 켠다** — App Review 데모 계정 안내에 번호+고정 코드를 기재하는 용도. 테스트 서버는 상시 활성.
@@ -133,7 +154,8 @@
 
 - **엔드포인트**: `POST /functions/v1/verify-phone-code` — verify_jwt=**true** (config.toml로 고정, §6)
 - **인증**: 없음.
-- **요청 바디**: `{ phone: string(필수, /^01\d{8,9}$/ 정규화 후), code: string(필수, /^\d{6}$/), purpose?: 'signup' | 'password_reset' (기본 'signup') }`
+- **요청 바디**: `{ phone: string(필수, /^01\d{8,9}$/ 정규화 후), code: string(필수, /^\d{6}$/), purpose?: 'signup' | 'password_reset' | 'review' (기본 'signup') }`
+- ⚠️ **`review`는 보통 이 함수를 거치지 않는다** — `signup-lite`가 검증·계정생성·토큰발급을 한 번에 한다(사유는 해당 항목). 화이트리스트에 둔 것은 재사용 여지를 위해서다.
 - **응답**:
   - 200 `{ verified: true }`
   - 400 `invalid_json` / `invalid_phone` / `invalid_code` / `invalid_purpose` / `{ verified: false, error: "code_mismatch_or_expired" }`
@@ -161,6 +183,26 @@
 - **내부 로직**: 입력 검증 → **argon2id 해싱(_shared/passwords, hash-wasm)** → `signup_user` RPC(SECURITY DEFINER) 호출 — 전화 인증 완료 확인, `users` INSERT(terms_agreed_at·마케팅 동의 기록). RPC가 raise한 커스텀 에러코드를 HTTP 코드로 매핑.
 - **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS/json 헬퍼를 파일 내 자체 정의(_shared 미사용).
 - **정책**: `verify-phone-code(purpose='signup')` 완료된 번호만 가입 가능.
+- **간이 회원 승격(0029)**: 같은 번호가 이미 있고 `status='lite'`면 `phone_taken` 대신 그 행을 **UPDATE로 승격**한다(username/password_hash/nickname/user_type 채우고 `status='active'`). 이게 없으면 간이로 후기를 쓴 사람이 **정식 가입을 아예 못 한다**(`users_phone_uq` 때문). 승격이므로 기존 후기·방문 회차가 그대로 이어진다. `lite`가 아닌 기존 계정은 종전대로 409 `phone_taken`.
+
+### signup-lite
+
+- **엔드포인트**: `POST /functions/v1/signup-lite` — verify_jwt=**true** (config.toml로 고정, §6)
+- **인증**: 없음(로그인 전). 코드 소지가 곧 인증이다.
+- **용도**: 회원가입 없이 **시설 후기만** 쓰려는 손님용(0029). 매장 QR로 들어온 비로그인 사용자가 후기 '게시'를 누르는 순간 호출된다.
+- **요청 바디**: `{ phone: string(필수, 정규화 후 /^01\d{8,9}$/), code: string(필수, /^\d{6}$/), privacy_consent: true(필수) }`
+- **응답**:
+  - 200 `{ ok: true, token: <JWT>, expires_in: 900, user: { id: <uuid>, display_name: "***-1***-**78" } }`
+  - 400 `invalid_json` / `invalid_phone` / `invalid_code` / `privacy_consent_required` / `{ verified: false, error: "code_mismatch_or_expired" }`
+  - 403 `account_unavailable`(정지·탈퇴 계정) / `phone_not_verified`
+  - 429 `rate_limited`
+  - 500 `server_misconfigured`(JWT_SECRET 누락) / `internal_error`
+- **내부 로직**: ① 동의 검증(서버에서도 막는다 — 클라이언트 체크박스는 우회 가능) ② 레이트리밋(번호 10회/10분, IP 30회/10분) ③ `phone_verifications`에서 `purpose='review'` 미사용·미만료 최신 1건 조회 → 코드 대조 ④ `is_used=true` UPDATE ⑤ `signup_lite_user(phone, consent)` RPC — 같은 번호가 있으면 **새로 만들지 않고 그 계정을 반환**(정식 회원 포함, 방문 회차 연속성 유지), 없으면 `status='lite'`로 생성 ⑥ `token_version` 조회 후 `signAccess`로 15분 JWT 발급.
+- **왜 `verify-phone-code`를 따로 부르지 않나**: 그 함수는 코드를 사용처리만 하고 끝난다. 뒤이어 별도 호출로 세션을 발급하면 그 사이 같은 번호로 아무나 `signup-lite`를 때려 **남이 받은 인증으로 세션을 가로챌 수 있다**(정식 `signup`은 비밀번호가 한 겹 더 있어 이 창이 없다). 간이 경로는 코드 소지가 곧 로그인이므로 검증·계정·토큰을 한 호출에 묶는다.
+- **토큰 성격**: TTL 15분, **저장 금지**. 앱은 메모리에만 두고 후기 게시 직후 버린다. DB의 `add_facility_review`도 같은 15분 창의 `review` 인증을 요구하므로 둘이 어긋나지 않는다. 다음 후기를 쓰려면 문자 인증을 다시 받는다.
+- **권한 범위**: 이 토큰으로는 **후기 작성 외에 아무것도 못 한다.** 계정이 `status='lite'`라 `app.uid()`(= `status='active'` 요구)에서 제외되어 RLS·RPC 전체가 자동 차단되고, `add_facility_review`만 `app.uid_lite()`로 예외를 뚫는다.
+- **시크릿**: `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
+- **⚠️ 표시명 규칙 3중복**: `app.mask_phone`(DB) · 이 함수의 `maskPhone`(응답) · 앱 시트의 `_maskPreview`(입력 중 미리보기)가 같은 규칙이어야 한다. 하나만 고치면 미리보기와 실제 표시가 갈린다.
 
 ### login
 
@@ -327,7 +369,7 @@
 |---|---|---|
 | `SUPABASE_URL` | 전 함수(DB 접근하는 모든 함수) | 플랫폼 자동 주입 |
 | `SUPABASE_SERVICE_ROLE_KEY` | 전 함수(DB 접근) | 플랫폼 자동 주입. service_role 클라이언트 생성 |
-| `JWT_SECRET` | login, refresh, change-password, verify-location, verify-post-photo, enroll-pet-identity, search-petcafe, resolve-region, sync-dong-centroids | Supabase 프로젝트 JWT Secret — access JWT 서명/검증 |
+| `JWT_SECRET` | login, **signup-lite**, refresh, change-password, verify-location, verify-post-photo, enroll-pet-identity, search-petcafe, resolve-region, sync-dong-centroids | Supabase 프로젝트 JWT Secret — access JWT 서명/검증 |
 | `ALLOW_ORIGIN` | 전 함수(CORS) | 미설정 시 `*`. 운영 시 오리진 제한 가능 |
 | `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER` | send-phone-code | Solapi SMS (SENDER는 콘솔 사전등록 발신번호) |
 | `NAVER_MAP_KEY_ID` / `NAVER_MAP_KEY` | verify-location, verify-post-photo, search-petcafe, resolve-region, sync-dong-centroids | NCP Maps Reverse/Forward Geocoding (Client ID/Secret) |
@@ -339,6 +381,11 @@
 `.env.example`(`supabase/functions/.env.example`)에는 `GEMINI_API_KEY_ID`도 있으나 코드에서 미사용. 시크릿 등록은 `supabase secrets set --env-file supabase/functions/.env --project-ref vyatppuxmpulqtxevfpk`.
 
 ## 6. 배포 현황 및 로컬-원격 차이
+
+> **2026-07-27 갱신**: 배포 함수는 **21개**다. 아래 표(2026-07-02, 15개)는 그 시점 스냅샷이라 이후 추가분이 빠져 있다. 이번에 확인한 변경분만 옮겨 적는다 —
+> `signup-lite` v1(true, 신규 · 0029), `send-phone-code` v20, `verify-phone-code` v19, `signup` v19, `share-view` v18(false), `login` v26.
+> 표에 없는 나머지: `apply-business` v6, `check-business-no` v6, `purge-business-docs` v6, `invite-guardian` v1 (전부 false).
+> verify_jwt 정책은 그대로다 — 전화인증/가입 계열 4개(send-phone-code, verify-phone-code, signup, **signup-lite**)만 true, 나머지 false.
 
 배포 함수(2026-07-02 기준, `list_edge_functions`): 15개 전부 ACTIVE. 로컬 소스 15개와 **슬러그 기준 1:1 일치** — 원격에만 있거나 로컬에만 있는 함수 없음.
 
