@@ -125,8 +125,9 @@
   - 500 `server_misconfigured`(Solapi env 누락) / `internal_error`
   - 502 `{ error: "sms_send_failed", detail: <Solapi 응답> }`
 - **내부 로직**: ① `phone_verifications` 테이블에서 같은 phone+purpose로 최근 60초 내 발급 이력 count → 있으면 429 ② 6자리 코드 생성(`crypto.getRandomValues` mod 1e6) + `phone_verifications` INSERT(`expires_at = now+5분`) ③ Solapi로 SMS 발송(`[PawMate] 인증번호 XXXXXX (5분 내 입력)`). DB는 service_role 전용(RLS 정책 없음).
-- **시크릿/환경변수**: `SOLAPI_API_KEY`, `SOLAPI_API_SECRET`, `SOLAPI_SENDER`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
+- **시크릿/환경변수**: `SOLAPI_API_KEY`, `SOLAPI_API_SECRET`, `SOLAPI_SENDER`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`), (`DEMO_PHONES`, `DEMO_OTP` — 데모 백도어, 아래)
 - **정책**: 코드 TTL 5분. 동일 번호+목적 60초 1회 발급 제한.
+- **데모 백도어(심사·테스트 서버)**: `DEMO_PHONES`(콤마 구분 번호 목록)와 `DEMO_OTP`(6자리)가 **둘 다** 설정된 환경에서, 해당 번호 요청은 SMS 발송 없이 고정 코드를 저장하고 동일한 200 응답을 돌려준다(레이트리밋 면제, 목적별 계정 존재 검증은 동일 적용). `verify-phone-code` 이후 흐름은 실번호와 같다. 운영은 기본 미설정(비활성)이며 **앱 심사 기간에만 켠다** — App Review 데모 계정 안내에 번호+고정 코드를 기재하는 용도. 테스트 서버는 상시 활성.
 
 ### verify-phone-code
 
