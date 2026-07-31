@@ -18,6 +18,7 @@ supabase/
 
 ## 문서
 
+- **[설계 결정 기록(ADR)](https://github.com/seizeh/pmdart/tree/main/docs/adr)** — 왜 그렇게 만들었는지와 그 대가로 밟은 함정(앱 저장소 `pmdart`). DB 관련은 [불변식은 DB 에서](https://github.com/seizeh/pmdart/blob/main/docs/adr/0002-invariants-in-db.md) · [DEFINER 쓰기 경로](https://github.com/seizeh/pmdart/blob/main/docs/adr/0003-definer-view-write-paths.md) · [RLS 비가시 행](https://github.com/seizeh/pmdart/blob/main/docs/adr/0004-rls-invisible-rows.md) · [마이그레이션 리플레이](https://github.com/seizeh/pmdart/blob/main/docs/adr/0005-db-change-management.md)
 - [docs/supabase-db.md](docs/supabase-db.md) — **DB 전체 레퍼런스** (2026-07-02 라이브 DB 기준): ENUM/테이블 36개(public 33 + app 3)/제약/인덱스/pg_cron 잡, 뷰 6개, RPC 54개(+app 스키마 53개), 트리거 52개, RLS 정책 76개, 컬럼 권한, Storage, Realtime, 마이그레이션 이력 77건
 - [docs/supabase-api.md](docs/supabase-api.md) — **API(Edge Functions) 레퍼런스**: 함수 15개 전체의 요청/응답/내부 로직/시크릿/레이트리밋, 커스텀 JWT + refresh 토큰 수명주기, 배포 현황
 - [docs/refresh-token-flow-design.md](docs/refresh-token-flow-design.md) — refresh 토큰 설계 문서
@@ -40,7 +41,45 @@ supabase/
 | 20260610112605 | 지원 수락 시 나머지 지원자 자동 거절 (`tg_applications_on_accept` 보강) |
 | 20260610120125 | 아이디(`username`) 비공개화(`public_profiles`·컬럼권한에서 제거) + `login_user` 가 username 반환 + 가입 아이디 중복확인 RPC `check_username_available` |
 
-> 위 이전(`20260603*`) 기반 스키마 마이그레이션은 Supabase 프로젝트에 이미 적용되어 있으며 본 저장소 범위 밖이다.
+> 위 이전(`20260603*`) 기반 스키마는 Supabase 프로젝트에 직접 적용되어 마이그레이션 파일이 없다.
+> 그 빠진 조각은 `supabase/schema/baseline.sql` 로 복원해 두었다 — 아래 [재현](#재현-빈-db-에서-처음부터) 참고.
+
+## 재현 (빈 DB 에서 처음부터)
+
+이 저장소만 받아서 빈 Postgres 에 올리면 현재 스키마가 그대로 나온다.
+
+```bash
+docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
+  supabase/postgres:17.6.1.121 postgres -c cron.database_name=pmdb_replay
+./scripts/replay_check.sh "postgresql://postgres:postgres@localhost:54323/postgres"
+```
+
+넘긴 연결문자열의 DB 를 쓰는 게 아니라 그 옆에 작업용 DB(`pmdb_replay`)를 새로 만들어
+거기서 돈다 — 이미지 기본 DB 는 `postgres` 롤이 수퍼유저가 아니고 `storage` 스키마가
+`supabase_admin` 소유라 스텁을 얹을 수 없다. `cron.database_name` 을 그 DB 로 지정하는
+이유도 같다(pg_cron 은 그 DB 에서만 설치된다).
+
+작업용 DB 를 두 개 만들어 **양쪽 다 복원→덤프를 거친 뒤** 비교한다 —
+`pg_dump` 출력은 되먹였을 때 글자 그대로 재현되지 않아서(파서가 배열 캐스트를 접는 등)
+스냅샷 파일과 직접 비교하면 의미가 같은데도 차이가 난다.
+
+적용 순서와 각 조각의 역할:
+
+| 파일 | 역할 |
+|---|---|
+| `supabase/schema/prelude.sql` | 확장(postgis·pg_net·pgcrypto…)과 Supabase 기본 롤 |
+| `supabase/schema/replay-stubs.sql` | 컨테이너에 없는 플랫폼 객체 흉내(storage 버킷/정책, realtime 퍼블리케이션) |
+| `supabase/schema/baseline.sql` | 2026-06-08 이전, 저장소 밖에서 적용됐던 기반 스키마 |
+| `supabase/schema/replay-default-privs.sql` | Supabase 기본 권한(마이그레이션이 만드는 객체의 ACL 재현) |
+| `supabase/migrations/*.sql` | 파일명 순서대로 전부 |
+
+`baseline.sql` 은 손으로 쓴 게 아니라 스냅샷에서 역산한 자동 생성물이다
+(`./scripts/build_baseline.py` — `schema.sql` 에서 마이그레이션이 만드는 객체를 뺀 것).
+`supabase db push` 대상이 아니도록 `migrations/` 밖에 둔다.
+
+**이 등식은 CI 가 매번 검증한다** — `db-tests.yml` 의 `replay` 잡이 빈 DB 에 위 순서대로
+쌓은 뒤 `pg_dump` 결과를 `schema.sql` 과 diff 한다. 어긋나면 실패하므로,
+마이그레이션 없이 운영 DB 에 직접 친 DDL 이나 갱신을 잊은 스냅샷도 같이 잡힌다.
 
 ## Edge Functions
 
@@ -66,11 +105,12 @@ supabase/
 ./scripts/run_db_tests.sh "$SUPABASE_DB_URL"
 ```
 
-- CI: `.github/workflows/db-tests.yml` — supabase/postgres 컨테이너에 **스키마
-  스냅샷**(`supabase/schema/schema.sql`)을 복원해 실행. 베이스 스키마가
-  마이그레이션 밖에 있는 구조라 리플레이 대신 스냅샷을 쓴다.
+- CI: `.github/workflows/db-tests.yml` 의 두 잡
+  - `pgtap` — **스키마 스냅샷**(`supabase/schema/schema.sql`)을 복원해 테스트(빠른 회귀)
+  - `replay` — 빈 DB 에 baseline + 마이그레이션을 처음부터 쌓아 스냅샷과 대조한 뒤,
+    재생된 DB 에서 같은 테스트를 한 번 더(재현성 + 드리프트 감지)
 - 스냅샷 갱신: 스키마 변경 마이그레이션 적용 후 `./scripts/dump_schema.sh` 실행해
-  함께 커밋(안 하면 CI 가 구스키마로 돈다).
+  함께 커밋(안 하면 CI 가 구스키마로 돈다). `baseline.sql` 도 같이 재생성된다.
 
 ## 배포
 

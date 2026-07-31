@@ -14,6 +14,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { alertAdmins } from "../_shared/edge_alert.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -22,7 +23,10 @@ const NAVER_KEY_ID = Deno.env.get("NAVER_MAP_KEY_ID");
 const NAVER_KEY = Deno.env.get("NAVER_MAP_KEY");
 const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY");
 
-const AI_REAL_THRESHOLD = 0.70; // 라이브니스(실제 개/고양이) 하한
+// 라이브니스는 is_real && real > fake 조합으로만 판정한다 — 사진 1장 판정은
+// 실내 저조도·역광·모션 블러에 민감해 절대 하한(0.70 류)을 두지 않는다.
+// (영상 11초가 근거인 enroll 쪽 ENROLL_REAL_THRESHOLD 와 대칭 맞추기 금지 —
+//  모달리티가 다르다. 절대 하한 도입은 오탐률 측정 후에만.)
 const IDENTITY_PASS_THRESHOLD = 0.63; // 동일 개체 통과선(중간신뢰)
 const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 멀티이미지
 const TOKEN_TTL_MIN = 15;
@@ -238,6 +242,9 @@ Deno.serve(async (req: Request) => {
     return json({ error: "invalid_coords" }, 400);
   }
   const accuracy = Math.round(Number(p.accuracy ?? 0)) || 0;
+  // ※ isMocked/lat/lng/accuracy 는 클라이언트 자기신고 값 — 정상 앱의 모의위치 앱만
+  //   걸러진다(직접 POST 로 위조 가능). 서버 권위 방어는 Gemini 판정뿐이며,
+  //   위조 좌표 차단(App Attest/Play Integrity, 이동속도 타당성)은 출시 전 과제.
   const isMocked = p.isMocked === true;
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
@@ -341,6 +348,8 @@ Deno.serve(async (req: Request) => {
     m = await matchIdentity(refB64, imageBase64, mimeType);
   } catch (e) {
     console.error("gemini match failed", e);
+    await alertAdmins(admin, "verify_ai_unavailable", "[운영] 게시글 사진 인증 AI 장애",
+      `verify-post-photo: Gemini 호출 실패 — ${String(e).slice(0, 140)}`);
     return json({ pass: false, reason: "ai_unavailable" });
   }
   const real = Math.max(m.dog_real, m.cat_real);
@@ -366,6 +375,8 @@ Deno.serve(async (req: Request) => {
   );
   if (upErr) {
     console.error("media upload failed", upErr);
+    await alertAdmins(admin, "verify_internal_error", "[운영] 게시글 사진 인증 내부 오류",
+      `verify-post-photo: 사진 업로드 실패 — ${String(upErr.message ?? upErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
   }
   const imageUrl = admin.storage.from("media").getPublicUrl(path).data.publicUrl;
@@ -397,6 +408,8 @@ Deno.serve(async (req: Request) => {
   });
   if (recErr) {
     console.error("record failed", recErr);
+    await alertAdmins(admin, "verify_internal_error", "[운영] 게시글 사진 인증 내부 오류",
+      `verify-post-photo: record_photo_verification RPC 실패 — ${String(recErr.message ?? recErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
   }
 

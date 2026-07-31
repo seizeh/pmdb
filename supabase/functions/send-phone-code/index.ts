@@ -10,6 +10,10 @@
 //   경로로 후기를 쓸 수 있어야 하는데 signup 목적을 재사용하면 phone_taken 에
 //   막힌다. 목적을 나눠야 후기용 인증이 가입에 전용되는 것도 함께 막힌다.
 //   verify_jwt=false: 가입/비번재설정은 로그인 전 단계라 JWT 없음. 남용은 자체 rate limit 으로 방어.
+//
+//   데모 백도어(심사·테스트 서버용): DEMO_PHONES(콤마 구분)·DEMO_OTP(6자리) 시크릿이
+//   둘 다 설정된 환경에서만, 해당 번호에 한해 SMS 발송 없이 고정 코드를 저장한다.
+//   verify-phone-code 이후는 실번호와 완전히 동일한 경로. 미설정(운영 기본)이면 죽은 코드.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -41,12 +45,22 @@ Deno.serve(async (req: Request) => {
   if (!/^01\d{8,9}$/.test(phone)) return json({ error: "invalid_phone" }, 400);
   if (!PURPOSES.has(purpose)) return json({ error: "invalid_purpose" }, 400);
 
-  let cfg;
-  try {
-    cfg = loadSolapiConfig();
-  } catch (e) {
-    console.error(e);
-    return json({ error: "server_misconfigured" }, 500);
+  // 데모 여부 판정 — 번호 목록과 6자리 고정 코드가 모두 유효할 때만 활성.
+  const demoPhones = new Set(
+    (Deno.env.get("DEMO_PHONES") ?? "").split(",").map((s) => normalizePhone(s)).filter(Boolean),
+  );
+  const demoOtp = Deno.env.get("DEMO_OTP") ?? "";
+  const isDemo = demoPhones.has(phone) && /^\d{6}$/.test(demoOtp);
+
+  // 데모 경로는 SMS 를 안 보내므로 Solapi 설정이 없어도 동작해야 한다.
+  let cfg = null;
+  if (!isDemo) {
+    try {
+      cfg = loadSolapiConfig();
+    } catch (e) {
+      console.error(e);
+      return json({ error: "server_misconfigured" }, 500);
+    }
   }
 
   const supabase = createClient(
@@ -70,23 +84,26 @@ Deno.serve(async (req: Request) => {
   }
 
   // 1) rate limit: 동일 번호+목적 최근 60초 내 발급 이력 차단
-  const since = new Date(Date.now() - RATE_LIMIT_SEC * 1000).toISOString();
-  const { count, error: rlErr } = await supabase
-    .from("phone_verifications")
-    .select("id", { count: "exact", head: true })
-    .eq("phone", phone)
-    .eq("purpose", purpose)
-    .gte("created_at", since);
-  if (rlErr) {
-    console.error("rate-limit query failed", rlErr);
-    return json({ error: "internal_error" }, 500);
-  }
-  if ((count ?? 0) > 0) {
-    return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
+  //    (데모 번호는 면제 — SMS 비용이 없고, 심사 중 재시도 마찰을 없앤다)
+  if (!isDemo) {
+    const since = new Date(Date.now() - RATE_LIMIT_SEC * 1000).toISOString();
+    const { count, error: rlErr } = await supabase
+      .from("phone_verifications")
+      .select("id", { count: "exact", head: true })
+      .eq("phone", phone)
+      .eq("purpose", purpose)
+      .gte("created_at", since);
+    if (rlErr) {
+      console.error("rate-limit query failed", rlErr);
+      return json({ error: "internal_error" }, 500);
+    }
+    if ((count ?? 0) > 0) {
+      return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
+    }
   }
 
-  // 2) 코드 생성 + 저장(발송 직전 INSERT)
-  const code = genCode();
+  // 2) 코드 생성 + 저장(발송 직전 INSERT) — 데모는 고정 코드
+  const code = isDemo ? demoOtp : genCode();
   const expires_at = new Date(Date.now() + CODE_TTL_MIN * 60 * 1000).toISOString();
   const { error: insErr } = await supabase
     .from("phone_verifications")
@@ -96,9 +113,13 @@ Deno.serve(async (req: Request) => {
     return json({ error: "internal_error" }, 500);
   }
 
-  // 3) Solapi 발송
+  // 3) Solapi 발송 — 데모 번호는 저장만 하고 발송 생략(응답 형태는 동일)
+  if (isDemo) {
+    console.log("demo verification issued:", phone.slice(0, 3) + "****", purpose);
+    return json({ ok: true, expires_in_sec: CODE_TTL_MIN * 60 });
+  }
   const text = `[PawMate] 인증번호 ${code} (5분 내 입력)`;
-  const result = await sendSms(cfg, phone, text);
+  const result = await sendSms(cfg!, phone, text);
   if (!result.ok) {
     console.error("solapi send failed", result.status, result.body);
     return json({ error: "sms_send_failed", detail: result.body }, 502);

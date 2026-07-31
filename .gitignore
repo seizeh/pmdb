@@ -12,7 +12,11 @@
 
 # 백업 산출물·비밀 설정 (커밋 금지)
 scripts/backup.env
+scripts/test-server.env
 backups/
 
 # 설계 PDF 등 문서 부산물
 /*.pdf
+
+# 리플레이 검증 산출물(로컬 실행 시 생성)
+replay-diff.txt

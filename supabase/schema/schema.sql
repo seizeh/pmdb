@@ -509,6 +509,23 @@ COMMENT ON FUNCTION app.mask_phone(p_phone text) IS '간이 회원 표시명 —
 
 
 --
+-- Name: needs_photo_gate(integer); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.needs_photo_gate(p_verify_post_count integer) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    SET search_path TO ''
+    AS $$ select coalesce(p_verify_post_count, 0) in (0, 3, 9) $$;
+
+
+--
+-- Name: FUNCTION needs_photo_gate(p_verify_post_count integer); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.needs_photo_gate(p_verify_post_count integer) IS '사진 촬영 인증이 필요한 게시글 순번(1·4·10번째)인지 — 앱 MyPet.needsPhotoGate 와 같은 규칙';
+
+
+--
 -- Name: norm_biz_text(text); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1783,6 +1800,26 @@ begin
   return old;
 end;
 $$;
+
+
+--
+-- Name: tg_post_pets_bump_verify_count(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_post_pets_bump_verify_count() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  update public.pets
+     set verify_post_count = verify_post_count + 1
+   where id = new.pet_id
+     and exists (
+           select 1 from public.posts p
+            where p.id = new.post_id
+              and p.category in ('walk_together','walk_proxy','care','give_away'));
+  return new;
+end $$;
 
 
 --
@@ -4164,15 +4201,13 @@ declare
   v_uid  uuid := app.uid();
   v_post uuid;
   v_pv   public.photo_verifications%rowtype;
-  v_all_trusted boolean := false;
+  v_exempt boolean := false;
   v_user record;
 begin
   if v_uid is null then
     raise exception 'posts: 로그인이 필요합니다';
   end if;
 
-  -- 동네 인증 게이트 — 업체 모드(소식 전용)는 사업장 주소 기준이라 생략
-  -- (승인 여부·지역 스탬프는 tg_posts_set_region 트리거가 강제).
   select region_code, is_location_verified, last_verified_at, active_mode
     into v_user
     from public.users where id = v_uid;
@@ -4186,17 +4221,16 @@ begin
   end if;
 
   if p_category in ('walk_together','walk_proxy','care','give_away') then
-    v_all_trusted := p_pet_ids is not null
-                 and array_length(p_pet_ids, 1) >= 1
-                 and not exists (
-                       select 1 from public.pets
-                        where id = any(p_pet_ids) and trust_score < 3);
+    v_exempt := p_pet_ids is not null
+            and array_length(p_pet_ids, 1) >= 1
+            and not exists (
+                  select 1 from public.pets
+                   where id = any(p_pet_ids)
+                     and app.needs_photo_gate(verify_post_count));
 
-    if v_all_trusted then
+    if v_exempt then
       perform set_config('app.photo_trusted', 'true', true);
     else
-      -- 미인증 펫 포함 → 사진 검증 필수. 촬영 대상은 연결 펫 중 아무나
-      -- (한 마리 통과로 충분 — 인증된 펫을 촬영해도 된다).
       select * into v_pv from public.photo_verifications where id = p_photo_token;
       if not found or v_pv.pet_id is null then
         raise exception 'posts: 사진 검증 정보가 올바르지 않습니다';
@@ -6684,7 +6718,7 @@ CREATE TABLE public.device_tokens (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
     CONSTRAINT device_tokens_failure_count_check CHECK ((failure_count >= 0)),
-    CONSTRAINT device_tokens_platform_check CHECK (((platform)::text = ANY ((ARRAY['ios'::character varying, 'android'::character varying])::text[])))
+    CONSTRAINT device_tokens_platform_check CHECK (((platform)::text = ANY ((ARRAY['ios'::character varying, 'android'::character varying, 'web'::character varying])::text[])))
 );
 
 
@@ -7033,6 +7067,7 @@ CREATE TABLE public.pets (
     ai_colors text[],
     info_match jsonb,
     trust_score integer DEFAULT 0 NOT NULL,
+    verify_post_count integer DEFAULT 0 NOT NULL,
     CONSTRAINT pets_gender_check CHECK (((gender IS NULL) OR ((gender)::text = ANY ((ARRAY['male'::character varying, 'female'::character varying])::text[])))),
     CONSTRAINT pets_pet_status_check CHECK (((pet_status)::text = ANY ((ARRAY['active'::character varying, 'transferred'::character varying, 'deceased'::character varying, 'deleted'::character varying])::text[]))),
     CONSTRAINT pets_species_kind_check CHECK (((species_kind IS NULL) OR ((species_kind)::text = ANY ((ARRAY['dog'::character varying, 'cat'::character varying])::text[]))))
@@ -7086,6 +7121,13 @@ COMMENT ON COLUMN public.pets.identity_verified IS '신원 영상 인증(기준 
 --
 
 COMMENT ON COLUMN public.pets.info_match IS '등록정보 대조 결과. 예: {"species_kind":true,"breed":false,"color":false,"warnings":["breed"]}.';
+
+
+--
+-- Name: COLUMN pets.verify_post_count; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.pets.verify_post_count IS '검증 카테고리(walk/care/give_away) 게시글 누적 수 — 사진 인증 요구 순번(1·4·10) 판정용. 게시글 삭제로 줄지 않음';
 
 
 --
@@ -9251,6 +9293,13 @@ CREATE TRIGGER trg_post_hearts_count AFTER INSERT OR DELETE ON public.post_heart
 --
 
 CREATE TRIGGER trg_post_hearts_recall AFTER DELETE ON public.post_hearts FOR EACH ROW EXECUTE FUNCTION app.tg_post_hearts_recall();
+
+
+--
+-- Name: post_pets trg_post_pets_bump_verify_count; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_post_pets_bump_verify_count AFTER INSERT ON public.post_pets FOR EACH ROW EXECUTE FUNCTION app.tg_post_pets_bump_verify_count();
 
 
 --
@@ -12129,6 +12178,14 @@ GRANT INSERT(species_kind),UPDATE(species_kind) ON TABLE public.pets TO authenti
 
 GRANT SELECT(trust_score) ON TABLE public.pets TO anon;
 GRANT SELECT(trust_score) ON TABLE public.pets TO authenticated;
+
+
+--
+-- Name: COLUMN pets.verify_post_count; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT SELECT(verify_post_count) ON TABLE public.pets TO anon;
+GRANT SELECT(verify_post_count) ON TABLE public.pets TO authenticated;
 
 
 --

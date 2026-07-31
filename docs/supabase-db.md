@@ -890,7 +890,7 @@ AI 반려동물 사진 검증 기록. 실사/생성 이미지 판별 점수, 개
 - **FK**: user_id → users.id, pet_id → pets.id
 - **CHECK**:
   - `photo_verifications_result_check`: result IN ('pass','fail')
-  - `photo_verifications_purpose_check`: purpose IN ('reference','post')
+  - `photo_verifications_purpose_check`: purpose IN ('reference','post','pet_identity') — 'pet_identity'는 20260713112529에서 추가(varchar(20) 확장은 20260713112812)
 - **인덱스**:
   - `photo_verifications_user_idx` (user_id, created_at DESC)
   - `photo_verifications_token_open_idx` (id, 부분: WHERE consumed_at IS NULL AND result='pass') — 미소비 통과 토큰 조회
