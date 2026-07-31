@@ -67,6 +67,10 @@
 - **`loadSolapiConfig()`** — `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER` 로드, 하나라도 없으면 throw.
 - **`sendSms(cfg, to, text)`** — `{ ok, status, body }` 반환.
 
+### 2.4 `_shared/edge_alert.ts` — 엣지 실패 관리자 알림 (pmdart#157 베타 관측성)
+
+- **`alertAdmins(admin, key, title, body)`** — 활성 관리자(`user_type='admin'`) 전원에게 `notifications` INSERT(→ 기존 트리거로 인앱+FCM 푸시). 타입은 기존 `system_notice` 재사용(새 타입은 CHECK·클라 매핑 동시 수정 필요 — 실수 여지 회피). 같은 `key` 는 **30분 1회** 스로틀(`rate_limit_hit('edgealert:<key>')`) — 장애 폭주가 알림 폭주로 번지지 않게. 절대 throw 하지 않음(알림 실패는 본 흐름에 무영향). 사용처: `enroll-pet-identity`(`ai_unavailable`/`video_too_large`/`internal_error`), `verify-post-photo`(`ai_unavailable`/`internal_error`).
+
 ## 3. 인증/토큰 수명주기 흐름
 
 ### 3.1 토큰 모델
@@ -252,7 +256,7 @@
   - 401 `unauthorized`, 403 `forbidden`(보호자 아님), 500 `server_misconfigured` / `internal_error`
 - **내부 로직**: ⓪ `pet_guardians`에서 uid가 petId의 보호자인지 확인 ① `users`의 활동지역 인증 상태 확인 — `is_location_verified`, `last_verified_at`(30일 경과 시 만료 취급), `region_code` ② 모의위치 거절(+`record_photo_verification` 실패 기록) ③ 촬영 좌표를 네이버 역지오코딩 → 행정동 코드가 `users.region_code`와 일치해야 함 ④ `pet_identity_frames`에서 기준 프레임 목록 조회 + Storage `media` 버킷에서 다운로드(없으면 `pet_not_enrolled`) ⑤ **Gemini 2.5 Pro**(구조화 JSON 출력, temperature 0, 429 시 최대 2회 backoff 재시도)로 기준 프레임 N장 + 게시 사진 1장 → 동일 개체 `identity_score` + 라이브니스(`is_real`, dog/cat_real/fake) 판정 ⑥ `is_real && real>fake`(라이브니스) AND `identity_score >= 0.63`(동일 개체) 통과 시 → 사진을 `media/<uid>/posts/<ts>.jpg`로 업로드 → `record_photo_verification` RPC(p_result='pass', p_ttl_min=15, p_pet_id, p_match_score, p_matched=true 등)가 **검증 토큰** 반환(게시글 작성 시 제출). 실패 경로 중 `mock_location`/`geocode_failed`/`region_mismatch`/`not_real_pet`/`identity_mismatch`는 RPC로 실패 기록을 남기지만, `not_verified`/`pet_not_enrolled`/`ai_unavailable`은 기록 없이 반환한다.
 - **시크릿**: `JWT_SECRET`, `NAVER_MAP_KEY_ID`, `NAVER_MAP_KEY`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
-- **정책**: 지역 재인증 주기 30일(`REVERIFY_DAYS`, 위치기반서비스 이용약관 제7조와 일치), 검증 토큰 TTL 15분, 라이브니스는 `is_real && real>fake`(사진 1장 판정은 저조도·역광·블러에 민감해 절대 하한 없음 — 도입은 오탐률 측정 후에만), 동일 개체 통과선 0.63. **신뢰 경계 주의**: `lat`/`lng`/`accuracy`/`isMocked`는 클라이언트 자기신고 값이라 직접 POST로 위조 가능 — 서버 권위 판정은 Gemini 이미지 판별뿐이며, 기기 증명(App Attest/Play Integrity)·좌표 타당성 교차검증은 출시 전 과제.
+- **정책**: 지역 재인증 주기 30일(`REVERIFY_DAYS`, 위치기반서비스 이용약관 제7조와 일치), 검증 토큰 TTL 15분, 라이브니스는 `is_real && real>fake`(사진 1장 판정은 저조도·역광·블러에 민감해 절대 하한 없음 — 도입은 오탐률 측정 후에만), 동일 개체 통과선 0.63. `ai_unavailable`/`internal_error` 발생 시 관리자 알림(§2.4, 키별 30분 1회). **신뢰 경계 주의**: `lat`/`lng`/`accuracy`/`isMocked`는 클라이언트 자기신고 값이라 직접 POST로 위조 가능 — 서버 권위 판정은 Gemini 이미지 판별뿐이며, 기기 증명(App Attest/Play Integrity)·좌표 타당성 교차검증은 출시 전 과제.
 
 ### enroll-pet-identity
 
@@ -266,7 +270,7 @@
   - 401 `unauthorized`, 403 `{ enrolled:false, reason:"not_guardian" }`, 500 `server_misconfigured` / `internal_error`
 - **내부 로직**: ① `pet_guardians` 보호자 확인 ② `pets`에서 등록 종(`species_kind`)/품종(`species`)을 **서버가 직접 읽음**(클라 입력 불신) ③ **Gemini 2.5 Pro 영상+프레임 한 호출 판별**(구조화 출력): 실제 살아있는 개/고양이 여부(dog/cat_real/fake ≥ 0.70 & real>fake), 영상 내내 동일 개체(`consistent`), **`frames[]`가 그 영상의 장면인지(`frames_from_video`) — 검증한 영상과 저장할 기준 프레임의 바꿔치기 차단**, 추정 품종/털색 ④ 등록정보 교차검증 — 종(개↔고양이) 불일치는 **하드 게이트**(`species_mismatch` 거절), 품종 불일치는 소프트 경고(`looseBreedMatch` 느슨 비교: 소문자·공백 제거 후 부분 포함, 믹스는 관대) ⑤ 통과 시 **프레임 N장만** `media/<uid>/pet_identity/<petId>/<i>.jpg`로 업로드(upsert) + `enroll_pet_identity` RPC(p_pet, p_species, p_breed, p_colors, p_info_match, p_paths, p_urls). **★ 영상은 저장하지 않음**(Gemini 인라인 전송 후 메모리에서 소멸 — Storage/DB 미기록). 실패 시에도 `photo_verifications(purpose='pet_identity')`에 1행 기록(관리자 실패 조회용).
 - **시크릿**: `JWT_SECRET`, `GEMINI_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
-- **정책**: 라이브니스 하한 0.70(`ENROLL_REAL_THRESHOLD`), 프레임 최소 3장. 프레임↔영상 동일 출처(`frames_from_video`)는 2026-07-29부터 **섀도 모드**(challenge 를 오탐으로 제거한 전례에 따라 측정 후 전환 — 클라 프레임 추출 시각과 Gemini 1fps 샘플링 어긋남이 오탐 소지). **오탐률 측정**: 성공 등록마다 판정 1행을 `photo_verifications`에 기록 — 분모 = `purpose='pet_identity' AND result='pass'` 전체, 분자 = 그중 `fail_reason='frames_not_from_video_shadow'`. `_shadow` 접미사는 강제 전환 후의 실제 거절 행(`result='fail', fail_reason='frames_not_from_video'`)과의 영구 구분자. 판정 행은 즉시 만료(`expires_at=now()`)+`region_matched=false`+`image_url=null`이라 게시글 토큰으로 소비 불가. 인라인 페이로드 합계 한도 19M chars(`video_too_large` — 발생 시 실측값 console 로그 + 실패 행 기록, Gemini 요청당 20MB 보호선). Gemini 429 시 1.5s/3s backoff 최대 2회 재시도.
+- **정책**: 라이브니스 하한 0.70(`ENROLL_REAL_THRESHOLD`), 프레임 최소 3장. 프레임↔영상 동일 출처(`frames_from_video`)는 2026-07-29부터 **섀도 모드**(challenge 를 오탐으로 제거한 전례에 따라 측정 후 전환 — 클라 프레임 추출 시각과 Gemini 1fps 샘플링 어긋남이 오탐 소지). **오탐률 측정**: 성공 등록마다 판정 1행을 `photo_verifications`에 기록 — 분모 = `purpose='pet_identity' AND result='pass'` 전체, 분자 = 그중 `fail_reason='frames_not_from_video_shadow'`. `_shadow` 접미사는 강제 전환 후의 실제 거절 행(`result='fail', fail_reason='frames_not_from_video'`)과의 영구 구분자. 판정 행은 즉시 만료(`expires_at=now()`)+`region_matched=false`+`image_url=null`이라 게시글 토큰으로 소비 불가. 인라인 페이로드 합계 한도 19M chars(`video_too_large` — 발생 시 실측값 console 로그 + 실패 행 기록, Gemini 요청당 20MB 보호선). Gemini 429 시 1.5s/3s backoff 최대 2회 재시도. `ai_unavailable`/`video_too_large`/`internal_error` 발생 시 관리자 알림(§2.4, 키별 30분 1회).
 
 ### search-petcafe
 

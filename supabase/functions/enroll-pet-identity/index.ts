@@ -17,6 +17,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { alertAdmins } from "../_shared/edge_alert.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -263,6 +264,8 @@ Deno.serve(async (req: Request) => {
   if (inlineChars > MAX_INLINE_B64_CHARS) {
     console.error(`video_too_large inlineChars=${inlineChars} frames=${frames.length}`);
     await logEnrollFail(admin, uid, petId, "video_too_large");
+    await alertAdmins(admin, "enroll_video_too_large", "[운영] 신원 인증 영상 용량 초과",
+      `enroll-pet-identity: 페이로드 한도 초과 (${Math.round(inlineChars / 1e6)}M chars) — 발생 분포는 photo_verifications fail_reason='video_too_large' 참조`);
     return json({ enrolled: false, reason: "video_too_large" }, 400);
   }
 
@@ -282,6 +285,8 @@ Deno.serve(async (req: Request) => {
   } catch (e) {
     console.error("gemini enroll failed", e);
     await logEnrollFail(admin, uid, petId, "ai_unavailable");
+    await alertAdmins(admin, "enroll_ai_unavailable", "[운영] 신원 인증 AI 장애",
+      `enroll-pet-identity: Gemini 호출 실패 — ${String(e).slice(0, 140)}`);
     return json({ enrolled: false, reason: "ai_unavailable" });
   }
   const real = Math.max(ai.dog_real, ai.cat_real);
@@ -333,6 +338,8 @@ Deno.serve(async (req: Request) => {
     );
     if (upErr) {
       console.error("frame upload failed", upErr);
+      await alertAdmins(admin, "enroll_internal_error", "[운영] 신원 인증 내부 오류",
+        `enroll-pet-identity: 프레임 업로드 실패 — ${String(upErr.message ?? upErr).slice(0, 140)}`);
       return json({ error: "internal_error" }, 500);
     }
     paths.push(path);
@@ -350,6 +357,8 @@ Deno.serve(async (req: Request) => {
   });
   if (rpcErr) {
     console.error("enroll_pet_identity rpc failed", rpcErr);
+    await alertAdmins(admin, "enroll_internal_error", "[운영] 신원 인증 내부 오류",
+      `enroll-pet-identity: enroll_pet_identity RPC 실패 — ${String(rpcErr.message ?? rpcErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
   }
 
