@@ -197,6 +197,8 @@ CREATE FUNCTION app.cleanup_retention() RETURNS void
    where bp.status = 'rejected'
      and bp.updated_at < now() - interval '6 months';
 
+  delete from app.client_errors where created_at < now() - interval '30 days';
+
   delete from public.chat_messages
    where is_deleted = true
      and coalesce(deleted_at, updated_at, created_at) < now() - interval '30 days';
@@ -2509,6 +2511,53 @@ begin
           jsonb_build_object('title', btrim(p_title), 'recipients', v_cnt));
 
   return v_cnt;
+end $$;
+
+
+--
+-- Name: admin_client_error_summary(integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_client_error_summary(p_hours integer DEFAULT 24) RETURNS TABLE(where_key text, hits bigint, users bigint, last_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  return query
+    select e.where_key::text, count(*)::bigint,
+           count(distinct e.user_id)::bigint, max(e.created_at)
+      from app.client_errors e
+     where e.created_at > now() - make_interval(hours => greatest(coalesce(p_hours, 24), 1))
+     group by e.where_key
+     order by count(*) desc;
+end $$;
+
+
+--
+-- Name: admin_client_errors(text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_client_errors(p_where text DEFAULT NULL::text, p_limit integer DEFAULT 100, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, user_id uuid, nickname text, where_key text, message text, stack text, platform text, app_release text, extra jsonb, created_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  return query
+    select e.id, e.user_id, coalesce(u.nickname, '(비로그인)')::text,
+           e.where_key::text, e.message::text, e.stack,
+           e.platform::text, e.app_release::text, e.extra, e.created_at
+      from app.client_errors e
+      left join public.users u on u.id = e.user_id
+     where p_where is null or e.where_key = p_where
+     order by e.created_at desc
+     limit greatest(least(coalesce(p_limit, 100), 500), 1)
+    offset greatest(coalesce(p_offset, 0), 0);
 end $$;
 
 
@@ -4933,6 +4982,21 @@ $$;
 
 
 --
+-- Name: post_edit_locked(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.post_edit_locked(p_post uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select exists (
+    select 1 from public.appointments a
+     where a.post_id = p_post and a.status = 'completed'
+  );
+$$;
+
+
+--
 -- Name: posts_by_region(double precision, double precision, double precision, double precision); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5076,6 +5140,56 @@ CREATE FUNCTION public.record_auth_log(p_user uuid, p_ip_hash text) RETURNS void
     AS $$
   insert into app.auth_logs (user_id, ip_hash) values (p_user, nullif(p_ip_hash, ''));
 $$;
+
+
+--
+-- Name: record_client_error(text, text, text, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.record_client_error(p_where text, p_message text, p_stack text DEFAULT NULL::text, p_platform text DEFAULT NULL::text, p_release text DEFAULT NULL::text, p_extra jsonb DEFAULT NULL::jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+  v_ok  boolean;
+begin
+  if coalesce(p_where, '') = '' or coalesce(p_message, '') = '' then
+    return; -- 조용히 무시(오류 보고가 예외를 던지면 안 된다)
+  end if;
+
+  -- 로그인 사용자는 계정별로, 비로그인은 **전체 합산**으로 막는다.
+  -- 익명은 식별자가 없어 개별 제한이 불가능하다 — 전역 상한으로 홍수만 막는다.
+  v_ok := public.rate_limit_hit(
+            case when v_uid is null then 'cerr:anon' else 'cerr:' || v_uid::text end,
+            case when v_uid is null then 300 else 30 end,
+            60);
+  if not v_ok then
+    return;
+  end if;
+
+  insert into app.client_errors
+    (user_id, where_key, message, stack, platform, app_release, extra)
+  values
+    (v_uid,
+     left(p_where, 80),
+     left(p_message, 500),
+     left(p_stack, 8000),
+     left(p_platform, 10),
+     left(p_release, 40),
+     case when p_extra is null then null
+          when length(p_extra::text) > 4000 then null  -- 과대 페이로드는 버린다
+          else p_extra end);
+exception when others then
+  return; -- 어떤 이유로든 실패해도 앱에 예외를 돌려주지 않는다
+end $$;
+
+
+--
+-- Name: FUNCTION record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제.';
 
 
 --
@@ -6038,6 +6152,14 @@ begin
   if v_owner is null then raise exception 'post_not_found'; end if;
   if v_owner <> v_uid then raise exception 'not_owner'; end if;
 
+  -- 약속이 한 건이라도 완료됐으면 잠근다(위 주석의 근거).
+  if exists (
+    select 1 from public.appointments a
+     where a.post_id = p_post and a.status = 'completed'
+  ) then
+    raise exception 'appointment_completed' using errcode = 'P0001';
+  end if;
+
   update public.posts set
     title = btrim(p_title),
     content = btrim(p_content),
@@ -6320,6 +6442,45 @@ CREATE TABLE app.care_threads (
 --
 
 COMMENT ON TABLE app.care_threads IS '위탁 알림장 스레드(0028 §4.4) — 반려동물×업체 상시 1개, 건 엔티티 없음.';
+
+
+--
+-- Name: client_errors; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.client_errors (
+    id bigint NOT NULL,
+    user_id uuid,
+    where_key character varying(80) NOT NULL,
+    message character varying(500) NOT NULL,
+    stack text,
+    platform character varying(10),
+    app_release character varying(40),
+    extra jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT client_errors_stack_len CHECK (((stack IS NULL) OR (length(stack) <= 8000)))
+);
+
+
+--
+-- Name: TABLE client_errors; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.client_errors IS '클라이언트 오류 리포팅(reported 등급만). 30일 보존 후 app.cleanup_retention 이 파기 (0031)';
+
+
+--
+-- Name: client_errors_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.client_errors ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.client_errors_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
 
 
 --
@@ -7800,6 +7961,14 @@ ALTER TABLE ONLY app.care_threads
 
 
 --
+-- Name: client_errors client_errors_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.client_errors
+    ADD CONSTRAINT client_errors_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: funnel_events funnel_events_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -8334,6 +8503,20 @@ CREATE INDEX care_threads_claimed_idx ON app.care_threads USING btree (claimed_b
 --
 
 CREATE INDEX care_threads_phone_idx ON app.care_threads USING btree (recipient_phone_hmac) WHERE ((claimed_by IS NULL) AND (recipient_phone_hmac IS NOT NULL));
+
+
+--
+-- Name: client_errors_recent_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX client_errors_recent_idx ON app.client_errors USING btree (created_at DESC);
+
+
+--
+-- Name: client_errors_where_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX client_errors_where_idx ON app.client_errors USING btree (where_key, created_at DESC);
 
 
 --
@@ -9493,6 +9676,14 @@ ALTER TABLE ONLY app.care_threads
 
 
 --
+-- Name: client_errors client_errors_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.client_errors
+    ADD CONSTRAINT client_errors_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: refresh_tokens refresh_tokens_replaced_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -10035,6 +10226,12 @@ ALTER TABLE app.business_purge_config ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.care_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: client_errors; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: location_usage_logs; Type: ROW SECURITY; Schema: app; Owner: -
@@ -10949,6 +11146,24 @@ GRANT ALL ON FUNCTION public.admin_broadcast_system_notice(p_title text, p_body 
 
 
 --
+-- Name: FUNCTION admin_client_error_summary(p_hours integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_client_error_summary(p_hours integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_client_error_summary(p_hours integer) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_client_error_summary(p_hours integer) TO service_role;
+
+
+--
+-- Name: FUNCTION admin_client_errors(p_where text, p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_client_errors(p_where text, p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_client_errors(p_where text, p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_client_errors(p_where text, p_limit integer, p_offset integer) TO service_role;
+
+
+--
 -- Name: FUNCTION admin_create_facility_share_link(p_facility uuid, p_days integer); Type: ACL; Schema: public; Owner: -
 --
 
@@ -11539,6 +11754,15 @@ GRANT ALL ON FUNCTION public.pet_guardians_of(p_pet uuid) TO service_role;
 
 
 --
+-- Name: FUNCTION post_edit_locked(p_post uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.post_edit_locked(p_post uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.post_edit_locked(p_post uuid) TO authenticated;
+GRANT ALL ON FUNCTION public.post_edit_locked(p_post uuid) TO service_role;
+
+
+--
 -- Name: FUNCTION posts_by_region(p_min_lng double precision, p_min_lat double precision, p_max_lng double precision, p_max_lat double precision); Type: ACL; Schema: public; Owner: -
 --
 
@@ -11586,6 +11810,16 @@ GRANT ALL ON FUNCTION public.rate_limit_hit(p_key text, p_max integer, p_window_
 
 REVOKE ALL ON FUNCTION public.record_auth_log(p_user uuid, p_ip_hash text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.record_auth_log(p_user uuid, p_ip_hash text) TO service_role;
+
+
+--
+-- Name: FUNCTION record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) TO authenticated;
+GRANT ALL ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) TO service_role;
+GRANT ALL ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) TO anon;
 
 
 --

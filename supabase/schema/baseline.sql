@@ -1939,6 +1939,45 @@ CREATE TABLE app.business_purge_config (
 
 
 --
+-- Name: client_errors; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.client_errors (
+    id bigint NOT NULL,
+    user_id uuid,
+    where_key character varying(80) NOT NULL,
+    message character varying(500) NOT NULL,
+    stack text,
+    platform character varying(10),
+    app_release character varying(40),
+    extra jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT client_errors_stack_len CHECK (((stack IS NULL) OR (length(stack) <= 8000)))
+);
+
+
+--
+-- Name: TABLE client_errors; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.client_errors IS '클라이언트 오류 리포팅(reported 등급만). 30일 보존 후 app.cleanup_retention 이 파기 (0031)';
+
+
+--
+-- Name: client_errors_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.client_errors ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.client_errors_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: location_usage_logs; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -2765,6 +2804,14 @@ ALTER TABLE ONLY app.business_purge_config
 
 
 --
+-- Name: client_errors client_errors_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.client_errors
+    ADD CONSTRAINT client_errors_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: location_usage_logs location_usage_logs_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -3146,6 +3193,20 @@ ALTER TABLE ONLY public.user_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: client_errors_recent_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX client_errors_recent_idx ON app.client_errors USING btree (created_at DESC);
+
+
+--
+-- Name: client_errors_where_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX client_errors_where_idx ON app.client_errors USING btree (where_key, created_at DESC);
 
 
 --
@@ -4046,6 +4107,14 @@ ALTER TABLE ONLY app.auth_logs
 
 
 --
+-- Name: client_errors client_errors_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.client_errors
+    ADD CONSTRAINT client_errors_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
 -- Name: refresh_tokens refresh_tokens_replaced_by_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -4464,6 +4533,12 @@ ALTER TABLE app.auth_logs ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.business_purge_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: client_errors; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: location_usage_logs; Type: ROW SECURITY; Schema: app; Owner: -
