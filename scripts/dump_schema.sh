@@ -15,17 +15,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$SCRIPT_DIR/../supabase/schema/schema.sql"
 
 export PATH="/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:$PATH"
+. "$SCRIPT_DIR/_schema_dump.sh"
 set -a; . "$SCRIPT_DIR/backup.env"; set +a
 [ -n "${SUPABASE_DB_URL:-}" ] || { echo "SUPABASE_DB_URL 미설정" >&2; exit 1; }
 
-mkdir -p "$(dirname "$OUT")"
-# 필터:
-#  · 'Dumped from/by' 주석·\restrict 토큰 — 실행마다 달라져 diff 소음
-#  · CREATE SCHEMA public — 새 DB 에 이미 존재해 복원이 실패한다(app 은 유지)
-#  · ALTER DEFAULT PRIVILEGES — 타 롤(supabase_admin 등) 기본권한은 비수퍼유저
-#    복원에서 permission denied. 객체별 GRANT 는 그대로 담기므로 테스트에 불필요.
-pg_dump "$SUPABASE_DB_URL" --schema-only --no-owner -n public -n app \
-  | grep -vE '^-- Dumped |^\\|^CREATE SCHEMA public;$|^ALTER DEFAULT PRIVILEGES ' \
-  > "$OUT"
-
+dump_schema_to "$SUPABASE_DB_URL" "$OUT"
 echo "written: $OUT ($(wc -l < "$OUT" | tr -d ' ') lines)"
+
+# 스냅샷이 바뀌면 베이스라인도 같이 바뀐다(= schema.sql − 마이그레이션 생성물).
+# 여기서 함께 갱신해 두 파일이 어긋난 채 커밋되는 일을 막는다.
+"$SCRIPT_DIR/build_baseline.py"

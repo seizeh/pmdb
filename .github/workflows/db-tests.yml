@@ -1,13 +1,14 @@
-# DB 테스트 — 스키마 스냅샷을 supabase/postgres 컨테이너에 복원한 뒤
-# pgTAP 불변식 테스트(supabase/tests)를 실행한다.
-# 베이스 스키마가 마이그레이션 밖(out-of-band)이라 리플레이 대신 스냅샷을 쓴다
-# (갱신: ./scripts/dump_schema.sh — README 참고).
+# DB CI — 두 잡이 서로 다른 걸 본다.
+#   pgtap  : 스키마 스냅샷을 복원한 뒤 pgTAP 불변식 테스트를 돌린다(빠른 회귀).
+#   replay : 빈 DB 에 baseline + 마이그레이션을 처음부터 다시 쌓아 스냅샷과 대조한다
+#            (재현성 + 스냅샷/마이그레이션 드리프트 감지 — scripts/replay_check.sh).
 name: DB Tests
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   pgtap:
@@ -41,3 +42,94 @@ jobs:
 
       - name: pgTAP 테스트
         run: ./scripts/run_db_tests.sh "$DB_URL"
+
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # replay_check.sh 는 이 서버에 작업용 DB(pmdb_replay)를 새로 만들어 거기서 돈다.
+      DB_URL: postgresql://postgres:postgres@localhost:54323/postgres
+      REPLAY_URL: postgresql://postgres:postgres@localhost:54323/pmdb_replay
+      REPLAY_DB: pmdb_replay
+    steps:
+      - uses: actions/checkout@v4
+
+      # services: 대신 직접 띄운다 — pg_cron 을 작업용 DB 에 설치하려면
+      # cron.database_name 을 넘겨야 하는데(기본값은 postgres), 서비스 컨테이너로는
+      # postgres 실행 인자를 줄 수 없다.
+      #
+      # 이미지 기본 DB 를 쓰지 않는 이유: postgres 롤이 수퍼유저가 아니고
+      # storage 스키마는 supabase_admin 소유라 그 안에 스텁을 만들 수 없다
+      # (storage 에는 테이블이 하나도 없어서 그대로 쓸 수도 없다).
+      # 새 DB 에서는 우리가 소유자라 둘 다 해결된다.
+      # pg_dump 는 서버와 같은 메이저(17)여야 한다. 우분투 기본 패키지는 16 이라
+      # 덤프 형식이 달라져 없는 차이가 생긴다 — PGDG 저장소에서 17 을 받는다.
+      - name: postgresql-client 17 설치
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          # 러너에 16 이 먼저 깔려 있어 PATH 앞자리를 차지한다 — 17 을 앞에 세운다.
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
+
+      - name: Postgres 기동 (cron.database_name = 작업용 DB)
+        run: |
+          wait_ready() {
+            # 컨테이너 안에서 재는 건 소용없다 — 엔트리포인트가 초기화용 임시 서버를
+            # 먼저 띄우고 죽이므로 그때 준비된 것처럼 보인다. 호스트에서 실제 포트로 잰다.
+            for _ in $(seq 1 60); do
+              pg_isready -h localhost -p 54323 -U postgres -q && return 0
+              sleep 2
+            done
+            docker logs --tail 50 pmdb-replay
+            return 1
+          }
+
+          docker run -d --name pmdb-replay \
+            -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
+            supabase/postgres:17.6.1.121
+          wait_ready
+
+          # pg_cron 은 cron.database_name 이 가리키는 DB 에서만 create extension 이 된다.
+          # 기본값은 postgres 라 작업용 DB 로 바꿔야 하는데,
+          #   · 실행 인자로 넘기면(postgres -c …) 이미지 기본 커맨드를 덮어써 설정 경로가
+          #     날아간다(pg_stat_statements must be loaded via shared_preload_libraries)
+          #   · ALTER SYSTEM 은 수퍼유저 전용인데 postgres 롤은 수퍼유저가 아니다
+          # 그래서 설정 파일에 직접 덧붙이고 재기동한다.
+          CONF=$(psql "$DB_URL" -tAc 'show config_file')
+          docker exec -u root pmdb-replay \
+            bash -c "printf \"\ncron.database_name = '%s'\n\" '$REPLAY_DB' >> '$CONF'"
+          docker restart pmdb-replay
+          wait_ready
+          psql "$DB_URL" -tAc 'show cron.database_name'
+
+      - name: 베이스라인이 스냅샷과 동기 상태인지 확인
+        run: |
+          ./scripts/build_baseline.py
+          if ! git diff --quiet -- supabase/schema/baseline.sql; then
+            echo "::error::baseline.sql 이 schema.sql 과 어긋났다. ./scripts/build_baseline.py 로 재생성해 커밋할 것."
+            git diff --stat -- supabase/schema/baseline.sql
+            exit 1
+          fi
+
+      - name: 리플레이 + 스냅샷 대조
+        run: ./scripts/replay_check.sh "$DB_URL"
+
+      # 실패했을 때 전체 diff 를 받아 볼 수 있게(콘솔에는 앞부분만 찍는다).
+      - name: 스키마 diff 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-diff
+          path: replay-diff.txt
+          if-no-files-found: ignore
+
+      # 재생된 스키마가 형태만 맞고 의미가 틀린 경우를 막기 위해, 스냅샷 경로와
+      # 같은 불변식 테스트를 리플레이 결과 DB 에도 한 번 더 돌린다.
+      - name: 재생된 DB 에서 pgTAP 테스트
+        run: ./scripts/run_db_tests.sh "$REPLAY_URL"
