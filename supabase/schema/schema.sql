@@ -118,6 +118,38 @@ $$;
 
 
 --
+-- Name: chat_block_blocked_user(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.chat_block_blocked_user() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if exists (
+    select 1
+    from public.chat_room_members m
+    join public.user_blocks b
+      on (b.blocker_id = new.sender_id and b.blocked_id = m.user_id)
+      or (b.blocked_id = new.sender_id and b.blocker_id = m.user_id)
+    where m.room_id = new.room_id
+      and m.user_id <> new.sender_id
+  ) then
+    raise exception '차단된 상대와는 메시지를 주고받을 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION chat_block_blocked_user(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.chat_block_blocked_user() IS '차단 관계(양방향)면 메시지 INSERT 차단 — App Store 1.2.';
+
+
+--
 -- Name: chat_block_left_room(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -3794,6 +3826,57 @@ begin
   return jsonb_build_object('track', v_track, 'status', v_status, 'score', v_score);
 end;
 $_$;
+
+
+--
+-- Name: block_user(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.block_user(p_blocked uuid, p_reason text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'not_authenticated' using errcode = '42501';
+  end if;
+  if p_blocked is null or p_blocked = v_uid then
+    raise exception 'cannot_block_self' using errcode = 'P0001';
+  end if;
+  if not exists (select 1 from public.users u where u.id = p_blocked) then
+    raise exception 'user_not_found' using errcode = 'P0001';
+  end if;
+
+  insert into public.user_blocks(blocker_id, blocked_id)
+  values (v_uid, p_blocked)
+  on conflict (blocker_id, blocked_id) do nothing;
+
+  -- 개발자 통보 — 차단은 '이 사용자가 문제였다'는 신고이기도 하다.
+  --
+  -- reports 에는 유니크가 **둘** 있다:
+  --   reports_one_open_per_target — 미처리 건만(부분 인덱스)
+  --   reports_uq                  — (reporter, target, type) 상태 무관 전체
+  -- 후자 때문에 '과거에 신고했다가 처리 완료된 상대'는 INSERT 가 터진다. 통보는
+  -- 부가 기능인데 본 기능(차단)을 막으면 안 되므로 충돌은 흘려보낸다.
+  -- ('기타(직접작성)' 은 extra_description 이 비면 reports_extra_required 에 걸린다)
+  insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
+  values (
+    v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
+    coalesce(nullif(btrim(p_reason), ''), '사용자 차단'),
+    'submitted'
+  )
+  on conflict do nothing;
+end;
+$$;
+
+
+--
+-- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.block_user(p_blocked uuid, p_reason text) IS '사용자 차단 + 신고 동시 기록(App Store 1.2). 중복 차단·중복 신고는 무해하게 무시.';
 
 
 --
@@ -7787,7 +7870,10 @@ CREATE VIEW public.v_chat_rooms AS
     r.context
    FROM (public.chat_room_members m
      JOIN public.chat_rooms r ON ((r.id = m.room_id)))
-  WHERE ((m.user_id = app.uid()) AND (m.left_at IS NULL));
+  WHERE ((m.user_id = app.uid()) AND (m.left_at IS NULL) AND (NOT (EXISTS ( SELECT 1
+           FROM (public.chat_room_members m4
+             JOIN public.user_blocks b ON ((((b.blocker_id = app.uid()) AND (b.blocked_id = m4.user_id)) OR ((b.blocked_id = app.uid()) AND (b.blocker_id = m4.user_id)))))
+          WHERE ((m4.room_id = r.id) AND (m4.user_id <> app.uid()))))));
 
 
 --
@@ -7809,7 +7895,9 @@ CREATE VIEW public.v_comment_feed AS
    FROM ((public.comments c
      LEFT JOIN public.public_profiles pr ON ((pr.id = c.user_id)))
      LEFT JOIN public.business_profiles bp ON (((bp.user_id = c.user_id) AND ((bp.status)::text = 'approved'::text))))
-  WHERE (c.is_deleted = false);
+  WHERE ((c.is_deleted = false) AND ((app.uid() IS NULL) OR (NOT (EXISTS ( SELECT 1
+           FROM public.user_blocks b
+          WHERE (((b.blocker_id = app.uid()) AND (b.blocked_id = c.user_id)) OR ((b.blocked_id = app.uid()) AND (b.blocker_id = c.user_id))))))));
 
 
 --
@@ -7919,7 +8007,9 @@ CREATE VIEW public.v_post_feed AS
    FROM ((public.posts p
      LEFT JOIN public.public_profiles pr ON ((pr.id = p.user_id)))
      LEFT JOIN public.business_profiles bp ON (((bp.user_id = p.user_id) AND ((bp.status)::text = 'approved'::text))))
-  WHERE (((p.visibility_status)::text = 'visible'::text) OR (((p.visibility_status)::text = 'hidden_by_user'::text) AND (p.user_id = app.uid())) OR app.is_admin());
+  WHERE ((((p.visibility_status)::text = 'visible'::text) OR (((p.visibility_status)::text = 'hidden_by_user'::text) AND (p.user_id = app.uid())) OR app.is_admin()) AND (app.is_admin() OR (app.uid() IS NULL) OR (NOT (EXISTS ( SELECT 1
+           FROM public.user_blocks b
+          WHERE (((b.blocker_id = app.uid()) AND (b.blocked_id = p.user_id)) OR ((b.blocked_id = app.uid()) AND (b.blocker_id = p.user_id))))))));
 
 
 --
@@ -9092,6 +9182,13 @@ CREATE INDEX reviews_reviewee_idx ON public.reviews USING btree (reviewee_id);
 
 
 --
+-- Name: user_blocks_blocked_blocker_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_blocks_blocked_blocker_idx ON public.user_blocks USING btree (blocked_id, blocker_id);
+
+
+--
 -- Name: users_lower_nickname_uq; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9131,6 +9228,13 @@ CREATE INDEX users_user_type_idx ON public.users USING btree (user_type);
 --
 
 CREATE TRIGGER trg_business_licenses_updated BEFORE UPDATE ON app.business_licenses FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
+-- Name: chat_messages chat_messages_block_blocked; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER chat_messages_block_blocked BEFORE INSERT ON public.chat_messages FOR EACH ROW EXECUTE FUNCTION app.chat_block_blocked_user();
 
 
 --
@@ -11438,6 +11542,14 @@ GRANT ALL ON FUNCTION public.apply_business_license(p_type text, p_license_no te
 
 REVOKE ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_category text, p_business_name text, p_storefront_name text, p_prev_name text, p_address_road text, p_address_jibun text, p_region_code text, p_phone text, p_rep_name text, p_email text, p_license_path text, p_extra_doc_path text, p_nts_status_code text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_category text, p_business_name text, p_storefront_name text, p_prev_name text, p_address_road text, p_address_jibun text, p_region_code text, p_phone text, p_rep_name text, p_email text, p_license_path text, p_extra_doc_path text, p_nts_status_code text) TO service_role;
+
+
+--
+-- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) TO authenticated;
+GRANT ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) TO service_role;
 
 
 --
