@@ -3853,12 +3853,6 @@ begin
   values (v_uid, p_blocked)
   on conflict (blocker_id, blocked_id) do nothing;
 
-  -- 개발자 통보(App Store 1.2). reports 에는 유니크가 **둘** 있다:
-  --   reports_one_open_per_target — 미처리 건만(부분)
-  --   reports_uq                  — (reporter, target, type) 상태 무관 전체
-  -- 후자 때문에 '과거에 신고했다가 처리 완료된 상대'는 INSERT 가 터진다.
-  -- 그러면 차단 자체가 실패한다 — 통보는 부가 기능인데 본 기능을 막으면 안 되므로
-  -- on conflict do nothing 으로 흘려보낸다(이미 신고 이력이 있으니 통보 목적은 달성).
   insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
   values (
     v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],

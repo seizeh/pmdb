@@ -42,22 +42,20 @@ begin
   on conflict (blocker_id, blocked_id) do nothing;
 
   -- 개발자 통보 — 차단은 '이 사용자가 문제였다'는 신고이기도 하다.
-  -- 같은 사람을 차단할 때마다 신고가 쌓이지 않도록 미처리 건이 있으면 건너뛴다.
-  if not exists (
-    select 1 from public.reports r
-    where r.reporter_id = v_uid
-      and r.target_type = 'user'
-      and r.target_id = p_blocked
-      and r.status in ('submitted', 'reviewing')
-  ) then
-    insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
-    values (
-      v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
-      -- '기타(직접작성)' 은 extra_description 이 비면 CHECK 에 걸린다(reports_extra_required).
-      coalesce(nullif(btrim(p_reason), ''), '사용자 차단'),
-      'submitted'
-    );
-  end if;
+  --
+  -- reports 에는 유니크가 **둘** 있다:
+  --   reports_one_open_per_target — 미처리 건만(부분 인덱스)
+  --   reports_uq                  — (reporter, target, type) 상태 무관 전체
+  -- 후자 때문에 '과거에 신고했다가 처리 완료된 상대'는 INSERT 가 터진다. 통보는
+  -- 부가 기능인데 본 기능(차단)을 막으면 안 되므로 충돌은 흘려보낸다.
+  -- ('기타(직접작성)' 은 extra_description 이 비면 reports_extra_required 에 걸린다)
+  insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
+  values (
+    v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
+    coalesce(nullif(btrim(p_reason), ''), '사용자 차단'),
+    'submitted'
+  )
+  on conflict do nothing;
 end;
 $$;
 
