@@ -3644,6 +3644,13 @@ CREATE INDEX reviews_reviewee_idx ON public.reviews USING btree (reviewee_id);
 
 
 --
+-- Name: user_blocks_blocked_blocker_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_blocks_blocked_blocker_idx ON public.user_blocks USING btree (blocked_id, blocker_id);
+
+
+--
 -- Name: users_lower_nickname_uq; Type: INDEX; Schema: public; Owner: -
 --
 

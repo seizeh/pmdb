@@ -3797,6 +3797,56 @@ $_$;
 
 
 --
+-- Name: block_user(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.block_user(p_blocked uuid, p_reason text DEFAULT NULL::text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'not_authenticated' using errcode = '42501';
+  end if;
+  if p_blocked is null or p_blocked = v_uid then
+    raise exception 'cannot_block_self' using errcode = 'P0001';
+  end if;
+  if not exists (select 1 from public.users u where u.id = p_blocked) then
+    raise exception 'user_not_found' using errcode = 'P0001';
+  end if;
+
+  insert into public.user_blocks(blocker_id, blocked_id)
+  values (v_uid, p_blocked)
+  on conflict (blocker_id, blocked_id) do nothing;
+
+  if not exists (
+    select 1 from public.reports r
+    where r.reporter_id = v_uid
+      and r.target_type = 'user'
+      and r.target_id = p_blocked
+      and r.status in ('submitted', 'reviewing')
+  ) then
+    insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
+    values (
+      v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
+      coalesce(nullif(btrim(p_reason), ''), '사용자 차단'),
+      'submitted'
+    );
+  end if;
+end;
+$$;
+
+
+--
+-- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.block_user(p_blocked uuid, p_reason text) IS '사용자 차단 + 신고 동시 기록(App Store 1.2). 중복 차단·중복 신고는 무해하게 무시.';
+
+
+--
 -- Name: bump_token_version(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7922,7 +7972,9 @@ CREATE VIEW public.v_post_feed AS
    FROM ((public.posts p
      LEFT JOIN public.public_profiles pr ON ((pr.id = p.user_id)))
      LEFT JOIN public.business_profiles bp ON (((bp.user_id = p.user_id) AND ((bp.status)::text = 'approved'::text))))
-  WHERE (((p.visibility_status)::text = 'visible'::text) OR (((p.visibility_status)::text = 'hidden_by_user'::text) AND (p.user_id = app.uid())) OR app.is_admin());
+  WHERE ((((p.visibility_status)::text = 'visible'::text) OR (((p.visibility_status)::text = 'hidden_by_user'::text) AND (p.user_id = app.uid())) OR app.is_admin()) AND (app.is_admin() OR (app.uid() IS NULL) OR (NOT (EXISTS ( SELECT 1
+           FROM public.user_blocks b
+          WHERE (((b.blocker_id = app.uid()) AND (b.blocked_id = p.user_id)) OR ((b.blocked_id = app.uid()) AND (b.blocker_id = p.user_id))))))));
 
 
 --
@@ -9092,6 +9144,13 @@ CREATE INDEX reviews_appointment_idx ON public.reviews USING btree (appointment_
 --
 
 CREATE INDEX reviews_reviewee_idx ON public.reviews USING btree (reviewee_id);
+
+
+--
+-- Name: user_blocks_blocked_blocker_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_blocks_blocked_blocker_idx ON public.user_blocks USING btree (blocked_id, blocker_id);
 
 
 --
@@ -11441,6 +11500,14 @@ GRANT ALL ON FUNCTION public.apply_business_license(p_type text, p_license_no te
 
 REVOKE ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_category text, p_business_name text, p_storefront_name text, p_prev_name text, p_address_road text, p_address_jibun text, p_region_code text, p_phone text, p_rep_name text, p_email text, p_license_path text, p_extra_doc_path text, p_nts_status_code text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_category text, p_business_name text, p_storefront_name text, p_prev_name text, p_address_road text, p_address_jibun text, p_region_code text, p_phone text, p_rep_name text, p_email text, p_license_path text, p_extra_doc_path text, p_nts_status_code text) TO service_role;
+
+
+--
+-- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) TO authenticated;
+GRANT ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) TO service_role;
 
 
 --
