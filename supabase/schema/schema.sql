@@ -118,6 +118,38 @@ $$;
 
 
 --
+-- Name: chat_block_blocked_user(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.chat_block_blocked_user() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if exists (
+    select 1
+    from public.chat_room_members m
+    join public.user_blocks b
+      on (b.blocker_id = new.sender_id and b.blocked_id = m.user_id)
+      or (b.blocked_id = new.sender_id and b.blocker_id = m.user_id)
+    where m.room_id = new.room_id
+      and m.user_id <> new.sender_id
+  ) then
+    raise exception '차단된 상대와는 메시지를 주고받을 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION chat_block_blocked_user(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.chat_block_blocked_user() IS '차단 관계(양방향)면 메시지 INSERT 차단 — App Store 1.2.';
+
+
+--
 -- Name: chat_block_left_room(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -3821,20 +3853,19 @@ begin
   values (v_uid, p_blocked)
   on conflict (blocker_id, blocked_id) do nothing;
 
-  if not exists (
-    select 1 from public.reports r
-    where r.reporter_id = v_uid
-      and r.target_type = 'user'
-      and r.target_id = p_blocked
-      and r.status in ('submitted', 'reviewing')
-  ) then
-    insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
-    values (
-      v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
-      coalesce(nullif(btrim(p_reason), ''), '사용자 차단'),
-      'submitted'
-    );
-  end if;
+  -- 개발자 통보(App Store 1.2). reports 에는 유니크가 **둘** 있다:
+  --   reports_one_open_per_target — 미처리 건만(부분)
+  --   reports_uq                  — (reporter, target, type) 상태 무관 전체
+  -- 후자 때문에 '과거에 신고했다가 처리 완료된 상대'는 INSERT 가 터진다.
+  -- 그러면 차단 자체가 실패한다 — 통보는 부가 기능인데 본 기능을 막으면 안 되므로
+  -- on conflict do nothing 으로 흘려보낸다(이미 신고 이력이 있으니 통보 목적은 달성).
+  insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
+  values (
+    v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
+    coalesce(nullif(btrim(p_reason), ''), '사용자 차단'),
+    'submitted'
+  )
+  on conflict do nothing;
 end;
 $$;
 
@@ -5205,24 +5236,21 @@ declare
   v_ip    text;
   v_key   text;
   v_extra jsonb;
-  v_ok    boolean;
 begin
   if coalesce(p_where, '') = '' or coalesce(p_message, '') = '' then
     return; -- 조용히 무시(오류 보고가 예외를 던지면 안 된다)
   end if;
 
   -- 1단: 개별 상한 30/분.
-  -- 익명은 x-forwarded-for 의 첫 항목(원 클라이언트)으로 가른다. 헤더가 없거나
-  -- 비어 있으면(직접 접속·프록시 이상) 공용 'anon' 버킷으로 떨어진다.
+  -- 익명 식별은 cf-connecting-ip 로만 한다. x-forwarded-for 는 맨 왼쪽이 클라이언트
+  -- 주장값이라 못 쓴다(위조 시 버킷이 무한 생성). 헤더가 없으면 폴백하지 않고
+  -- 공용 버킷으로 떨어뜨린다 — 폴백이 곧 우회로다.
   if v_uid is not null then
     v_key := 'cerr:' || v_uid::text;
   else
-    v_ip := btrim(split_part(
-              coalesce(
-                (nullif(current_setting('request.headers', true), '')::jsonb
-                   ->> 'x-forwarded-for'),
-                ''),
-              ',', 1));
+    v_ip := btrim(coalesce(
+              (nullif(current_setting('request.headers', true), '')::jsonb
+                 ->> 'cf-connecting-ip'), ''));
     v_key := case
                when v_ip <> '' then 'cerr:ip:' || md5(v_ip)
                else 'cerr:anon'
@@ -5268,7 +5296,7 @@ end $$;
 -- Name: FUNCTION record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제. 레이트리밋 2단: 개별 30/분(로그인=계정, 익명=IP) + 익명 전역 300/분.';
+COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제. 레이트리밋 2단: 개별 30/분(로그인=계정, 익명=cf-connecting-ip) + 익명 전역 300/분.';
 
 
 --
@@ -7840,7 +7868,10 @@ CREATE VIEW public.v_chat_rooms AS
     r.context
    FROM (public.chat_room_members m
      JOIN public.chat_rooms r ON ((r.id = m.room_id)))
-  WHERE ((m.user_id = app.uid()) AND (m.left_at IS NULL));
+  WHERE ((m.user_id = app.uid()) AND (m.left_at IS NULL) AND (NOT (EXISTS ( SELECT 1
+           FROM (public.chat_room_members m4
+             JOIN public.user_blocks b ON ((((b.blocker_id = app.uid()) AND (b.blocked_id = m4.user_id)) OR ((b.blocked_id = app.uid()) AND (b.blocker_id = m4.user_id)))))
+          WHERE ((m4.room_id = r.id) AND (m4.user_id <> app.uid()))))));
 
 
 --
@@ -7862,7 +7893,9 @@ CREATE VIEW public.v_comment_feed AS
    FROM ((public.comments c
      LEFT JOIN public.public_profiles pr ON ((pr.id = c.user_id)))
      LEFT JOIN public.business_profiles bp ON (((bp.user_id = c.user_id) AND ((bp.status)::text = 'approved'::text))))
-  WHERE (c.is_deleted = false);
+  WHERE ((c.is_deleted = false) AND ((app.uid() IS NULL) OR (NOT (EXISTS ( SELECT 1
+           FROM public.user_blocks b
+          WHERE (((b.blocker_id = app.uid()) AND (b.blocked_id = c.user_id)) OR ((b.blocked_id = app.uid()) AND (b.blocker_id = c.user_id))))))));
 
 
 --
@@ -9193,6 +9226,13 @@ CREATE INDEX users_user_type_idx ON public.users USING btree (user_type);
 --
 
 CREATE TRIGGER trg_business_licenses_updated BEFORE UPDATE ON app.business_licenses FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
+-- Name: chat_messages chat_messages_block_blocked; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER chat_messages_block_blocked BEFORE INSERT ON public.chat_messages FOR EACH ROW EXECUTE FUNCTION app.chat_block_blocked_user();
 
 
 --
