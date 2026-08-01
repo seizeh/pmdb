@@ -100,7 +100,7 @@ exception when others then
 end $$;
 
 comment on function public.record_client_error(text, text, text, text, text, jsonb) is
-  '클라이언트 오류 수집(anon 실행 가능). 개별 30/분(로그인=계정, 익명=IP) + 익명 전역 300/분.';
+  '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제. 레이트리밋 2단: 개별 30/분(로그인=계정, 익명=IP) + 익명 전역 300/분.';
 
 -- 시그니처가 그대로라 GRANT 는 유지되지만, 재정의 후 PostgREST 스키마 캐시를 깨운다.
 notify pgrst, 'reload schema';

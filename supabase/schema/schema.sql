@@ -5151,22 +5151,53 @@ CREATE FUNCTION public.record_client_error(p_where text, p_message text, p_stack
     SET search_path TO ''
     AS $$
 declare
-  v_uid uuid := app.uid();
-  v_ok  boolean;
+  v_uid   uuid := app.uid();
+  v_ip    text;
+  v_key   text;
+  v_extra jsonb;
+  v_ok    boolean;
 begin
   if coalesce(p_where, '') = '' or coalesce(p_message, '') = '' then
     return; -- 조용히 무시(오류 보고가 예외를 던지면 안 된다)
   end if;
 
-  -- 로그인 사용자는 계정별로, 비로그인은 **전체 합산**으로 막는다.
-  -- 익명은 식별자가 없어 개별 제한이 불가능하다 — 전역 상한으로 홍수만 막는다.
-  v_ok := public.rate_limit_hit(
-            case when v_uid is null then 'cerr:anon' else 'cerr:' || v_uid::text end,
-            case when v_uid is null then 300 else 30 end,
-            60);
-  if not v_ok then
+  -- 1단: 개별 상한 30/분.
+  -- 익명은 x-forwarded-for 의 첫 항목(원 클라이언트)으로 가른다. 헤더가 없거나
+  -- 비어 있으면(직접 접속·프록시 이상) 공용 'anon' 버킷으로 떨어진다.
+  if v_uid is not null then
+    v_key := 'cerr:' || v_uid::text;
+  else
+    v_ip := btrim(split_part(
+              coalesce(
+                (nullif(current_setting('request.headers', true), '')::jsonb
+                   ->> 'x-forwarded-for'),
+                ''),
+              ',', 1));
+    v_key := case
+               when v_ip <> '' then 'cerr:ip:' || md5(v_ip)
+               else 'cerr:anon'
+             end;
+  end if;
+
+  if not public.rate_limit_hit(v_key, 30, 60) then
     return;
   end if;
+
+  -- 2단: 익명 전역 안전판. 1단을 통과한 요청만 카운트하므로 한 소스가
+  -- 전역 예산을 독식하지 못한다(개별 상한 30 이 먼저 걸린다).
+  if v_uid is null and not public.rate_limit_hit('cerr:anon:all', 300, 60) then
+    return;
+  end if;
+
+  -- 과대 페이로드는 버리지 않고 **잘린 사실과 앞부분을 남긴다.**
+  v_extra := case
+               when p_extra is null then null
+               when length(p_extra::text) <= 4000 then p_extra
+               else jsonb_build_object(
+                      'truncated', true,
+                      'original_chars', length(p_extra::text),
+                      'preview', left(p_extra::text, 3000))
+             end;
 
   insert into app.client_errors
     (user_id, where_key, message, stack, platform, app_release, extra)
@@ -5177,9 +5208,7 @@ begin
      left(p_stack, 8000),
      left(p_platform, 10),
      left(p_release, 40),
-     case when p_extra is null then null
-          when length(p_extra::text) > 4000 then null  -- 과대 페이로드는 버린다
-          else p_extra end);
+     v_extra);
 exception when others then
   return; -- 어떤 이유로든 실패해도 앱에 예외를 돌려주지 않는다
 end $$;
@@ -5189,7 +5218,7 @@ end $$;
 -- Name: FUNCTION record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제.';
+COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제. 레이트리밋 2단: 개별 30/분(로그인=계정, 익명=IP) + 익명 전역 300/분.';
 
 
 --
