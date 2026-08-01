@@ -3853,6 +3853,14 @@ begin
   values (v_uid, p_blocked)
   on conflict (blocker_id, blocked_id) do nothing;
 
+  -- 개발자 통보 — 차단은 '이 사용자가 문제였다'는 신고이기도 하다.
+  --
+  -- reports 에는 유니크가 **둘** 있다:
+  --   reports_one_open_per_target — 미처리 건만(부분 인덱스)
+  --   reports_uq                  — (reporter, target, type) 상태 무관 전체
+  -- 후자 때문에 '과거에 신고했다가 처리 완료된 상대'는 INSERT 가 터진다. 통보는
+  -- 부가 기능인데 본 기능(차단)을 막으면 안 되므로 충돌은 흘려보낸다.
+  -- ('기타(직접작성)' 은 extra_description 이 비면 reports_extra_required 에 걸린다)
   insert into public.reports(reporter_id, target_type, target_id, categories, extra_description, status)
   values (
     v_uid, 'user', p_blocked, array['기타(직접작성)']::text[],
