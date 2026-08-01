@@ -5155,24 +5155,21 @@ declare
   v_ip    text;
   v_key   text;
   v_extra jsonb;
-  v_ok    boolean;
 begin
   if coalesce(p_where, '') = '' or coalesce(p_message, '') = '' then
     return; -- 조용히 무시(오류 보고가 예외를 던지면 안 된다)
   end if;
 
   -- 1단: 개별 상한 30/분.
-  -- 익명은 x-forwarded-for 의 첫 항목(원 클라이언트)으로 가른다. 헤더가 없거나
-  -- 비어 있으면(직접 접속·프록시 이상) 공용 'anon' 버킷으로 떨어진다.
+  -- 익명 식별은 cf-connecting-ip 로만 한다. x-forwarded-for 는 맨 왼쪽이 클라이언트
+  -- 주장값이라 못 쓴다(위조 시 버킷이 무한 생성). 헤더가 없으면 폴백하지 않고
+  -- 공용 버킷으로 떨어뜨린다 — 폴백이 곧 우회로다.
   if v_uid is not null then
     v_key := 'cerr:' || v_uid::text;
   else
-    v_ip := btrim(split_part(
-              coalesce(
-                (nullif(current_setting('request.headers', true), '')::jsonb
-                   ->> 'x-forwarded-for'),
-                ''),
-              ',', 1));
+    v_ip := btrim(coalesce(
+              (nullif(current_setting('request.headers', true), '')::jsonb
+                 ->> 'cf-connecting-ip'), ''));
     v_key := case
                when v_ip <> '' then 'cerr:ip:' || md5(v_ip)
                else 'cerr:anon'
@@ -5218,7 +5215,7 @@ end $$;
 -- Name: FUNCTION record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제. 레이트리밋 2단: 개별 30/분(로그인=계정, 익명=IP) + 익명 전역 300/분.';
+COMMENT ON FUNCTION public.record_client_error(p_where text, p_message text, p_stack text, p_platform text, p_release text, p_extra jsonb) IS '클라이언트 오류 수집(0031). anon 포함 공개 — 레이트리밋·길이 제한·예외 삼킴이 전제. 레이트리밋 2단: 개별 30/분(로그인=계정, 익명=cf-connecting-ip) + 익명 전역 300/분.';
 
 
 --
