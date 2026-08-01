@@ -65,6 +65,38 @@ $$;
 
 
 --
+-- Name: chat_block_blocked_user(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.chat_block_blocked_user() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if exists (
+    select 1
+    from public.chat_room_members m
+    join public.user_blocks b
+      on (b.blocker_id = new.sender_id and b.blocked_id = m.user_id)
+      or (b.blocked_id = new.sender_id and b.blocker_id = m.user_id)
+    where m.room_id = new.room_id
+      and m.user_id <> new.sender_id
+  ) then
+    raise exception '차단된 상대와는 메시지를 주고받을 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION chat_block_blocked_user(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.chat_block_blocked_user() IS '차단 관계(양방향)면 메시지 INSERT 차단 — App Store 1.2.';
+
+
+--
 -- Name: chat_block_left_room(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -3644,6 +3676,13 @@ CREATE INDEX reviews_reviewee_idx ON public.reviews USING btree (reviewee_id);
 
 
 --
+-- Name: user_blocks_blocked_blocker_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX user_blocks_blocked_blocker_idx ON public.user_blocks USING btree (blocked_id, blocker_id);
+
+
+--
 -- Name: users_lower_nickname_uq; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3669,6 +3708,13 @@ CREATE UNIQUE INDEX users_phone_uq ON public.users USING btree (phone) WHERE (ph
 --
 
 CREATE INDEX users_user_type_idx ON public.users USING btree (user_type);
+
+
+--
+-- Name: chat_messages chat_messages_block_blocked; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER chat_messages_block_blocked BEFORE INSERT ON public.chat_messages FOR EACH ROW EXECUTE FUNCTION app.chat_block_blocked_user();
 
 
 --
