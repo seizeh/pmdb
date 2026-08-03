@@ -971,6 +971,25 @@ $$;
 
 
 --
+-- Name: tg_comments_block_check(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_comments_block_check() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_owner uuid;
+begin
+  select p.user_id into v_owner from public.posts p where p.id = new.post_id;
+  if v_owner is not null and app.is_blocked_pair(v_owner, new.user_id) then
+    raise exception '차단한 사용자의 게시글에는 댓글을 쓸 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: tg_comments_count(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1030,6 +1049,32 @@ begin
   return null;
 end;
 $$;
+
+
+--
+-- Name: tg_notifications_block_filter(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_notifications_block_filter() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if new.actor_user_id is not null
+     and new.actor_user_id <> new.user_id
+     and app.is_blocked_pair(new.user_id, new.actor_user_id)
+  then
+    return null; -- 행을 만들지 않는다(= 푸시도 배지도 없다)
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION tg_notifications_block_filter(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.tg_notifications_block_filter() IS '차단 쌍 사이의 알림을 생성 단계에서 제거. 생산자 12개를 하나씩 고치는 대신 길목 한 곳.';
 
 
 --
@@ -1286,6 +1331,25 @@ begin
   return new;
 end;
 $$;
+
+
+--
+-- Name: tg_post_hearts_block_check(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_post_hearts_block_check() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_owner uuid;
+begin
+  select p.user_id into v_owner from public.posts p where p.id = new.post_id;
+  if v_owner is not null and app.is_blocked_pair(v_owner, new.user_id) then
+    raise exception '차단한 사용자의 게시글에는 반응할 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
 
 
 --
@@ -3903,6 +3967,13 @@ CREATE TRIGGER trg_comments_authored_as BEFORE INSERT ON public.comments FOR EAC
 
 
 --
+-- Name: comments trg_comments_block_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_comments_block_check BEFORE INSERT ON public.comments FOR EACH ROW EXECUTE FUNCTION app.tg_comments_block_check();
+
+
+--
 -- Name: comments trg_comments_count; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3928,6 +3999,13 @@ CREATE TRIGGER trg_device_tokens_updated BEFORE UPDATE ON public.device_tokens F
 --
 
 CREATE TRIGGER trg_notification_preferences_upd BEFORE UPDATE ON public.notification_preferences FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
+-- Name: notifications trg_notifications_block_filter; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_block_filter BEFORE INSERT ON public.notifications FOR EACH ROW EXECUTE FUNCTION app.tg_notifications_block_filter();
 
 
 --
@@ -4012,6 +4090,13 @@ CREATE TRIGGER trg_pgi_resolve_invitee BEFORE INSERT ON public.pet_guardian_invi
 --
 
 CREATE TRIGGER trg_pgi_respond BEFORE UPDATE ON public.pet_guardian_invites FOR EACH ROW EXECUTE FUNCTION app.tg_pet_guardian_invites_respond();
+
+
+--
+-- Name: post_hearts trg_post_hearts_block_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_post_hearts_block_check BEFORE INSERT ON public.post_hearts FOR EACH ROW EXECUTE FUNCTION app.tg_post_hearts_block_check();
 
 
 --
