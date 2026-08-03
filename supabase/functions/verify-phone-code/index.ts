@@ -16,10 +16,15 @@
 //   즉 계정 인수까지 이어진다. 실패한 대입은 아무 로그도 남기지 않으므로
 //   관리자 화면에도, 실사용 관찰에도 흔적이 없다.
 //
-//   버킷은 signup-lite 와 같은 모양으로 둔다(전화번호 1차 + IP 보조). 전화번호는
-//   대입 대상 그 자체라 스푸핑할 수 없고, IP 는 보조선이다(clientIp 주석 참고).
-//   실패한 대입만 세는 게 아니라 호출 자체를 세는데, 성공하면 어차피 코드가
-//   소진돼 재호출할 이유가 없으므로 정상 사용자에게는 차이가 없다.
+//   버킷은 signup-lite 와 같은 모양으로 둔다(전화번호 + IP). 둘 다 스푸핑할 수 없다 —
+//   전화번호는 대입 대상 그 자체이고, `cf-connecting-ip` 는 위조하면 Cloudflare
+//   엣지가 요청 자체를 거부한다(clientIp 주석의 실측). 실패한 대입만 세는 게 아니라
+//   호출 자체를 세는데, 성공하면 어차피 코드가 소진돼 재호출할 이유가 없으므로
+//   정상 사용자에게는 차이가 없다.
+//
+//   데모 번호(DEMO_PHONES·DEMO_OTP)는 이 제한에서 면제된다 — send-phone-code 가
+//   같은 판정으로 이미 면제하고 있어서 한쪽만 걸면 백도어의 절반이 조용히 닫힌다.
+//   면제 대상은 레이트리밋뿐이고 코드 일치 검사는 그대로다.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -59,22 +64,39 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
+  // 데모 번호는 대입 제한에서 면제한다 — send-phone-code 와 **같은 판정·같은 이유**.
+  //
+  // 저쪽은 "SMS 비용이 없고, 심사 중 재시도 마찰을 없앤다"로 이미 면제하고 있는데
+  // 검증 쪽만 빠지면 백도어의 절반이 조용히 닫힌다. 심사자는 같은 번호로 인증을
+  // 반복하므로 10회/10분에 먼저 걸리고, 그 증상이 "인증이 안 된다"라서 앱 문제로
+  // 보인다. 발급은 되는데 검증만 막히는 상태가 가장 나쁘다.
+  //
+  // 이 면제는 **레이트리밋만** 건너뛴다 — 코드 일치 검사는 그대로다(데모 번호에
+  // 저장된 코드가 곧 DEMO_OTP 이므로 검증 강도가 낮아지지 않는다).
+  // ⚠ 심사 통과 후 DEMO_PHONES/DEMO_OTP 시크릿 해제 시 이 분기도 함께 죽는다(0031 §3.3).
+  const demoPhones = new Set(
+    (Deno.env.get("DEMO_PHONES") ?? "").split(",").map((s) => normalizePhone(s)).filter(Boolean),
+  );
+  const isDemo = demoPhones.has(phone) &&
+    /^\d{6}$/.test(Deno.env.get("DEMO_OTP") ?? "");
+
   // 대입 제한 — 코드 조회 **전에** 소모한다(제한에 걸린 요청이 DB 를 읽지 않게).
-  const ip = clientIp(req);
+  const ip = isDemo ? null : clientIp(req);
   if (
-    await rateLimited(
+    !isDemo &&
+    (await rateLimited(
       supabase,
       `otpverify:phone:${phone}:${purpose}`,
       ATTEMPT_MAX_PHONE,
       ATTEMPT_WINDOW_SEC,
     ) ||
-    (ip !== null &&
-      await rateLimited(
-        supabase,
-        `otpverify:ip:${ip}`,
-        ATTEMPT_MAX_IP,
-        ATTEMPT_WINDOW_SEC,
-      ))
+      (ip !== null &&
+        await rateLimited(
+          supabase,
+          `otpverify:ip:${ip}`,
+          ATTEMPT_MAX_IP,
+          ATTEMPT_WINDOW_SEC,
+        )))
   ) {
     return json({ error: "rate_limited" }, 429);
   }

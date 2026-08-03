@@ -24,9 +24,12 @@
 //     ① phone+purpose 60초 1회   기존. 개인의 재발송 연타(UX 쿨다운).
 //     ② IP 시간당 20통           한 출처가 번호를 갈아타며 쏟아내는 것.
 //     ③ 전역 시간당 200통        ②를 우회한 분산 시도까지 포함한 **비용 상한**.
-//   ②는 스푸핑 가능한 보조선이고(clientIp 주석), ③이 최후 방어선이다. ③에 걸리면
-//   정상 가입도 함께 막히므로 **관리자에게 즉시 알린다** — 조용히 막고 있으면
-//   "가입이 안 돼요" 문의만 쌓이고 원인은 로그 안에 묻힌다.
+//   ②는 우회 가능한 보조선이 **아니다.** `cf-connecting-ip` 는 위조하면 Cloudflare
+//   엣지가 요청 자체를 거부하고 이 배포에서는 그 헤더가 항상 붙는다(clientIp 주석의
+//   실측). 즉 한 출처의 발송량은 ②만으로도 실제로 묶이고, ③은 그 위에 얹는 총량
+//   보험이지 ②의 대체물이 아니다. ③에 걸리면 정상 가입도 함께 막히므로 **관리자에게
+//   즉시 알린다** — 조용히 막고 있으면 "가입이 안 돼요" 문의만 쌓이고 원인은 로그
+//   안에 묻힌다.
 //
 //   데모 백도어(심사·테스트 서버용): DEMO_PHONES(콤마 구분)·DEMO_OTP(6자리) 시크릿이
 //   둘 다 설정된 환경에서만, 해당 번호에 한해 SMS 발송 없이 고정 코드를 저장한다.
@@ -106,7 +109,11 @@ Deno.serve(async (req: Request) => {
   //     지나간다(그 열거 자체가 문자 발송의 앞단이다).
   const ip = isDemo ? null : clientIp(req);
   if (ip !== null && await rateLimited(supabase, `sms:ip:${ip}`, IP_MAX, IP_WINDOW_SEC)) {
-    return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
+    // 창이 1시간인 버킷이므로 60 을 돌려주면 안 된다 — 앱이 그 값을 그대로
+    // "N초 후 재발송 가능" 으로 띄우기 때문에, 최대 1시간 막힌 사용자가 60초 뒤
+    // 다시 눌러 또 막힌다. 재시도가 아무것도 해결하지 못하는 구간에서 재시도를
+    // 권하는 문구가 되는 것이라, 이 PR 이 verify 쪽에서 고치려던 문제와 동종이다.
+    return json({ error: "rate_limited", retry_after_sec: IP_WINDOW_SEC }, 429);
   }
 
   // 0) 목적별 계정 존재 검증 — 가입된 번호에 가입용 문자를 보내지 않는다.
@@ -157,7 +164,7 @@ Deno.serve(async (req: Request) => {
         `최근 ${GLOBAL_WINDOW_SEC / 60}분간 인증문자 ${GLOBAL_MAX}통을 넘겼습니다. ` +
           "정상 유입인지 남용인지 확인이 필요하고, 그동안 신규 가입·비밀번호 재설정이 막힙니다.",
       );
-      return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
+      return json({ error: "rate_limited", retry_after_sec: GLOBAL_WINDOW_SEC }, 429);
     }
   }
 
