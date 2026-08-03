@@ -10,7 +10,7 @@
 begin;
 set local search_path = public, app, extensions;
 \ir helpers/seed.sql
-select plan(8);
+select plan(7);
 
 -- ── 1) 정상 토큰은 그대로 통과해야 한다(회귀 방지의 대조군) ────────────────
 select set_config('request.jwt.claims',
@@ -50,24 +50,27 @@ select is(app.uid(), (select id from seed where k='owner')::uuid,
 -- 사진 인증 게이트를 통째로 넘길 수 있다. 트리거는 INSERT 에서만 +1 하고
 -- DELETE 분기가 없는데(의도된 것), 그 전제는 "RPC 밖에서 INSERT 할 수 없다" 이다.
 --
--- ACL 을 직접 읽는다. has_table_privilege() 로 쓰면 **환경마다 답이 갈린다** —
--- 그 함수는 롤 상속과 PUBLIC 부여까지 합산한 '실효 권한'을 돌려주므로, CI 컨테이너처럼
--- 롤 구성이 운영과 다른 곳에서는 GRANT 를 회수해도 true 가 나온다(실제로 그렇게 나왔다).
--- 우리가 고정하려는 건 실효 권한이 아니라 **이 테이블의 ACL 에 쓰기 항목이 없다** 는
--- 사실이므로, 합산되지 않는 relacl 을 본다.
-select is(
-  (select count(*)::int
-     from pg_class c
-     join pg_namespace n on n.oid = c.relnamespace
-     cross join lateral aclexplode(c.relacl) a
-     join pg_roles r on r.oid = a.grantee
-    where n.nspname = 'public' and c.relname = 'post_pets'
-      and r.rolname = 'authenticated'
-      and a.privilege_type in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')),
-  0,
-  'post_pets ACL 에 authenticated 쓰기 권한이 없다(게이트 카운터 우회 차단)');
+-- ⚠️ **쓰기 권한 회수 자체는 여기서 단언하지 않는다 — pgTAP 환경이 그걸 표현하지
+-- 못하기 때문이다.** 빼먹은 게 아니라 못 하는 것이라 이유를 남긴다.
+--
+-- pgTAP 잡은 `prelude → schema.sql` 로 DB 를 세운다. pg_dump 는 GRANT 만 내보내고
+-- REVOKE 는 내보내지 않는데, 그 DB(supabase/postgres 이미지)에는 public 스키마에
+-- `alter default privileges ... grant all on tables to ... authenticated` 가 이미
+-- 걸려 있다. 그래서 CREATE TABLE 순간 authenticated 가 ALL 을 받고, 뒤따르는
+-- 제한된 GRANT 문은 더 얹을 게 없다 — **회수한 권한이 복원본에서 되살아난다.**
+--
+-- 이 테이블만의 이야기가 아니다. 20260603053405(anon 쓰기 회수) 같은 회수
+-- 마이그레이션의 효과는 pgTAP 스냅샷 DB 에서 전부 되살아나 있다. 즉 **회수에
+-- 기대는 단언은 이 환경에서 사실을 재지 못한다.** has_table_privilege() 로 짜든
+-- relacl 을 직접 읽든 같은 이유로 CI 에서만 어긋났다.
+--
+-- 이 불변식의 정본 검증은 **리플레이 잡**이다. 저쪽은 (baseline + 마이그레이션) DB 와
+-- (schema.sql 복원) DB 를 각각 덤프해 대조하는데, 전자는 REVOKE 를 실제로 실행하고
+-- 후자는 기본 권한이 걸려 있지 않은 새 DB 라 양쪽 모두 제한된 ACL 이 나온다.
+-- 누가 쓰기 권한을 되돌리면 두 덤프가 갈려 리플레이가 빨간불이 된다.
 
 -- 조회는 남아 있어야 한다 — 앱이 글 상세에서 연결된 펫을 읽는다.
+-- (SELECT 은 어느 환경에서나 존재하므로 여기서 잴 수 있다.)
 select is(
   (select count(*)::int
      from pg_class c
