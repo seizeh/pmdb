@@ -5369,6 +5369,31 @@ $$;
 
 
 --
+-- Name: reconcile_my_unread_counts(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reconcile_my_unread_counts() RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'not_authenticated' using errcode = '42501';
+  end if;
+  perform app.reconcile_unread_counts(v_uid);
+end $$;
+
+
+--
+-- Name: FUNCTION reconcile_my_unread_counts(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.reconcile_my_unread_counts() IS '본인 unread_chat_count·unread_notification_count 를 원본에서 재계산. 로그인 시 안전망.';
+
+
+--
 -- Name: register_device_token(text, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5388,6 +5413,41 @@ begin
         device_name = coalesce(excluded.device_name, public.device_tokens.device_name),
         is_active = true, failure_count = 0, updated_at = now();
 end $$;
+
+
+--
+-- Name: release_device_token(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.release_device_token(p_token text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'not_authenticated' using errcode = '42501';
+  end if;
+  if p_token is null or length(p_token) < 10 then
+    raise exception 'invalid_token' using errcode = 'P0001';
+  end if;
+
+  -- **소유자 행만** 끈다. 남의 토큰을 지정해도 0행이 갱신될 뿐 오류를 내지 않는다
+  -- (오류를 내면 "이 토큰이 누구 것인지" 를 알려주는 열거 통로가 된다).
+  update public.device_tokens
+     set is_active  = false,
+         updated_at = now()
+   where token = p_token
+     and user_id = v_uid;
+end $$;
+
+
+--
+-- Name: FUNCTION release_device_token(p_token text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.release_device_token(p_token text) IS '로그아웃 시 본인 기기 푸시 토큰 비활성화. 소유자 행만 끈다(남의 토큰은 무시).';
 
 
 --
@@ -11977,12 +12037,30 @@ GRANT ALL ON FUNCTION public.record_photo_verification(p_user uuid, p_lat numeri
 
 
 --
+-- Name: FUNCTION reconcile_my_unread_counts(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reconcile_my_unread_counts() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.reconcile_my_unread_counts() TO authenticated;
+GRANT ALL ON FUNCTION public.reconcile_my_unread_counts() TO service_role;
+
+
+--
 -- Name: FUNCTION register_device_token(p_token text, p_platform text, p_device_name text); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.register_device_token(p_token text, p_platform text, p_device_name text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.register_device_token(p_token text, p_platform text, p_device_name text) TO authenticated;
 GRANT ALL ON FUNCTION public.register_device_token(p_token text, p_platform text, p_device_name text) TO service_role;
+
+
+--
+-- Name: FUNCTION release_device_token(p_token text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.release_device_token(p_token text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.release_device_token(p_token text) TO authenticated;
+GRANT ALL ON FUNCTION public.release_device_token(p_token text) TO service_role;
 
 
 --
