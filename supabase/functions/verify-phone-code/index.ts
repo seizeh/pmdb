@@ -2,7 +2,10 @@
 // verify-phone-code — 전화 인증번호 검증
 //   POST { phone: string, code: string, purpose?: 'signup' | 'password_reset' | 'review' }
 //   같은 phone+purpose 의 미사용·미만료 최신 code 일치 확인 → is_used=true.
-//   verify_jwt=false: 로그인 전 단계. service_role 로만 DB 접근.
+//   verify_jwt=true(config.toml): publishable 키가 있어야 게이트웨이를 통과한다.
+//   다만 그 키는 앱 번들에 실려 있고 저장소도 공개라 **방어가 아니다** — 실제
+//   남용 방어는 아래 대입 제한이다. (종전 주석은 false 라고 적고 있어 설정과
+//   반대였다 — 0031 §7.3 이 부채로 기록해 둔 항목.)
 //   ⚠ purpose='review'(간이 후기)는 보통 이 함수를 거치지 않는다 — signup-lite 가
 //   검증·계정생성·토큰발급을 한 번에 한다(코드 소지와 세션 발급을 분리하면
 //   남의 인증을 가로챌 창이 생긴다). 여기 목록에 둔 건 재사용 여지를 위해서다.
