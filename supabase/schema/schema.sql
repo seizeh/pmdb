@@ -2395,7 +2395,17 @@ CREATE FUNCTION app.uid() RETURNS uuid
     and u.status = 'active'
     and u.token_version = coalesce(
       ((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'tv')::int, 0)
+    -- 간이 후기 전용 토큰은 여기까지 오면 안 된다(signup-lite 가 lite=true 를 박는다).
+    and coalesce(
+      (nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'lite', '') <> 'true'
 $$;
+
+
+--
+-- Name: FUNCTION uid(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.uid() IS '인증된 사용자 uuid. status=active + token_version 일치 + 간이(lite) 토큰이 아닐 것.';
 
 
 --
@@ -5214,6 +5224,31 @@ end $$;
 
 
 --
+-- Name: reconcile_my_unread_counts(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.reconcile_my_unread_counts() RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_uid uuid := app.uid();
+begin
+  if v_uid is null then
+    raise exception 'not_authenticated' using errcode = '42501';
+  end if;
+  perform app.reconcile_unread_counts(v_uid);
+end $$;
+
+
+--
+-- Name: FUNCTION reconcile_my_unread_counts(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.reconcile_my_unread_counts() IS '본인 unread_chat_count·unread_notification_count 를 원본에서 재계산. 로그인 시 안전망.';
+
+
+--
 -- Name: record_auth_log(uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5369,31 +5404,6 @@ $$;
 
 
 --
--- Name: reconcile_my_unread_counts(); Type: FUNCTION; Schema: public; Owner: -
---
-
-CREATE FUNCTION public.reconcile_my_unread_counts() RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_uid uuid := app.uid();
-begin
-  if v_uid is null then
-    raise exception 'not_authenticated' using errcode = '42501';
-  end if;
-  perform app.reconcile_unread_counts(v_uid);
-end $$;
-
-
---
--- Name: FUNCTION reconcile_my_unread_counts(); Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON FUNCTION public.reconcile_my_unread_counts() IS '본인 unread_chat_count·unread_notification_count 를 원본에서 재계산. 로그인 시 안전망.';
-
-
---
 -- Name: register_device_token(text, text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5484,9 +5494,21 @@ begin
   update app.refresh_tokens set revoked_at = now()
    where user_id = v_id and revoked_at is null;
 
+  -- 인증 소진 — 한 번의 인증으로 두 번 바꿀 수 없게.
+  delete from public.phone_verifications
+   where phone = p_phone
+     and purpose = 'password_reset';
+
   return v_id;
 end;
 $$;
+
+
+--
+-- Name: FUNCTION reset_password_user(p_phone text, p_new_hash text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.reset_password_user(p_phone text, p_new_hash text) IS '전화 인증 확인 후 비밀번호 재설정 + 전 세션 무효화. 사용한 인증은 소진(재사용 차단).';
 
 
 --
@@ -7555,6 +7577,13 @@ CREATE TABLE public.post_pets (
     post_id uuid NOT NULL,
     pet_id uuid NOT NULL
 );
+
+
+--
+-- Name: TABLE post_pets; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.post_pets IS '게시글↔펫 연결. 쓰기는 create_post_verified(definer) 전용 — 직접 INSERT 는 pets.verify_post_count 를 부풀려 사진 인증 게이트를 우회시킨다(20260803182000).';
 
 
 --
@@ -12003,6 +12032,15 @@ GRANT ALL ON FUNCTION public.rate_limit_hit(p_key text, p_max integer, p_window_
 
 
 --
+-- Name: FUNCTION reconcile_my_unread_counts(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.reconcile_my_unread_counts() FROM PUBLIC;
+GRANT ALL ON FUNCTION public.reconcile_my_unread_counts() TO authenticated;
+GRANT ALL ON FUNCTION public.reconcile_my_unread_counts() TO service_role;
+
+
+--
 -- Name: FUNCTION record_auth_log(p_user uuid, p_ip_hash text); Type: ACL; Schema: public; Owner: -
 --
 
@@ -12034,15 +12072,6 @@ GRANT ALL ON FUNCTION public.record_location_verification(p_user uuid, p_lat num
 
 REVOKE ALL ON FUNCTION public.record_photo_verification(p_user uuid, p_lat numeric, p_lng numeric, p_accuracy integer, p_region_code character varying, p_region_matched boolean, p_species character varying, p_dog_real numeric, p_cat_real numeric, p_dog_fake numeric, p_cat_fake numeric, p_ai_pass boolean, p_ai_reason character varying, p_result text, p_fail_reason character varying, p_image_url text, p_image_path text, p_ttl_min integer, p_pet_id uuid, p_purpose text, p_match_score numeric, p_matched boolean, p_match_reason character varying) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.record_photo_verification(p_user uuid, p_lat numeric, p_lng numeric, p_accuracy integer, p_region_code character varying, p_region_matched boolean, p_species character varying, p_dog_real numeric, p_cat_real numeric, p_dog_fake numeric, p_cat_fake numeric, p_ai_pass boolean, p_ai_reason character varying, p_result text, p_fail_reason character varying, p_image_url text, p_image_path text, p_ttl_min integer, p_pet_id uuid, p_purpose text, p_match_score numeric, p_matched boolean, p_match_reason character varying) TO service_role;
-
-
---
--- Name: FUNCTION reconcile_my_unread_counts(); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.reconcile_my_unread_counts() FROM PUBLIC;
-GRANT ALL ON FUNCTION public.reconcile_my_unread_counts() TO authenticated;
-GRANT ALL ON FUNCTION public.reconcile_my_unread_counts() TO service_role;
 
 
 --
@@ -12670,7 +12699,7 @@ GRANT ALL ON TABLE public.post_hearts TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_pets TO anon;
-GRANT ALL ON TABLE public.post_pets TO authenticated;
+GRANT SELECT,REFERENCES,TRIGGER,MAINTAIN ON TABLE public.post_pets TO authenticated;
 GRANT ALL ON TABLE public.post_pets TO service_role;
 
 
