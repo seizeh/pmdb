@@ -5494,7 +5494,8 @@ begin
   update app.refresh_tokens set revoked_at = now()
    where user_id = v_id and revoked_at is null;
 
-  -- 인증 소진 — 한 번의 인증으로 두 번 바꿀 수 없게.
+  -- ▼ 인증 소진 — 한 번의 인증으로 두 번 바꿀 수 없게. 이 줄이 없으면 위 게이트는
+  --   "30분 동안 아무나 쓸 수 있는 열쇠" 가 된다.
   delete from public.phone_verifications
    where phone = p_phone
      and purpose = 'password_reset';

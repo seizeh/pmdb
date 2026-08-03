@@ -49,12 +49,36 @@ select is(app.uid(), (select id from seed where k='owner')::uuid,
 -- 있으면 (post_id, pet_id) 삽입 → 삭제 반복으로 verify_post_count 를 올려
 -- 사진 인증 게이트를 통째로 넘길 수 있다. 트리거는 INSERT 에서만 +1 하고
 -- DELETE 분기가 없는데(의도된 것), 그 전제는 "RPC 밖에서 INSERT 할 수 없다" 이다.
+--
+-- ACL 을 직접 읽는다. has_table_privilege() 로 쓰면 **환경마다 답이 갈린다** —
+-- 그 함수는 롤 상속과 PUBLIC 부여까지 합산한 '실효 권한'을 돌려주므로, CI 컨테이너처럼
+-- 롤 구성이 운영과 다른 곳에서는 GRANT 를 회수해도 true 가 나온다(실제로 그렇게 나왔다).
+-- 우리가 고정하려는 건 실효 권한이 아니라 **이 테이블의 ACL 에 쓰기 항목이 없다** 는
+-- 사실이므로, 합산되지 않는 relacl 을 본다.
 select is(
-  has_table_privilege('authenticated', 'public.post_pets', 'INSERT'), false,
-  'authenticated 는 post_pets 에 INSERT 할 수 없다(게이트 카운터 우회 차단)');
+  (select count(*)::int
+     from pg_class c
+     join pg_namespace n on n.oid = c.relnamespace
+     cross join lateral aclexplode(c.relacl) a
+     join pg_roles r on r.oid = a.grantee
+    where n.nspname = 'public' and c.relname = 'post_pets'
+      and r.rolname = 'authenticated'
+      and a.privilege_type in ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')),
+  0,
+  'post_pets ACL 에 authenticated 쓰기 권한이 없다(게이트 카운터 우회 차단)');
+
+-- 조회는 남아 있어야 한다 — 앱이 글 상세에서 연결된 펫을 읽는다.
 select is(
-  has_table_privilege('authenticated', 'public.post_pets', 'DELETE'), false,
-  'authenticated 는 post_pets 를 DELETE 할 수 없다(재삽입으로 카운터 반복 증가 차단)');
+  (select count(*)::int
+     from pg_class c
+     join pg_namespace n on n.oid = c.relnamespace
+     cross join lateral aclexplode(c.relacl) a
+     join pg_roles r on r.oid = a.grantee
+    where n.nspname = 'public' and c.relname = 'post_pets'
+      and r.rolname = 'authenticated'
+      and a.privilege_type = 'SELECT'),
+  1,
+  'post_pets SELECT 은 유지 — 회수가 조회까지 끊지 않았다');
 
 select * from finish();
 rollback;
