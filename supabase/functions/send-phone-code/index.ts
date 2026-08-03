@@ -9,20 +9,53 @@
 //   review(간이 후기, 0029): 계정 존재 여부를 **보지 않는다** — 정식 회원도 간이
 //   경로로 후기를 쓸 수 있어야 하는데 signup 목적을 재사용하면 phone_taken 에
 //   막힌다. 목적을 나눠야 후기용 인증이 가입에 전용되는 것도 함께 막힌다.
-//   verify_jwt=false: 가입/비번재설정은 로그인 전 단계라 JWT 없음. 남용은 자체 rate limit 으로 방어.
+//   남용은 자체 rate limit 으로 방어(아래 세 층).
+//
+//   ── 왜 번호별 60초만으로는 부족했나 ────────────────────────────────────
+//   종전 제한은 `phone+purpose 60초 1회` 하나뿐이었다. 그건 **한 사람이 재발송을
+//   연타하는 것**을 막는 장치지, 발송 **총량**을 막는 장치가 아니다. 번호를
+//   바꿔가며 부르면 상한이 없다 — 문자 한 통마다 실제 돈이 나가고, 우리 발신번호로
+//   남의 폰에 문자가 꽂힌다. purpose='review' 는 계정 존재 검사도 하지 않으므로
+//   (그게 설계 의도다) 가입 여부와 무관하게 **아무 번호로나** 보낼 수 있다.
+//   게이트웨이의 verify_jwt 는 방어가 아니다 — publishable 키는 앱 번들에 실려
+//   있고 저장소도 공개다.
+//
+//   드러나는 경로가 청구서뿐이라는 게 진짜 문제였다. 그래서 세 층으로 나눈다:
+//     ① phone+purpose 60초 1회   기존. 개인의 재발송 연타(UX 쿨다운).
+//     ② IP 시간당 20통           한 출처가 번호를 갈아타며 쏟아내는 것.
+//     ③ 전역 시간당 200통        ②를 우회한 분산 시도까지 포함한 **비용 상한**.
+//   ②는 스푸핑 가능한 보조선이고(clientIp 주석), ③이 최후 방어선이다. ③에 걸리면
+//   정상 가입도 함께 막히므로 **관리자에게 즉시 알린다** — 조용히 막고 있으면
+//   "가입이 안 돼요" 문의만 쌓이고 원인은 로그 안에 묻힌다.
 //
 //   데모 백도어(심사·테스트 서버용): DEMO_PHONES(콤마 구분)·DEMO_OTP(6자리) 시크릿이
 //   둘 다 설정된 환경에서만, 해당 번호에 한해 SMS 발송 없이 고정 코드를 저장한다.
 //   verify-phone-code 이후는 실번호와 완전히 동일한 경로. 미설정(운영 기본)이면 죽은 코드.
+//   데모 번호는 문자를 보내지 않으므로 ②③ 어느 층도 소모하지 않는다.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { clientIp, rateLimited } from "../_shared/auth.ts";
+import { alertAdmins } from "../_shared/edge_alert.ts";
 import { loadSolapiConfig, normalizePhone, sendSms } from "../_shared/solapi.ts";
 
 const CODE_TTL_MIN = 5;
 const RATE_LIMIT_SEC = 60;
 const PURPOSES = new Set(["signup", "password_reset", "review"]);
+
+// ② 출처별 상한. 한 사람이 정상적으로 쓰는 양(가입 1통 + 재발송 몇 통)보다 훨씬
+//    넉넉하되, 번호를 갈아타는 스크립트에는 즉시 걸린다. 사무실·통신사 NAT 로
+//    IP 를 공유하는 경우를 감안해 시간당 20통.
+const IP_MAX = 20;
+const IP_WINDOW_SEC = 3600;
+
+// ③ 전역 상한(비용 상한). 베타 실사용량과는 자릿수가 다르다 — 정상 운영 중에는
+//    절대 닿지 않아야 하고, 닿았다면 그 자체가 사건이라 알림을 띄운다.
+//    창이 1시간이라 잘못 걸려도 최대 1시간 뒤 스스로 풀린다(일 단위로 잡으면
+//    하루치 가입이 통째로 막힌다).
+const GLOBAL_MAX = 200;
+const GLOBAL_WINDOW_SEC = 3600;
 
 function genCode(): string {
   const n = crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000;
@@ -68,6 +101,14 @@ Deno.serve(async (req: Request) => {
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
 
+  // ②) 출처별 상한 — 계정 존재 검증보다 **앞에** 둔다. 뒤에 두면 phone_taken /
+  //     user_not_found 응답으로 번호 가입 여부를 훑는 호출이 아무 대가 없이
+  //     지나간다(그 열거 자체가 문자 발송의 앞단이다).
+  const ip = isDemo ? null : clientIp(req);
+  if (ip !== null && await rateLimited(supabase, `sms:ip:${ip}`, IP_MAX, IP_WINDOW_SEC)) {
+    return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
+  }
+
   // 0) 목적별 계정 존재 검증 — 가입된 번호에 가입용 문자를 보내지 않는다.
   //    review 는 어느 분기에도 걸리지 않는다(존재 여부 무관 발송).
   const { data: existing, error: exErr } = await supabase
@@ -98,6 +139,24 @@ Deno.serve(async (req: Request) => {
       return json({ error: "internal_error" }, 500);
     }
     if ((count ?? 0) > 0) {
+      return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
+    }
+  }
+
+  // ③) 전역 상한 — 여기서부터는 실제로 문자가 나간다. 발송 직전에 소모해
+  //     "세었는데 안 보냈다"(또는 그 반대)가 생기지 않게 한다.
+  //     걸리면 정상 가입까지 막히므로 조용히 지나가서는 안 된다 — 관리자 알림은
+  //     30분 스로틀이 걸려 있어(edge_alert) 폭주해도 알림이 폭주하지 않는다.
+  if (!isDemo) {
+    if (await rateLimited(supabase, "sms:global", GLOBAL_MAX, GLOBAL_WINDOW_SEC)) {
+      console.error("global SMS cap reached", { purpose, ip });
+      await alertAdmins(
+        supabase,
+        "sms-global-cap",
+        "문자 발송 전역 상한 도달",
+        `최근 ${GLOBAL_WINDOW_SEC / 60}분간 인증문자 ${GLOBAL_MAX}통을 넘겼습니다. ` +
+          "정상 유입인지 남용인지 확인이 필요하고, 그동안 신규 가입·비밀번호 재설정이 막힙니다.",
+      );
       return json({ error: "rate_limited", retry_after_sec: RATE_LIMIT_SEC }, 429);
     }
   }
