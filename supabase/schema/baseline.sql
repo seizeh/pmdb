@@ -5906,18 +5906,6 @@ GRANT SELECT(comment_count) ON TABLE public.posts TO authenticated;
 
 
 --
--- Name: COLUMN posts.actual_lat; Type: ACL; Schema: public; Owner: -
---
-
-
-
---
--- Name: COLUMN posts.actual_lng; Type: ACL; Schema: public; Owner: -
---
-
-
-
---
 -- Name: COLUMN posts.display_lat; Type: ACL; Schema: public; Owner: -
 --
 
