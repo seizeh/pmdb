@@ -383,6 +383,29 @@ $$;
 
 
 --
+-- Name: is_blocked_pair(uuid, uuid); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.is_blocked_pair(p_a uuid, p_b uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select exists (
+    select 1 from public.user_blocks b
+     where (b.blocker_id = p_a and b.blocked_id = p_b)
+        or (b.blocker_id = p_b and b.blocked_id = p_a)
+  )
+$$;
+
+
+--
+-- Name: FUNCTION is_blocked_pair(p_a uuid, p_b uuid); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.is_blocked_pair(p_a uuid, p_b uuid) IS '두 사용자가 (방향 무관) 차단 관계인가. 차단 필터의 단일 정의 — 사본을 만들지 말 것.';
+
+
+--
 -- Name: is_pet_guardian(uuid, text); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1294,6 +1317,25 @@ $$;
 
 
 --
+-- Name: tg_comments_block_check(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_comments_block_check() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_owner uuid;
+begin
+  select p.user_id into v_owner from public.posts p where p.id = new.post_id;
+  if v_owner is not null and app.is_blocked_pair(v_owner, new.user_id) then
+    raise exception '차단한 사용자의 게시글에는 댓글을 쓸 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: tg_comments_count(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -1403,6 +1445,32 @@ begin
   return null;
 end;
 $$;
+
+
+--
+-- Name: tg_notifications_block_filter(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_notifications_block_filter() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if new.actor_user_id is not null
+     and new.actor_user_id <> new.user_id
+     and app.is_blocked_pair(new.user_id, new.actor_user_id)
+  then
+    return null; -- 행을 만들지 않는다(= 푸시도 배지도 없다)
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION tg_notifications_block_filter(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.tg_notifications_block_filter() IS '차단 쌍 사이의 알림을 생성 단계에서 제거. 생산자 12개를 하나씩 고치는 대신 길목 한 곳.';
 
 
 --
@@ -1794,6 +1862,25 @@ begin
   return new;
 end;
 $$;
+
+
+--
+-- Name: tg_post_hearts_block_check(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_post_hearts_block_check() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_owner uuid;
+begin
+  select p.user_id into v_owner from public.posts p where p.id = new.post_id;
+  if v_owner is not null and app.is_blocked_pair(v_owner, new.user_id) then
+    raise exception '차단한 사용자의 게시글에는 반응할 수 없어요'
+      using errcode = 'P0001';
+  end if;
+  return new;
+end $$;
 
 
 --
@@ -3863,6 +3950,34 @@ begin
   values (v_uid, p_blocked)
   on conflict (blocker_id, blocked_id) do nothing;
 
+  -- ▼ 팔로우 끊기(양방향). 이게 없으면 차단한 상대가 내 팔로워로 남아, 내가 글을
+  --   올릴 때마다 크론이 그 사람에게 pawing_new_post 푸시를 보낸다. 알림 그물(B)이
+  --   그걸 막긴 하지만, 관계 자체를 남겨 두면 차단 해제 시 예전 팔로우가 되살아나
+  --   "왜 이 사람이 나를 팔로우하고 있지" 가 된다. 차단은 관계를 끊는 행위다.
+  delete from public.pawings
+   where (follower_id = v_uid and following_id = p_blocked)
+      or (follower_id = p_blocked and following_id = v_uid);
+
+  -- ▼ 가려진 채팅방의 안읽음 정리. v_chat_rooms 가 차단 상대의 방을 목록에서
+  --   빼는데, 그 방의 안읽음은 users.unread_chat_count 에 남는다. 방이 안 보이니
+  --   열어서 읽을 수도 없고, app.reconcile_unread_counts 도 가려진 방까지 순회해
+  --   같은 값을 다시 계산하므로 **보정으로도 못 지운다.**
+  --
+  --   leave_chat_room 이 나갈 때 하는 것과 같은 처리를 한다 — 마지막 메시지까지
+  --   읽은 것으로 표시. 카운터 감소는 trg_chat_members_read(BEFORE UPDATE)가
+  --   알아서 한다. 양쪽 다 처리하는 이유는 뷰가 **양방향**으로 방을 가리기 때문.
+  update public.chat_room_members m
+     set last_read_message_id = coalesce(
+           (select msg.id from public.chat_messages msg
+             where msg.room_id = m.room_id
+             order by msg.created_at desc, msg.id desc limit 1),
+           m.last_read_message_id)
+   where m.user_id in (v_uid, p_blocked)
+     and m.room_id in (
+       select m1.room_id from public.chat_room_members m1
+        join public.chat_room_members m2 on m2.room_id = m1.room_id
+       where m1.user_id = v_uid and m2.user_id = p_blocked);
+
   -- 개발자 통보 — 차단은 '이 사용자가 문제였다'는 신고이기도 하다.
   --
   -- reports 에는 유니크가 **둘** 있다:
@@ -3886,7 +4001,7 @@ $$;
 -- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON FUNCTION public.block_user(p_blocked uuid, p_reason text) IS '사용자 차단 + 신고 동시 기록(App Store 1.2). 중복 차단·중복 신고는 무해하게 무시.';
+COMMENT ON FUNCTION public.block_user(p_blocked uuid, p_reason text) IS '사용자 차단 — 차단 기록 + 신고 접수 + 팔로우 양방향 해제 + 가려진 채팅방 안읽음 정리.';
 
 
 --
@@ -9510,6 +9625,13 @@ CREATE TRIGGER trg_comments_authored_as BEFORE INSERT ON public.comments FOR EAC
 
 
 --
+-- Name: comments trg_comments_block_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_comments_block_check BEFORE INSERT ON public.comments FOR EACH ROW EXECUTE FUNCTION app.tg_comments_block_check();
+
+
+--
 -- Name: comments trg_comments_count; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -9556,6 +9678,13 @@ CREATE TRIGGER trg_frc_soft_delete_ts BEFORE UPDATE ON public.facility_review_co
 --
 
 CREATE TRIGGER trg_notification_preferences_upd BEFORE UPDATE ON public.notification_preferences FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
+-- Name: notifications trg_notifications_block_filter; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_notifications_block_filter BEFORE INSERT ON public.notifications FOR EACH ROW EXECUTE FUNCTION app.tg_notifications_block_filter();
 
 
 --
@@ -9682,6 +9811,13 @@ CREATE TRIGGER trg_pgi_resolve_invitee BEFORE INSERT ON public.pet_guardian_invi
 --
 
 CREATE TRIGGER trg_pgi_respond BEFORE UPDATE ON public.pet_guardian_invites FOR EACH ROW EXECUTE FUNCTION app.tg_pet_guardian_invites_respond();
+
+
+--
+-- Name: post_hearts trg_post_hearts_block_check; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_post_hearts_block_check BEFORE INSERT ON public.post_hearts FOR EACH ROW EXECUTE FUNCTION app.tg_post_hearts_block_check();
 
 
 --
