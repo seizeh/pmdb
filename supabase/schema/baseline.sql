@@ -5707,7 +5707,7 @@ GRANT ALL ON TABLE public.pawings TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pet_guardian_invites TO anon;
-GRANT ALL ON TABLE public.pet_guardian_invites TO authenticated;
+GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.pet_guardian_invites TO authenticated;
 GRANT ALL ON TABLE public.pet_guardian_invites TO service_role;
 
 
