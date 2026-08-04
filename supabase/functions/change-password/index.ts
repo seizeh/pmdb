@@ -39,7 +39,14 @@ Deno.serve(async (req: Request) => {
   const cur = p.current_password ?? "";
   const next = p.new_password ?? "";
   if (!cur || !next) return json({ error: "missing_fields" }, 400);
-  if (next.length < 6) return json({ error: "weak_password" }, 400); // 구 app._set_password 정책 유지
+  // 가입(signup)·재설정(reset-password)과 **같은 규칙**: 8자 이상 + 영문 + 숫자.
+  // 종전에는 6자 길이만 봤다(구 app._set_password 정책이 남은 것) — 가입에서 막은
+  // 단순 비밀번호를 '변경'으로 우회할 수 있는 구멍이었다.
+  // 에러코드는 weak_password 유지 — 앱이 이미 매핑하고 있어 바꾸면 안내가 깨진다.
+  // ⚠️ 앱 쪽 정본은 pmdart `lib/utils/password_rule.dart` — 규칙을 바꾸면 같이 고칠 것.
+  if (next.length < 8 || !/[A-Za-z]/.test(next) || !/\d/.test(next)) {
+    return json({ error: "weak_password" }, 400);
+  }
 
   const supabase = createClient(
     Deno.env.get("SUPABASE_URL")!,
