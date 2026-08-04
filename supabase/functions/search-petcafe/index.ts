@@ -8,7 +8,17 @@
 //   --no-verify-jwt 배포 + JWT 수동 검증(login/verify-* 와 동일 패턴).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
+
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// 유료 API(네이버 지역검색 + 역지오코딩) 호출 상한 — 사용자당.
+// 지도 탭 진입·이름 검색(250ms 디바운스)에서 부르므로 정상 사용도 제법 잦다.
+// 루프 호출만 잡을 만큼 넉넉히 둔다.
+const SEARCH_MAX = 120;
+const SEARCH_WINDOW_SEC = 3600;
 
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const NAVER_CLIENT_ID = Deno.env.get("NAVER_CLIENT_ID");
@@ -43,38 +53,6 @@ async function reverseGeocodeArea(lng: number, lat: number): Promise<string | nu
   }
 }
 
-function b64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-async function getUidFromJwt(req: Request, secret: string): Promise<string | null> {
-  const auth = req.headers.get("Authorization") ?? "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const parts = m[1].split(".");
-  if (parts.length !== 3) return null;
-  const [h, p, s] = parts;
-  const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" }, false, ["verify"],
-  );
-  const ok = await crypto.subtle.verify(
-    "HMAC", key, b64urlToBytes(s), new TextEncoder().encode(`${h}.${p}`));
-  if (!ok) return null;
-  try {
-    const payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(p)));
-    if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return typeof payload.sub === "string" ? payload.sub : null;
-  } catch {
-    return null;
-  }
-}
-
 const stripTags = (s: string) => (s ?? "").replace(/<[^>]+>/g, "").trim();
 
 // 네이버 지역검색 mapx/mapy → WGS84. 현재 API 는 위경도×1e7 정수로 반환한다.
@@ -95,8 +73,16 @@ Deno.serve(async (req: Request) => {
     return json({ error: "server_misconfigured" }, 500);
   }
 
-  const uid = await getUidFromJwt(req, JWT_SECRET);
+  // 정지·회수·간이 토큰까지 걸러낸다(app.uid() 와 같은 판정) — service_role 로
+  // 진행하므로 RLS 가 받아 주지 않는다.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  const uid = await activeUid(req, JWT_SECRET, admin);
   if (!uid) return json({ error: "unauthorized" }, 401);
+
+  // 유료 API 상한 — 호출 전에 소모한다(제한에 걸린 요청이 네이버로 나가지 않게).
+  if (await rateLimited(admin, `geosearch:${uid}`, SEARCH_MAX, SEARCH_WINDOW_SEC)) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   let p: { lat?: number; lng?: number; query?: string };
   try {

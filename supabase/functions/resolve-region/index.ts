@@ -7,40 +7,20 @@
 //   --no-verify-jwt 배포 + JWT 수동 검증. 키는 서버 시크릿(NCP Maps).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
 
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const NAVER_KEY_ID = Deno.env.get("NAVER_MAP_KEY_ID");
 const NAVER_KEY = Deno.env.get("NAVER_MAP_KEY");
+const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-function b64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-async function getUidFromJwt(req: Request, secret: string): Promise<string | null> {
-  const m = (req.headers.get("Authorization") ?? "").match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const parts = m[1].split(".");
-  if (parts.length !== 3) return null;
-  const [h, p, s] = parts;
-  const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-  const ok = await crypto.subtle.verify(
-    "HMAC", key, b64urlToBytes(s), new TextEncoder().encode(`${h}.${p}`));
-  if (!ok) return null;
-  try {
-    const payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(p)));
-    if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) return null;
-    return typeof payload.sub === "string" ? payload.sub : null;
-  } catch {
-    return null;
-  }
-}
+// 유료 API(네이버 역지오코딩) 호출 상한 — 사용자당. 게시글 작성 화면에서 현재
+// 위치를 확인할 때 부르므로 정상 사용은 시간당 몇 번이다. 루프 호출만 잡는다.
+const GEO_MAX = 60;
+const GEO_WINDOW_SEC = 3600;
 
 async function reverseGeocode(lng: number, lat: number) {
   const url = "https://maps.apigw.ntruss.com/map-reversegeocode/v2/gc" +
@@ -73,8 +53,16 @@ Deno.serve(async (req: Request) => {
   if (!JWT_SECRET) return json({ error: "server_misconfigured" }, 500);
   if (!NAVER_KEY_ID || !NAVER_KEY) return json({ error: "server_misconfigured" }, 500);
 
-  const uid = await getUidFromJwt(req, JWT_SECRET);
+  // 정지·회수·간이 토큰까지 걸러낸다(app.uid() 와 같은 판정) — service_role 로
+  // 진행하므로 RLS 가 받아 주지 않는다.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  const uid = await activeUid(req, JWT_SECRET, admin);
   if (!uid) return json({ error: "unauthorized" }, 401);
+
+  // 유료 API 상한 — 호출 전에 소모한다(제한에 걸린 요청이 네이버로 나가지 않게).
+  if (await rateLimited(admin, `georev:${uid}`, GEO_MAX, GEO_WINDOW_SEC)) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   let p: { lat?: number; lng?: number };
   try {

@@ -13,7 +13,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { bearer, rateLimited, verifyAccess } from "../_shared/auth.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { isValidBizNo, ntsStatus } from "../_shared/nts.ts";
 
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
@@ -46,9 +46,13 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!JWT_SECRET || !NTS_API_KEY) return json({ error: "server_misconfigured" }, 500);
 
-  const token = bearer(req);
-  const claims = token ? await verifyAccess(token, JWT_SECRET) : null;
-  const uid = typeof claims?.sub === "string" ? claims.sub : null;
+  // 서명·만료만 보면 **정지된 계정과 회수된 토큰이 그대로 통과한다** — service_role
+  // 로 진행하므로 app.uid() 의 관문을 거치지 않는다. status/tv/lite 까지 확인한다.
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+  );
+  const uid = await activeUid(req, JWT_SECRET, supabase);
   if (!uid) return json({ error: "unauthorized" }, 401);
 
   let p: Record<string, unknown>;
@@ -79,10 +83,6 @@ Deno.serve(async (req: Request) => {
     return json({ error: "invalid_extra_doc_path" }, 400);
   }
 
-  const supabase = createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-  );
   if (await rateLimited(supabase, `bizapply:${uid}`, 10, 3600)) {
     return json({ error: "rate_limited" }, 429);
   }

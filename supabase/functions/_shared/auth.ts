@@ -80,6 +80,46 @@ export function bearer(req: Request): string | null {
   return m ? m[1] : null;
 }
 
+/// **service_role 로 진행하는 함수의 인증 관문** — DB 의 `app.uid()` 와 같은 판정을
+/// Edge 쪽에서 재현한다. 통과하면 uid, 아니면 null(호출부는 401).
+///
+/// ── 왜 서명 검증만으로는 부족한가
+/// access 토큰은 무상태다. 서명과 `exp` 만 보면 **정지된 계정과 회수된 토큰이
+/// 수명 동안 그대로 통과한다**(refresh 지원 클라 8시간, 레거시 30일).
+/// DB 경로는 `app.uid()` 가 매 요청 막지만, 자체 JWT 검증 후 service_role 로
+/// 진행하는 함수들은 RLS 를 우회하므로 그 관문이 없다 — 관리자가 계정을
+/// 정지시켜도 아무 일이 일어나지 않고, 그 사실이 어디에도 표시되지 않는다.
+///
+/// ── 무엇을 보는가 (app.uid() 와 동일)
+///   status = 'active'      정지·탈퇴·간이 계정 차단 (즉시 반영)
+///   token_version = tv     비밀번호 변경·재설정으로 회수된 토큰 차단
+///   lite 클레임 없음        간이 후기 토큰 차단 — 이게 없으면 20260803180000 의
+///                          방어가 **이 함수들에서만** 뚫린다(service_role 이라
+///                          app.uid() 를 거치지 않는다)
+///
+/// ── 실패 시 fail-closed
+/// 조회가 실패하면 null 이다. 레이트리밋(`rateLimited`)의 fail-open 과 반대인데,
+/// 저쪽은 가용성 우선의 절충이고 이쪽은 **인증**이라 열어 둘 이유가 없다.
+// deno-lint-ignore no-explicit-any
+export async function activeUid(
+  req: Request, secret: string, supabase: any,
+): Promise<string | null> {
+  const token = bearer(req);
+  const claims = token ? await verifyAccess(token, secret) : null;
+  const uid = typeof claims?.sub === "string" ? claims.sub : null;
+  if (!uid) return null;
+  // 텍스트 비교 — 예상 밖 값에서 캐스팅 오류로 터지지 않게(DB 쪽과 같은 이유).
+  if (String(claims?.lite ?? "") === "true") return null;
+
+  const tv = typeof claims?.tv === "number" ? claims.tv : 0;
+  const { data, error } = await supabase
+    .from("users").select("status, token_version").eq("id", uid).maybeSingle();
+  if (error || !data) return null;
+  if (data.status !== "active") return null;
+  if ((data.token_version ?? 0) !== tv) return null;
+  return uid;
+}
+
 /// refresh_tokens.user_agent 저장용 — 300자로 절단(저장 비대화/남용 방지). 없으면 null.
 export function clientUa(req: Request): string | null {
   const ua = req.headers.get("user-agent");
