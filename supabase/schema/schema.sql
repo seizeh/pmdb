@@ -234,7 +234,25 @@ CREATE FUNCTION app.cleanup_retention() RETURNS void
   delete from public.chat_messages
    where is_deleted = true
      and coalesce(deleted_at, updated_at, created_at) < now() - interval '30 days';
+
+  -- ▼ 간이 후기 계정: 남은 후기가 없으면 전화번호 파기(「간이 후기 이용조건」 §3).
+  --   후기를 다 지운 경우와, 인증만 받고 작성하지 않은 경우를 한 규칙이 함께 덮는다.
+  update public.users u
+     set phone = null,
+         phone_verified = false
+   where u.status = 'lite'
+     and u.phone is not null
+     and u.created_at < now() - interval '1 day'
+     and not exists (
+       select 1 from public.facility_reviews r where r.user_id = u.id);
 $$;
+
+
+--
+-- Name: FUNCTION cleanup_retention(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.cleanup_retention() IS '일일 보존기간 파기 배치(처리방침 §3). 간이 계정은 후기가 0건이면 전화번호를 파기한다.';
 
 
 --
