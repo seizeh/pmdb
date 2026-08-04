@@ -17,7 +17,8 @@
 > - `app.is_pet_guardian(pet, role?)` — 해당 펫의 보호자(역할 지정 가능: 'owner'/'co_guardian') 여부.
 > - `app.is_post_manager(post)` — 게시글 작성자이거나, 게시글에 연결된 펫의 보호자이거나, 관리자.
 > - `app.is_room_member(room)` — 채팅방 멤버 여부.
-> - `app.is_blocked_pair(a, b)` — 두 사용자가 **방향 무관** 차단 관계인가(2026-08-04 신설, 0032 §2). 차단 필터의 단일 정의 — 사본을 만들지 말 것. 종전에는 같은 조건이 뷰 3개와 트리거에 흩어져 있었고, 그게 알림·팔로우 경로가 누락된 원인이었다.
+> - `app.is_blocked_pair(a, b)` — 두 사용자가 **방향 무관** 차단 관계인가(2026-08-04 신설, 0032 §2). 차단 여부를 묻는 **술어**. 종전에는 같은 조건이 뷰 3개와 트리거에 흩어져 있었고, 그게 알림·팔로우 경로가 누락된 원인이었다.
+- `app.blocked_ids()` — 나와 차단 관계인 사용자 id **배열**(2026-08-05, 0032 §7.10). 위와 같은 사실의 집합 형태다. RLS 처럼 **행마다 판정해야 하는 자리**에서는 술어를 쓰면 컬럼 인자 때문에 행별 호출이 되므로 이쪽을 쓰고 `(select app.blocked_ids())` 로 감싼다(§9). **둘은 같은 조건이므로 한쪽만 고치면 안 된다.**
 >
 > 모두 `STABLE SECURITY DEFINER`, `search_path=''` 로 정의되어 RLS 를 우회해 판별만 수행한다.
 
@@ -27,7 +28,7 @@
 
 - **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **19개**(§3.8)
 - **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
-- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 197건
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 198건
 - **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
 - **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
 - **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
@@ -2000,7 +2001,7 @@ public 스키마 **76개** + storage **7개** = 총 83개 정책(2026-08-04 실�
 | `chat_messages` | 방 멤버 또는 관리자 | 본인 발신 + 방 멤버일 때만 | **관리자만** (일반 사용자는 메시지 수정/삭제 불가 — 관리자 RPC 로만 soft delete) | — |
 | `chat_room_members` | 본인 행, 같은 방 멤버, 관리자 | 본인 등록 또는 관리자 | 본인 행만(읽음 포인터 갱신용) | — |
 | `chat_rooms` | 방 멤버 또는 관리자 | 로그인 사용자 누구나(`uid is not null`) | 관리자만 | — |
-| `comments` | 미삭제 댓글 전체 또는 관리자(삭제 포함) | 본인 명의만 | 본인 또는 관리자 | — |
+| `comments` | 미삭제 댓글 전체 또는 관리자(삭제 포함), **차단 상대 댓글 제외**(2026-08-05) | 본인 명의만 | 본인 또는 관리자 | — |
 | `device_tokens` | ALL: 본인 것만 (SELECT/INSERT/UPDATE/DELETE 일괄) | | | |
 | `facilities` | 전체 공개 | — | — | — |
 | `facility_cache` | 전체 공개 | 관리자 | 관리자 | 관리자 |
@@ -2017,7 +2018,7 @@ public 스키마 **76개** + storage **7개** = 총 83개 정책(2026-08-04 실�
 | `post_hearts` | 전체 공개 | 본인 명의만 | — | 본인 것만(하트 취소) |
 | `post_pets` | 글이 visible 이거나 글 작성자/관리자 | 글 작성자만 | — | 글 작성자 또는 관리자 |
 | `post_views` | 관리자만 | 본인 명의만(조회 기록) | — | — |
-| `posts` | visible 전체 + hidden_by_user 는 작성자만 + 관리자 전부 | 본인 명의만 | 본인 또는 관리자 | **관리자만**(하드 삭제) |
+| `posts` | visible 전체 + hidden_by_user 는 작성자만 + 관리자 전부, **차단 상대 글 제외**(2026-08-05) | 본인 명의만 | 본인 또는 관리자 | **관리자만**(하드 삭제) |
 | `reports` | 신고자 본인 또는 관리자 | 본인 명의만 | 관리자만 | — |
 | `review_category_counts` | 전체 공개 | — (트리거가 관리) | — | — |
 | `reviews` | 전체 공개 | reviewer 본인만(+ 트리거 검증) | — | — |
@@ -2188,7 +2189,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 ## 13. 마이그레이션 이력
 
-이 저장소가 관리하는 마이그레이션 **197건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+이 저장소가 관리하는 마이그레이션 **198건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
 `20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
 
 > ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
@@ -2399,3 +2400,4 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 | `20260804200000` | `media_bucket_limits` | media 버킷 MIME·용량 제한 — 공개 CDN 이 임의 파일 호스팅이 되지 않게. |
 | `20260804220000` | `rls_initplan` | RLS 의 무인자 헬퍼를 `(select …)` 로 감싸 행마다 부르던 것을 한 번만. |
 | `20260804230000` | `fk_indexes` | 조회 경로가 있는 FK 7건에 인덱스. |
+| `20260805090000` | `block_hides_reads` | 차단이 읽기도 막게 — 화면만 가려져 있고 데이터는 열려 있었다. |
