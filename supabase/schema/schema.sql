@@ -13021,20 +13021,6 @@ GRANT SELECT(comment_count) ON TABLE public.posts TO authenticated;
 
 
 --
--- Name: COLUMN posts.actual_lat; Type: ACL; Schema: public; Owner: -
---
-
-GRANT UPDATE(actual_lat) ON TABLE public.posts TO authenticated;
-
-
---
--- Name: COLUMN posts.actual_lng; Type: ACL; Schema: public; Owner: -
---
-
-GRANT UPDATE(actual_lng) ON TABLE public.posts TO authenticated;
-
-
---
 -- Name: COLUMN posts.display_lat; Type: ACL; Schema: public; Owner: -
 --
 

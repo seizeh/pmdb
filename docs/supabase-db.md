@@ -1,7 +1,8 @@
 # PawMate Supabase — DB 구조 및 로직 문서
 
 - **프로젝트**: `vyatppuxmpulqtxevfpk` (PAWMATE, region `ap-northeast-2`, Postgres 17)
-- **조사일**: 2026-07-02 — 라이브 DB를 직접 조회해 작성 (마이그레이션 파일이 아닌 실제 배포 상태 기준)
+- **조사일**: 2026-07-02 최초 작성 · **2026-08-04 갱신** — 라이브 DB를 직접 조회해 작성 (마이그레이션 파일이 아닌 실제 배포 상태 기준)
+- **2026-08-04 갱신 범위**: 개요 수치·테이블 그룹, `app` 스키마 테이블 7개와 `public.business_match_rules` 신설분, 뷰 1개 추가, 마이그레이션 이력 전량(77 → 191), 그리고 **`app.uid()` 의 판정 조건 변경**(아래). 개별 테이블 상세 중 07-02 이후 컬럼이 늘어난 것들은 컬럼 표까지 다시 훑지 못했으므로, 정확한 현재 정의는 `supabase/schema/schema.sql`(스냅샷)이 정본이다
 - **짝 문서**: [supabase-api.md](supabase-api.md) — Edge Functions(API 계층) 레퍼런스
 - **구성**: §1–5 스키마(ENUM/테이블/제약/인덱스), §6–12 로직(뷰/RPC/트리거/RLS/권한/Storage/Realtime), §13 마이그레이션 이력
 
@@ -9,11 +10,14 @@
 
 > 이 프로젝트는 Supabase Auth 를 사용하지 않는 **자체 JWT 인증** 구조다.
 > 핵심 축은 `app` 스키마의 헬퍼 함수들이다:
-> - `app.uid()` — PostgREST 가 주입한 `request.jwt.claims` 의 `sub`(사용자 id)와 `tv`(token_version)를 읽어, **활성(active) 상태이고 token_version 이 일치하는** 사용자의 uuid 를 반환. 불일치/비활성/무토큰이면 NULL. 모든 RLS·뷰·RPC 의 신원 판별 기준.
+> - `app.uid()` — PostgREST 가 주입한 `request.jwt.claims` 의 `sub`(사용자 id)와 `tv`(token_version)를 읽어, **활성(active) 상태이고 token_version 이 일치하며 `lite` 클레임이 없는** 사용자의 uuid 를 반환. 불일치/비활성/무토큰이면 NULL. 모든 RLS·뷰·RPC 의 신원 판별 기준.
+>   - **`lite` 클레임 조건은 2026-08-04 추가**(0032 §1.1). `signup-lite` 가 발급하는 간이 후기 토큰을 거른다 — 그 전에는 **기존 정식 회원이 간이 경로로 들어오면 `status='active'` 라 완전 세션이 나갔다.** 판정 근거를 계정 상태에서 토큰으로 옮긴 것이고, 텍스트 비교(`<> 'true'`)인 이유는 캐스팅 오류가 RLS 안에서 터지면 '거부' 가 아니라 '쿼리 실패' 가 되기 때문.
+> - `app.uid_lite()` — 위와 같되 `status in ('active','lite')` 를 허용하고 `lite` 클레임을 막지 않는다. **간이 후기 3종 전용**(`add_facility_review` · `facility_review_by_id` · `facility_reviews_of`).
 > - `app.is_admin()` — `app.uid()` 사용자가 `user_type='admin'` 이고 `status='active'` 인지.
 > - `app.is_pet_guardian(pet, role?)` — 해당 펫의 보호자(역할 지정 가능: 'owner'/'co_guardian') 여부.
 > - `app.is_post_manager(post)` — 게시글 작성자이거나, 게시글에 연결된 펫의 보호자이거나, 관리자.
 > - `app.is_room_member(room)` — 채팅방 멤버 여부.
+> - `app.is_blocked_pair(a, b)` — 두 사용자가 **방향 무관** 차단 관계인가(2026-08-04 신설, 0032 §2). 차단 필터의 단일 정의 — 사본을 만들지 말 것. 종전에는 같은 조건이 뷰 3개와 트리거에 흩어져 있었고, 그게 알림·팔로우 경로가 누락된 원인이었다.
 >
 > 모두 `STABLE SECURITY DEFINER`, `search_path=''` 로 정의되어 RLS 를 우회해 판별만 수행한다.
 
@@ -21,10 +25,12 @@
 
 ## 1. 개요
 
-- **테이블 수**: `public` 34개 (이 중 `spatial_ref_sys`는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **33개**) + `app` 스키마 내부 테이블 **3개**(refresh_tokens, rate_limits, push_config — §3.8)
-- **ENUM 타입**: 1개 (`facility_category`) — 대부분의 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리됨
-- **커스텀 시퀀스**: 없음 (모든 PK는 `gen_random_uuid()` 기본값의 UUID)
-- **모든 테이블 PK**: UUID (`review_category_counts`, `dong_centroids` 제외 — 각각 복합 PK / 자연키 PK)
+- **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **16개**(§3.8)
+- **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 9개 · **마이그레이션** 192건
+- **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
+- **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
+- **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
 
 ### 설치된 확장 (pg_extension)
 
@@ -50,7 +56,13 @@
 | 알림 | notifications, notification_preferences, device_tokens |
 | 시설 / 위치 | facilities, facility_reviews, facility_cache, dong_centroids |
 | 인증 / 관리 | phone_verifications, photo_verifications, location_verifications, reports, admin_logs |
+| 업체 (0025·0028) | business_profiles, business_match_rules |
 | 시스템 (PostGIS) | spatial_ref_sys |
+
+> 07-02 이후 `app` 스키마가 3개에서 16개로 늘었다. 대부분 **법정 보존·파기 의무가 붙은
+> 기록**(접속 로그·위치 이용 기록·탈퇴자 재가입 확인·업체 서류 파기 큐)과 **관측**
+> (클라이언트 오류)이다. 파기 주기는 전부 `app.cleanup_retention()` 한 곳에 모여 있고
+> pg_cron `retention-purge` 가 매일 돌린다 — 처리방침 §3 의 이행 지점이다.
 
 ---
 
@@ -146,6 +158,22 @@
 - **FK**: user_id → users.id (NO ACTION)
 - **UNIQUE**: `business_profiles_user_id_key` (user_id)
 - **인덱스**: `business_profiles_pkey`, `business_profiles_user_id_key` (둘 다 UNIQUE btree)
+
+### public.business_match_rules
+
+업체 매칭 가중치 규칙(0028). 관리자가 조정하는 **설정 테이블**이라 행 수가 적고 자연키(`rule_key`)를 PK 로 쓴다.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| rule_key | varchar | NO | | PK. 규칙 식별자 |
+| weight | integer | NO | | 가중치 |
+| enabled | boolean | NO | `true` | 끄기만 하고 행은 남긴다(이력 보존) |
+| params | jsonb | YES | | 규칙별 파라미터 |
+| note | text | YES | | 운영 메모 |
+| updated_at | timestamptz | NO | `now()` | |
+
+- **RLS on** — `business_match_rules_admin_select`(SELECT, `app.is_admin()`) 하나뿐. 쓰기는 관리자 RPC(`admin_set_match_rule`) 경유
+- ⚠️ `anon` 에 `GRANT ALL` 이 남아 있다(0031 §4 유형 — 2026-06-30 회수 스윕이 **고정 테이블 목록**만 처리해 그 뒤 생성된 테이블이 Supabase 기본 GRANT 를 상속). 지금은 위 정책이 막지만 재발 방지 장치(`ALTER DEFAULT PRIVILEGES`·CI 린트)가 없다
 
 ### public.pets
 
@@ -1119,6 +1147,121 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 
 - RPC: `create_care_report(p_pet_label, p_photos, p_note?, p_recipient_phone?)` [SD, `has_license('grooming')` 게이트] — share_links(kind `care_report`, 30일) 토큰 생성 + funnel `report_issued`. `my_care_reports()`(발행 목록, 수령자 닉네임 표시), `claim_care_reports()`(인증 번호 HMAC 대조 자동 연결 — 가입/앱 시작 시 호출, 알림 `system_notice` + funnel `claim`, hmac 파기), `my_received_care_reports()`(보호자 받은 목록).
 
+### app.auth_logs
+
+로그인 **성공** 접속 기록. 통신비밀보호법상 접속기록 보존(3개월) 대상이며 처리방침 §3 에 등재돼 있다. 실패한 로그인은 남기지 않는다 — 0031 §2.1 이 지적한 "성공했을 때만 흔적이 남는다" 가 여기서 온다.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | uuid | NO | `gen_random_uuid()` | PK |
+| user_id | uuid | NO | | FK → public.users.id |
+| ip_hash | text | YES | | **SHA-256 해시**. 평문 IP 는 저장하지 않는다(처리방침 §1-1 과 일치) |
+| created_at | timestamptz | NO | `now()` | |
+
+- **인덱스**: `idx_auth_logs_created`(created_at)
+- **RLS on, 정책 없음** — service_role 전용(의도적)
+- 3개월 경과분은 `app.cleanup_retention()` 이 파기(pg_cron `retention-purge`)
+
+### app.location_usage_logs
+
+**위치정보 이용·제공사실 확인자료**(위치정보법 제16조 제2항). 6개월 보존 후 파기 — 법정 의무라 파기 누락이 곧 위반이다.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | uuid | NO | `gen_random_uuid()` | PK |
+| user_id | uuid | NO | | FK → public.users.id |
+| purpose | text | NO | | 이용 목적 |
+| provided_to | text | YES | | 제3자 제공 시 대상(현재 제공 없음 — 위치기반 약관 제9조) |
+| used_at | timestamptz | NO | `now()` | |
+
+- **인덱스**: `idx_location_usage_logs_used`(used_at), `idx_location_usage_logs_user`(user_id, used_at DESC)
+- **RLS on, 정책 없음** — service_role 전용
+- 6개월 경과분 파기 + 탈퇴 시 즉시 삭제(`20260712041855`)
+
+### app.withdrawn_users
+
+탈퇴 회원 **재가입 확인 정보**(아이디·전화번호, 30일). 부정 재가입 방지 목적이며 처리방침 §3 에 등재돼 있다. 본체 `users` 행은 `withdraw_account` 가 익명화하므로, 재가입 판정에 필요한 최소 정보만 여기 따로 둔다.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| user_id | uuid | NO | | PK |
+| username | text | YES | | |
+| phone | text | YES | | |
+| withdrawn_at | timestamptz | NO | `now()` | |
+
+- **RLS on, 정책 없음** — service_role 전용
+- 30일 경과분은 pg_cron `withdrawn-users-purge` 가 삭제
+
+### app.client_errors
+
+클라이언트 오류 리포팅(**`reported` 등급만** — 0011 ADR). 30일 보존 후 파기하며 처리방침 §1-1·§3 에 등재돼 있다(2026-08-04 개정, 0032 §5.2).
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | bigint | NO | identity | PK |
+| user_id | uuid | YES | | 로그인 중이면 기록. 비로그인 오류도 받는다 |
+| where_key | varchar | NO | | 발생 위치 태그(예: `session.refresh.rejected`) |
+| message | varchar | NO | | 오류 메시지 |
+| stack | text | YES | | 스택 트레이스 |
+| platform | varchar | YES | | ios / android / web |
+| app_release | varchar | YES | | `Env.appRelease` — 배포별 급증 판정용 |
+| extra | jsonb | YES | | 호출부가 붙인 진단 컨텍스트 |
+| created_at | timestamptz | NO | `now()` | |
+
+- **인덱스**: `client_errors_recent_idx`(created_at DESC), `client_errors_where_idx`(where_key, created_at DESC)
+- **접속 IP 는 저장하지 않는다.** `record_client_error` 가 `cf-connecting-ip` 를 읽지만 md5 해시를 **레이트리밋 버킷 키로만** 쓰고 테이블에는 남기지 않는다
+- 쓰기는 `public.record_client_error`(SD) 경유 — 개별 30/분 + 익명 전역 300/분
+- ⚠️ 모으기만 하고 **알려 주는 장치가 없다**(0031 §6.1) — 임계 알람 미구현
+
+### app.vaccination_events
+
+분양 스타터 접종 리마인더(0028 §5). 일정 콘텐츠는 앱이 갖고, 서버는 저장·알림만 한다.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | uuid | NO | `gen_random_uuid()` | PK |
+| pet_id | uuid | NO | | FK → public.pets.id |
+| label | varchar | NO | | 접종 항목명 |
+| due_date | date | NO | | 예정일 |
+| done_at | timestamptz | YES | | 완료 표시 |
+| notified_at | timestamptz | YES | | 리마인더 발송 잠금 — 중복 알림 방지 |
+| created_by | uuid | NO | | FK → public.users.id |
+| created_at | timestamptz | NO | `now()` | |
+
+- **인덱스**: `vaccination_events_pet_idx`(pet_id, due_date), `vaccination_events_due_idx`(due_date) **부분**(`done_at is null and notified_at is null`)
+- **이 테이블만 RLS off** — 접근이 전부 SD RPC 경유라 정책을 두지 않았다
+- pg_cron `vaccine-reminder-sweep`(매일 00:00 UTC)가 D-1 이내 미완료분을 보호자에게 1회 알림
+- ⚠️ 날짜 판정은 **KST 기준**(`now() at time zone 'Asia/Seoul'`). 테스트가 `current_date`(UTC)로 준비해 **매일 아침 9시간만 실패**하던 사고가 있었다(0032 §6.6)
+
+### app.business_doc_purge_queue
+
+업체 증빙 서류(Storage 객체) **파기 대기열**. 0025 §3.3·§8 의 파기 의무 이행 지점.
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | bigint | NO | identity | PK |
+| path | text | NO | | Storage 객체 경로 |
+| reason | text | NO | | 큐 사유(반려·탈퇴·서류 교체 등) |
+| purge_after | timestamptz | NO | | 이 시각 이후 파기 |
+| purged_at | timestamptz | YES | | 완료 표시. NULL 이면 미처리 |
+| created_at | timestamptz | NO | `now()` | |
+
+- **RLS on, 정책 없음** — service_role 전용
+- pg_cron `business-docs-purge` 가 `purge-business-docs` Edge Function 을 호출해 실제 삭제
+- ⚠️ storage remove 실패 행은 큐에 남아 **조용히 무한 재시도**한다. 자기 치유되지 않는 실패(경로 부재·권한 변경)면 파기 의무가 무기한 미이행인데 관측 수단이 없다(0032 §9.2)
+
+### app.business_purge_config
+
+위 배치가 부를 Edge Function 주소와 공유 시크릿. `id boolean` 싱글턴(행 1개 강제).
+
+| 컬럼 | 타입 | Null | 기본값 | 설명 |
+|---|---|---|---|---|
+| id | boolean | NO | `true` | PK — 싱글턴 강제 |
+| function_url | text | NO | | `purge-business-docs` 엔드포인트 |
+| trigger_secret | text | NO | `encode(gen_random_bytes(24),'hex')` | `x-purge-secret` 헤더로 전달 |
+
+- **RLS on, 정책 없음** — service_role 전용. 시크릿을 담으므로 노출 경로가 없어야 한다
+
 ### pg_cron 스케줄 잡
 
 | 잡 이름 | 스케줄 | 동작 |
@@ -1273,9 +1416,27 @@ SELECT pr.id AS user_id, pr.nickname, pr.user_type, p.created_at,
 
 ---
 
+### 6.7. `v_facility_review_comment_feed` — 시설 후기 댓글 피드
+
+시설 후기의 댓글 목록. 작성자 표시를 뷰가 담당한다 — 업체 모드 댓글은 **상호**로,
+개인은 닉네임으로. 간이 회원(`status='lite'`)이 쓴 후기의 작성자는 `app.mask_phone`
+으로 일부만 가려 보여 준다.
+
+- `security_invoker`, anon/authenticated SELECT
+- 차단 필터 포함(`app.is_blocked_pair`) — 뷰 3종과 같은 축
+- 앱: `FacilityReviewRepository.fetchComments`
+
+> ⚠️ 이 뷰를 포함해 피드 뷰들은 수정 시 **본문을 통째로 다시 붙여넣는** 방식으로
+> 관리돼 왔다(`v_post_feed` 8회·`v_chat_rooms` 10회 재정의). 차단 필터는 가장 마지막
+> 정의에만 있으므로, 다음 수정이 이전 본문을 복사하면 조용히 사라진다.
+> `replay_check` 는 스냅샷↔리플레이 *일치*만 보므로(양쪽 다 빠지면 통과) 이 회귀를
+> 잡지 못한다 — pgTAP 커버리지도 0이다(0031 §7 후속 항목).
+
+---
+
 ## 7. 데이터베이스 함수(RPC)
 
-public 스키마에 **54개**의 함수가 있다(PostGIS 확장 함수 제외, 이벤트 트리거 함수 `rls_auto_enable` 포함).
+public 스키마에 **108개**의 함수가 있다(PostGIS 확장 함수 제외, 이벤트 트리거 함수 `rls_auto_enable` 포함) — 클라이언트 호출 가능 79개 + service_role 전용 29개. 2026-08-04 실측.
 거의 전부 `SECURITY DEFINER` + `SET search_path` 고정. 실행 권한(EXECUTE) 관점에서 두 부류로 나뉜다 — §10 참조:
 
 - **클라이언트 호출 가능(anon/authenticated EXECUTE)**: 일반 RPC.
@@ -1335,6 +1496,32 @@ public 스키마에 **54개**의 함수가 있다(PostGIS 확장 함수 제외, 
 
 #### `session_alive() → boolean` (SECURITY INVOKER)
 - `app.uid() is not null`. 클라이언트가 토큰 유효성(만료/버전 불일치/정지)을 가볍게 확인하는 핑.
+
+#### `withdraw_account() → void` [SD]
+- 탈퇴. 행을 지우지 않고 **익명화**한다 — `username='del_<10자>'`, 닉네임 `탈퇴회원<10자>`, 비밀번호 `'!'`(검증 불가 sentinel), 전화·주소·좌표·프로필 이미지 전부 NULL, `status='deleted'`, `token_version+1`(전 세션 즉시 무효). 지우기 전에 `app.withdrawn_users` 에 (user_id, username, phone) 을 남겨 **재가입 쿨다운**에 쓰고, 그 보관분은 30일 뒤 `withdrawn-users-purge` 크론이 지운다.
+- 행을 남기는 이유: 게시글·댓글·후기의 FK 와 대화 상대 표시가 깨지지 않게 하기 위함. 남는 건 식별 불가능한 껍데기다.
+
+#### `switch_account_mode(p_mode) → text` [SD]
+- `personal`/`business` 만 허용. business 로 가려면 **승인된** `business_profiles` 가 있어야 한다(`business_not_approved`). `users.active_mode` 를 바꾼다 — 이후 작성물의 `authored_as` 스탬프와 각종 `assert_*_actor()` 게이트가 이 값을 본다.
+
+#### `block_user(p_blocked, p_reason?) → void` [SD]
+- 차단. `user_blocks` upsert + 신고 접수에 더해 **관계 자체를 끊는다**(2026-08-04 확장, 0032 §2): 팔로우 양방향 삭제, 그리고 공유 채팅방의 `last_read_message_id` 를 방 끝으로 밀어 안읽음 카운트를 정리한다.
+- 팔로우를 지우는 이유: 남겨 두면 크론이 그 사람에게 `pawing_new_post` 를 계속 보내고(알림 필터가 막긴 하지만), 차단 해제 시 예전 팔로우가 되살아난다. 안읽음을 미는 이유: `v_chat_rooms` 가 차단 상대 방을 목록에서 빼므로 **열어서 읽을 방법이 없어져** 배지가 영구히 남는다.
+- 자기 차단(`cannot_block_self`)·없는 사용자(`user_not_found`)는 P0001.
+
+#### `reconcile_my_unread_counts() → void` [SD]
+- 본인 `unread_chat_count`·`unread_notification_count` 를 원본에서 재계산(`app.reconcile_unread_counts`). 알림 하드 삭제(회수 트리거)·차단 등으로 캐시가 어긋날 수 있어 **로그인 시 안전망**으로 호출한다.
+
+#### `public_user_pets(p_user) → TABLE` / `pet_guardians_of(p_pet) → TABLE` [SD]
+- 프로필 화면용 공개 조회. 전자는 그 사용자가 보호 중인 펫 목록(삭제 펫 제외, owner 우선 정렬, 보호자 수 포함), 후자는 그 펫의 보호자 목록(탈퇴·비활성 사용자 제외, owner 우선). 둘 다 SECURITY DEFINER 라 RLS 를 우회하지만 **공개해도 되는 컬럼만** 고른다.
+
+#### `record_auth_log(p_user, p_ip_hash) → void` [SD][svc]
+- 로그인 성공 기록을 `app.auth_logs` 에 남긴다. IP 는 원본이 아니라 해시(빈 문자열은 NULL).
+
+#### `signup_lite_user(p_phone, p_privacy_consent) → uuid` [SD][svc]
+- 간이 후기 계정 생성/조회 — `signup-lite` Edge Function 전용. **같은 번호는 항상 같은 계정**을 돌려준다.
+- 동의(`privacy_consent_required`)와 **`purpose='review'` 전화 인증 30분 이내**(`phone_not_verified`)를 요구한다. purpose 를 `signup` 과 분리한 이유: `send-phone-code` 가 signup 목적은 이미 가입된 번호를 거부하는데, 간이 후기는 정식 회원도 쓸 수 있어야 한다.
+- 정지·탈퇴 계정은 이 경로로 되살릴 수 없다(`account_unavailable`). username/nickname 은 자동 생성값이고 표시는 `app.mask_phone` 이 담당한다.
 
 ### 7.2. Refresh Token 회전 (모두 [SD][svc] — 서버만 호출)
 
@@ -1399,6 +1586,15 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 #### `can_manage_post_applicants(p_post) → boolean` [SD]
 - `app.is_post_manager()` 위임 — 클라이언트가 "지원자 관리 버튼" 노출 여부 판단용.
 
+#### `update_my_post(p_post, p_title, p_content, p_scheduled_at, p_image_*, p_edit_image, ...) → void` [SD]
+- 본인 글만(`not_owner`), 제목·내용 필수. **그 글에 `completed` 약속이 하나라도 있으면 수정이 잠긴다**(`appointment_completed`) — 거래가 끝난 뒤 내용이 바뀌면 후기·신고의 근거가 사라지기 때문. `edited_at` 스탬프.
+
+#### `post_edit_locked(p_post) → boolean` [SD]
+- 위 잠금 여부를 UI 가 미리 묻는 용도. 저장 버튼을 눌러야 알 수 있으면 사용자가 헛수고를 한다.
+
+#### `create_post_share_link(p_post) → TABLE(token, expires_at)` [SD]
+- visible 글에 대해 30일짜리 공유 토큰 발급. **유효한 기존 링크가 있으면 재사용**(재호출로 이미 퍼진 링크가 죽지 않게). 발급 시 `app.funnel_events` 에 `post_share` 기록.
+
 ### 7.5. 지역·지도 (Region / Map)
 
 #### `feed_region_codes() → text[]` [SD]
@@ -1443,6 +1639,13 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 #### `facility_review_by_id(p_review) → TABLE(..., is_mine, visit_no, has_incentive)` [SD]
 - 후기 단건 조회(행 모양은 `facility_reviews_of` 와 동일) — `review_comment` 알림 딥링크용. visible 만, `visit_no` 는 목록과 동일하게 형제 시설 범위에서 계산.
 
+#### `facility_sibling_ids(p_id) → uuid[]` [INV]
+- 같은 장소인데 별도 행으로 등록된 **형제 시설**을 모아 준다 — 50m 이내이면서 (이름 동일 | 전화 동일 | 이름 포함 관계) 인 것들. 후기·업체 매칭·QR 공유가 전부 이 배열을 기준으로 판정한다.
+- 이 함수만 `SECURITY INVOKER` 다. `facilities` 는 전체 공개 SELECT 라 우회할 RLS 가 없고, definer 로 만들면 호출자 권한과 무관하게 도는 통로가 하나 더 생긴다.
+
+#### `review_owner_switch_hint(p_review) → boolean` [SD]
+- "이 후기, 사장님 계정으로 답글 다시겠어요?" 힌트용. 지금 **개인 모드**인데 승인 업체를 갖고 있고 그 업체가 후기 대상 시설(형제 포함)의 주인일 때만 true.
+
 ### 7.7. 채팅·디바이스
 
 #### `start_direct_chat(p_other) → uuid` [SD] (**authenticated 전용** EXECUTE)
@@ -1456,6 +1659,13 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 
 #### `register_device_token(p_token, p_platform, p_device_name?) → void` [SD] (**authenticated 전용**)
 - 로그인 필수, 토큰 10자 미만 거부(`invalid_token` P0001). `device_tokens` 를 token 유니크로 upsert — **다른 계정이 쓰던 토큰이면 현 사용자로 소유권 이전**, `is_active=true`, failure_count 리셋.
+
+#### `leave_chat_room(p_room) → void` [SD]
+- `left_at` 을 찍고 읽음 포인터를 방 끝으로 밀어 안읽음을 0으로 만든다. **고객센터(`admin_inquiry`) 방은 나갈 수 없다.** 멤버가 아니면 `not_a_member`.
+- 나간 방에는 아무도 새 메시지를 못 넣는다 — `trg_chat_messages_block_left`(§8.3)가 막는다.
+
+#### `release_device_token(p_token) → void` [SD]
+- 로그아웃 시 본인 기기 토큰 비활성화. **소유자 행만** 끄고, 남의 토큰을 지정해도 0행 갱신으로 조용히 끝난다 — 오류를 내면 "이 토큰이 누구 것인지" 를 확인해 주는 열거 통로가 된다.
 
 ### 7.8. 푸시 알림 파이프라인 (모두 [SD][svc])
 
@@ -1494,13 +1704,71 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - `admin_list_logs(p_limit=100, p_offset=0)` — 감사 로그 조회(최대 200).
 - `admin_create_facility_share_link(p_facility, p_days=365) → TABLE(token, expires_at)` — 매장 QR 미리보기 공유 링크 발급(0028 §3). 같은 시설의 유효 링크가 있으면 **그 토큰을 재사용**(재호출로 기존 인쇄 QR 이 무효화되지 않게). 시설 미존재 시 `facility not found`.
 - `admin_revoke_share_link(p_token) → boolean` — 링크 회수(오배포·유출 대응). 회수분은 share-view 가 404 로 응답.
+- `admin_create_starter_share_link(p_business, p_days=365)` — 스타터 키트 QR 발급(0028 §1.3). **승인 업체 + `sales`/`production` 허가 승인** 둘 다 있어야 한다(`starter_license_required`). 유효 링크 재사용.
+- `admin_broadcast_system_notice(p_title, p_body)` — 전체 공지를 `system_notice` 알림으로 일괄 INSERT. **정지·휴면 회원도 받는다**(약관 개정 고지는 이용 중지와 무관하게 도달해야 한다) — 제외 대상은 `deleted` 뿐. 제목 80자·본문 1000자 상한.
+- `admin_ops_metrics() → json` — 운영 원가·활동 지표. SMS 9원/AI 20원 단가를 넣어 사진 검증·전화 인증 건수로 비용을 추정하고, 리프레시 토큰·메시지·댓글·글·하트를 합쳐 활성 사용자를 KST 기준 일자로 집계한다.
+- `admin_photo_verification_failures(p_limit=50, p_offset=0)` — 사진 검증 **실패분**만 최신순(최대 200). fail_reason·ai_reason·지역일치·매칭점수·purpose 를 함께 준다 — AI 게이트 오탐률을 눈으로 재는 창구(펫 신원 섀도 운영).
+- `admin_location_usage_logs(p_user, ...)` — 특정 사용자의 위치 이용·제공 기록 열람(위치정보법 §16 대응, §8.10 이 쌓는 것).
+- `admin_client_errors(p_where?, ...)` / `admin_client_error_summary(p_hours=24)` — 클라이언트 오류 원본 조회와 지점(`where_key`)별 집계(건수·영향 사용자 수·마지막 발생). 수집은 `record_client_error`(§7.12).
+- `admin_list_business_applications(p_status?, p_track?, p_auto_only?, ...)` / `admin_set_business_status(p_user, p_status, p_reason?)` — 업체 신청 심사 큐와 승인/거절. 거절에는 **사유가 필수**(`reason_required`), 같은 상태로의 재설정은 `no_change` 로 막는다(감사 로그 오염 방지).
+- `admin_list_business_licenses(p_status?, ...)` / `admin_review_business_license(p_license, p_status, p_reason?)` — 영업 허가증 심사. 승인은 **업체 프로필이 이미 approved 여야** 가능하다 — 허가만 먼저 통과해 자격이 앞서 나가는 걸 막는다.
+- `admin_set_match_rule(p_key, p_weight?, p_enabled?, p_params?)` — 업체 자동매칭 가중치 조정(`business_match_rules`). before/after 를 `admin_logs` 에 남긴다 — 매칭 결과가 바뀌었을 때 "언제 무엇을 돌렸는지" 가 유일한 단서라서.
 
 ### 7.9.1. 공유 뷰어 RPC (모두 [SD][svc] — `share-view` Edge Function 전용, anon/authenticated EXECUTE 없음)
 
 - `share_view_load(p_token) → jsonb` — 링크 검증(`not_found`/`expired`/`ok`) + kind 별 본문 조회 + 계측(view_count 원자 증가, funnel `share_view`)을 단일 왕복으로. `facility_preview` 는 시설 요약 + **인증 업체 대표 사진·영업시간**(형제 시설 범위 승인 업체 lateral, 콜드스타트 완화) + 최근 후기 3건(visible 만, `has_incentive`·사진 최대 2장 포함). `care_report` 는 리포트(pet_label·kind·photos·body·note·업체 상호) 반환 — 뷰어가 미용/돌봄 제목·알림장 필드(식사·배변 등)를 분기 렌더. app 스키마가 PostgREST 미노출이라 Edge Function 도 이 RPC 를 경유한다.
 - `share_view_click(p_token) → boolean` — 유효 링크일 때만 funnel `store_click` 기록(스토어 302 직전 호출).
 
-### 7.10. 기타
+### 7.10. 업체 계정 (Business)
+
+설계 정본은 pmdb `0025.md`·`0028.md`. `business_profiles` 는 RLS 가 SELECT 하나뿐이라(§9) 등록·수정·승인이 전부 여기를 지난다.
+
+#### `apply_business_profile(p_user, p_b_no, ...) → jsonb` [SD][svc]
+- 업체 신청 접수 + **자동 매칭 채점**. `apply-business` Edge Function 이 국세청 상태 조회를 마친 뒤 호출한다(그래서 svc 전용).
+- `business_match_rules` 의 규칙별 가중치(전화 일치, 상호 유사도 상/중, 지역 일치, 주소 유사도, 업종 일치)를 합산해 임계값과 비교 → 자동 승인 / 심사 대기(`track`) 로 갈린다. 동점 후보가 여럿이면 자동 승인하지 않는다.
+- 규칙은 DB 값이라 배포 없이 조정 가능하고, 조정 이력은 `admin_set_match_rule` 이 남긴다.
+
+#### `apply_business_license(p_type, p_license_no, p_document_path) → uuid` [SD]
+- 영업 허가증 제출(`grooming`/`boarding`/`sales`/`production` 등 `app.biz_license_type`). **업체 프로필이 pending 또는 approved 일 때만**(`biz_profile_required`), 허가번호 4–40자, 그리고 **문서 경로가 `<본인 uid>/` 로 시작해야 한다** — 남의 폴더 경로를 적어 증빙을 가로채는 걸 막는다.
+
+#### `my_business_licenses() → TABLE` [SD]
+- 본인 허가 신청 목록(상태·거절사유·심사일시).
+
+#### `update_my_business_info(p_storefront_name?, p_phone?, p_email?, p_hours?)` / `set_my_business_photo(p_url, p_align_y)` [SD]
+- 둘 다 `app.assert_business_actor()` — **업체 모드로 전환한 상태**여야 하고 프로필이 approved 여야 한다. NULL 인자는 기존 값 유지(`coalesce`). 영업시간 문자열은 100자 상한.
+- 사진은 `business_profiles` 와 매칭된 `facilities` 행에 **동시 반영**된다 — 지도에서 보는 대표 사진이 곧 이 값이라 한쪽만 바뀌면 화면이 갈라진다. `align_y` 는 −1..1 로 클램프.
+
+#### `business_doc_purge_take(p_limit=200)` / `business_doc_purge_done(p_ids)` [SD][svc]
+- 증빙 서류 파기 큐의 인출/완료 표시. `purge-business-docs` Edge Function 이 크론에 깨어나 호출한다.
+- `take` 는 꺼내기 전에 **아직 살아 있는 신청이 참조하는 경로를 큐에서 지운다** — 재신청으로 같은 파일을 다시 쓰게 된 경우 파기하면 안 되기 때문. 한 번에 최대 500건.
+
+### 7.11. 케어 리포트·접종 (0028)
+
+미용/돌봄 업체가 보호자에게 보내는 알림장. 수신자는 **회원이 아닐 수 있어** 전화번호를 HMAC(`app.phone_hmac`)으로만 들고 있다가, 나중에 그 번호로 가입하면 본인 것으로 끌어간다.
+
+- `create_care_thread(p_pet_label, p_recipient_phone?) → uuid` [SD] — 돌봄(호텔) 스레드 개설. `app.has_license('boarding')` 필수(`license_required`), 라벨 50자 이내.
+- `create_boarding_report(p_thread, p_photos, p_body, p_note?)` [SD] — 스레드에 알림장 추가(사진 최대 4장, 식사·배변 등 구조화 `body`). 본인 스레드만(`thread_not_found`).
+- `create_care_report(p_pet_label, p_photos, p_note?, p_recipient_phone?)` [SD] — 미용 단건 리포트. `has_license('grooming')` 필수, 사진 1–4장.
+- `my_received_care_reports(p_limit, p_offset)` [SD] — **보호자 쪽** 조회. `claim_care_reports` 로 끌어온 내 리포트 목록(보낸 업체 상호 포함).
+- `my_care_threads(...)` / `my_care_reports(...)` / `care_thread_reports(p_thread, ...)` [SD] — 업체 쪽 목록 조회. 스레드 목록은 리포트 수·대표 사진·보관 기한 초과 여부(`app.care_config.boarding_archive_days`)를 함께 준다.
+- `claim_care_reports() → integer` [SD] — **가입 후 끌어오기**. 내 전화번호 HMAC 과 일치하는 미청구 리포트를 전부 내 것으로 표시하고, 표시하는 즉시 **HMAC 을 NULL 로 지운다**(더 이상 필요 없는 식별자는 남기지 않는다). 건수만큼 `system_notice` 알림. 자기 업체가 보낸 건 제외.
+- 청구되지 않은 채 링크가 만료되거나 30일이 지난 HMAC 은 `care-report-hmac-purge` 크론이 지운다(§3).
+
+**접종 일정** — `app.vaccination_events` 를 다루는 세 개. 전부 **보호자 검증**(`not_guardian`)을 먼저 한다.
+- `set_vaccination_schedule(p_pet, p_events jsonb, p_source?)` [SD] — 미완료 일정을 지우고 다시 깔아 준다(최대 40건, `p_source` 는 `onboarding`/`manage`). 완료(`done_at`) 표시된 건은 보존한다.
+- `my_vaccination_events(p_pet)` [SD] — 예정일 순 조회.
+- `set_vaccination_done(p_event, p_done) → boolean` [SD] — 완료/해제 토글. 보호자가 아니면 0행 갱신 → false.
+- 알림은 크론 `vaccine-reminder-sweep` 이 KST 기준 오늘·내일 예정건에 대해 보낸다(§3).
+
+### 7.12. 기타
+
+#### `record_client_error(p_where, p_message, p_stack?, p_platform?, p_release?, p_extra?) → void` [SD] (**anon 포함 공개**)
+- 클라이언트 오류 수집(0031). 공개 함수라 방어가 본체다:
+  - 필수 인자가 비면 **조용히 return** — 오류 보고가 예외를 던지면 원래 오류를 덮는다.
+  - 레이트리밋 2단: 개별 30/분 + 익명 전역 300/분. 1단을 통과한 요청만 전역에 세므로 한 소스가 예산을 독식하지 못한다.
+  - 익명 식별은 **`cf-connecting-ip` 만** 쓴다. `x-forwarded-for` 는 맨 왼쪽이 클라이언트 주장값이라 위조하면 버킷이 무한 생성된다. 헤더가 없으면 폴백하지 않고 공용 버킷으로 떨어뜨린다 — **폴백이 곧 우회로**다.
+  - 과대 페이로드는 버리지 않고 **잘린 사실과 앞부분을 남긴다**.
+- 조회는 관리자 RPC(`admin_client_errors`, `admin_client_error_summary`).
 
 #### `rls_auto_enable() → event_trigger` [SD]
 - DDL 이벤트 트리거 함수: public 스키마에 `CREATE TABLE` 류가 실행되면 **자동으로 해당 테이블 RLS 를 활성화**. "RLS 켜는 걸 잊는" 실수 방지 가드레일. 이 함수를 실행하는 이벤트 트리거의 이름은 **`ensure_rls`**(ddl_command_end).
@@ -1509,7 +1777,11 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 
 ## 8. 트리거
 
-public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마, 39개 트리거 함수)가 걸려 있다. 공통 트리거 `trg_*_updated`(BEFORE UPDATE, `app.tg_set_updated_at`)는 applications, appointments, business_profiles, chat_messages, chat_room_members, device_tokens, notification_preferences, notifications, pets, posts, reports, review_category_counts, users 13개 테이블에서 `updated_at := now()` 를 자동 세팅한다. 나머지를 테이블별로 설명한다.
+비내부 트리거는 **77개** — public 76 + `app.business_licenses` 1. 정의 함수는 전부 `app` 스키마이고 고유 함수는 60개다(여러 테이블이 같은 함수를 공유한다: `tg_set_updated_at`, `tg_block_business_actor`, `tg_log_location_usage`, `comments_set_authored_as`).
+
+공통 트리거 `tg_set_updated_at`(BEFORE UPDATE)은 13개 테이블에서 `updated_at := now()` 를 세팅한다 — applications, appointments, chat_messages, chat_room_members, device_tokens, notifications, pets, posts, reports, users(이름 `trg_<테이블>_updated`), notification_preferences·review_category_counts(`trg_..._upd`), `app.business_licenses`(`trg_business_licenses_updated`). **`business_profiles` 에는 없다** — `updated_at` 컬럼은 있지만 갱신은 RPC 가 직접 한다.
+
+나머지를 테이블별로 설명한다.
 
 ### 8.1. `applications` (지원)
 
@@ -1520,6 +1792,8 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 | `trg_applications_on_accept` | AFTER UPDATE | `tg_applications_on_accept` | 수락 시 매칭 확정 처리 |
 | `trg_notify_application` | AFTER INSERT | `tg_notify_application` | 글 작성자에게 `post_application` 알림 |
 | `trg_notify_application_accepted` | AFTER UPDATE | `tg_notify_application_accepted` | 수락 시 지원자에게 `application_accepted` 알림 |
+| `trg_applications_block_business` | BEFORE INSERT | `applications_block_business_mode` | 지원자의 `users.active_mode='business'` 면 `business_mode_not_allowed` |
+| `trg_applications_block_business_update` | BEFORE UPDATE | `tg_block_business_actor` | 업데이트 시 `app.assert_personal_actor()` — 업체 모드 세션의 상태 변경 차단 |
 
 - **block_insert 검증 순서**: ① 게시글 존재 ② 본인 글 지원 금지 ③ 삭제글 금지 ④ `progress_status='recruiting'` 아닐 때 금지 ⑤ `free` 카테고리 금지 ⑥ 지원자가 그 글에 붙은 펫의 보호자면 금지 ⑦ 글에 비활성 펫 포함 시 금지 ⑧ **adoption(입양) 글**이면 `offered_pet_id` 필수 + 그 펫이 존재·active·지원자가 owner 여야 함, 그 외 카테고리는 `offered_pet_id` 금지. 모든 위반은 한국어 메시지의 P0001 예외.
 - **on_accept (pending→accepted 전이 시에만)**:
@@ -1537,6 +1811,7 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 | `trg_appointments_pet_busy` | BEFORE INSERT | `tg_appointments_pet_busy_check` | 같은 펫의 중복 scheduled 약속 차단 |
 | `trg_appointments_before_update` | BEFORE UPDATE | `tg_appointments_before_update` | 상태 전이 검증: `scheduled → completed|cancelled` 만 허용, terminal 상태 변경 금지, completed 시 `completed_at` 자동 세팅 |
 | `trg_appointments_after_update` | AFTER UPDATE | `tg_appointments_after_update` | 완료/취소 후속 처리 |
+| `trg_appointments_block_business` | BEFORE INSERT/UPDATE | `tg_block_business_actor` | `app.assert_personal_actor()` — 업체 모드로는 약속 생성·변경 불가 |
 
 - **after_update**:
   - `scheduled→completed`: 게시글 `matched→completed`, application `accepted→completed`. 카테고리가 **give_away(분양)** 면 글의 펫 보호자 전원 삭제 후 지원자를 owner 로 등록 + `primary_guardian_id` 이전. **adoption(입양)** 이면 `offered_pet` 을 글 작성자에게 동일 방식으로 이전. → **소유권 이전이 DB 에서 원자적으로 일어남**.
@@ -1547,6 +1822,8 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 - `trg_chat_messages_after_insert` (AFTER INSERT): 미리보기(`content` 100자 또는 '[사진]')로 방의 `last_message_*` 갱신 → 발신자 제외 멤버들의 `users.unread_chat_count+1` → 멤버별 `chat_message` 알림 INSERT(제목=발신자 닉네임, 본문=미리보기) — 이 알림 INSERT 가 다시 푸시 웹훅을 유발.
 - `trg_chat_messages_soft_delete_ts` (BEFORE UPDATE): `is_deleted` false→true 시 `deleted_at := now()`.
 - `trg_chat_messages_after_softdelete` (AFTER UPDATE): 삭제된 메시지가 방의 마지막 메시지면 미리보기를 "삭제된 메시지입니다." 로 교체.
+- `chat_messages_block_blocked` (BEFORE INSERT): 방의 **다른 멤버와 차단 관계**(방향 무관)면 "차단된 상대와는 메시지를 주고받을 수 없어요" 예외. 이 트리거는 `user_blocks` 를 직접 조인한다 — `app.is_blocked_pair()` 도입 전 정의라 조건이 중복돼 있다(0032 §2 의 정리 대상이었으나 동작이 동일해 그대로 뒀다).
+- `trg_chat_messages_block_left` (BEFORE INSERT): 방에 `left_at` 이 찍힌 멤버가 하나라도 있으면 "상대가 채팅방을 나가 메시지를 보낼 수 없어요" 예외.
 - `trg_chat_members_read` (BEFORE UPDATE, chat_room_members): `last_read_message_id` 변경 시 ① 그 메시지가 **같은 방** 메시지인지 검증(아니면 예외) ② (old, new] 구간의 상대 발신·미삭제 메시지 수만큼 `users.unread_chat_count` 를 감산(음수 방지). `(created_at, id)` 튜플 비교로 동시각 메시지도 정확히 처리.
 
 ### 8.4. `comments`
@@ -1554,6 +1831,8 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 - `trg_comments_count` (AFTER INSERT/UPDATE): INSERT 시 `posts.comment_count+1`(미삭제일 때), soft delete 전환 시 -1, 복원 시 +1.
 - `trg_comments_soft_delete_ts` (BEFORE UPDATE): 삭제 전환 시 `deleted_at` 세팅.
 - `trg_notify_comment` (AFTER INSERT): 글 작성자에게 `post_comment` 알림(본인 댓글 제외, 실패 무시).
+- `trg_comments_authored_as` (BEFORE INSERT, `comments_set_authored_as`): 작성자의 `users.active_mode` 를 `authored_as` 로 스탬프(NULL 이면 `personal`). 나중에 모드를 바꿔도 **작성 시점의 정체성이 고정**된다.
+- `trg_comments_block_check` (BEFORE INSERT, 2026-08-04 신설): 글 작성자와 차단 관계(`app.is_blocked_pair`)면 예외. 종전에는 차단해도 상대 글에 댓글이 달렸다(0032 §2).
 - `trg_audit_comments` (AFTER UPDATE): **관리자가** 삭제로 전환한 경우에만 `admin_logs` 에 `delete_comment` 기록.
 
 ### 8.5. `posts`
@@ -1569,13 +1848,21 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 - `trg_posts_block_trader` (BEFORE INSERT / UPDATE OF category, `tg_posts_block_trader`) — **영업자 공통 차단선(0028 §2)**: 승인된 `business_profiles` 보유 계정은 `adoption`/`give_away` 작성·카테고리 변경 불가. 활성 모드 무관(개인 모드 전환 우회 봉쇄) — 업체 모드는 `trg_posts_authored_as`(알파벳순 선행)가 이미 news 로 강제. 미인증 영업자는 운영 정책(신고·모니터링) 담당. 적용 전 기존 위반 2건은 grandfather. pgTAP: t08.
 - `trg_posts_deleted_at` (BEFORE INSERT/UPDATE): `visibility_status like 'deleted_%'` 면 deleted_at 세팅, 아니면 NULL 로 클리어.
 - `trg_posts_validate_transition` (BEFORE UPDATE): 상태기계 강제 — visibility: `visible→hidden_by_user|hidden_by_admin|deleted_by_user|deleted_by_admin`, `hidden_by_user→visible|deleted_by_user`, `hidden_by_admin→visible|deleted_by_admin`, deleted_* 는 terminal. progress: `recruiting→matched|cancelled`, `matched→completed|recruiting`, completed/cancelled 는 terminal. 위반 시 예외.
+- `trg_posts_authored_as` (BEFORE INSERT, `posts_set_authored_as`): 작성 시점의 `active_mode` 를 `authored_as` 로 고정하고, 업체 모드면 카테고리를 `news` 로 강제한다. 이름이 알파벳순으로 앞서 `trg_posts_block_trader` 보다 **먼저** 돈다.
 - `trg_audit_posts` (AFTER UPDATE): 관리자가 hidden_by_admin/deleted_by_admin 으로 바꿀 때 `admin_logs`(hide_post/delete_post) 기록.
+- `log_location_usage` (AFTER INSERT, `tg_log_location_usage('post')`, **WHEN `actual_lat` 또는 `actual_lng` 가 NOT NULL**): 위치정보법 §16 이용·제공 기록을 `app.location_usage_logs` 에 남긴다(§8.10).
 
 ### 8.6. `post_hearts` / `post_views` / `post_pets`
 
 - `trg_post_hearts_count` (AFTER INSERT/DELETE): `posts.heart_count` ±1 (음수 방지).
 - `trg_post_views_count` (AFTER INSERT): `posts.view_count+1`.
+- `trg_post_hearts_block_check` (BEFORE INSERT, 2026-08-04 신설): 글 작성자와 차단 관계면 예외 — 좋아요도 접촉이다(0032 §2).
+- `trg_post_hearts_recall` (AFTER DELETE): 좋아요를 취소하면 아직 **안 읽은** `post_heart` 알림을 지운다. 읽은 알림은 남긴다(이미 본 사실을 지우지 않는다).
 - `trg_post_pets_giveaway_limit` (BEFORE INSERT): 글 작성자가 그 펫의 보호자가 아니면 차단("본인이 보호 중인 반려동물만 연결 가능"); give_away 글은 **owner 역할 + 정확히 1마리**만 연결 가능.
+- `trg_notify_pet_in_post` (AFTER INSERT): 그 펫의 **다른 공동보호자들**에게 `pet_in_post` 알림. 같은 글에 대해 중복 발송하지 않는다.
+- `trg_post_pets_bump_verify_count` (AFTER INSERT): 글 카테고리가 `walk_together/walk_proxy/care/give_away` 면 `pets.verify_post_count+1` — 사진 검증을 거친 글에 등장한 횟수로, 펫 신뢰 표시의 재료.
+
+> `post_pets` 는 2026-08-03 부터 클라이언트 직접 쓰기가 **REVOKE** 돼 있다(0032 §3). 위 트리거들은 이제 RPC 경유 INSERT 에만 걸린다.
 
 ### 8.7. `pets` / `pet_guardians` / `pet_guardian_invites`
 
@@ -1595,19 +1882,40 @@ public 테이블에 **52개 트리거**(정의 함수는 모두 `app` 스키마,
 - `trg_reviews_validate` (BEFORE INSERT): 약속 존재 + `status='completed'` 필수, reviewer/reviewee 가 정확히 약속 당사자 쌍(양방향)이어야 함, categories 배열 중복 금지.
 - `trg_reviews_aggregate` (AFTER INSERT): 카테고리별로 `review_category_counts` upsert(+1) — 프로필의 "받은 평가" 집계.
 - `trg_notify_review` (AFTER INSERT): 상대에게 `review_received` 알림.
+- `trg_reviews_block_business` (BEFORE INSERT, `tg_block_business_actor`): `app.assert_personal_actor()` — 업체 모드로는 후기 작성 불가.
+- `trg_reviews_grant_pet_trust` (AFTER INSERT): 후기가 달리면 그 약속을 `trust_awarded=true` 로 **한 번만** 표시하고(조건부 UPDATE 라 중복 지급이 안 된다), 성공했을 때만 그 글에 연결된 펫들의 `trust_score+1`.
 - `facility_reviews_aggs` (AFTER INSERT/UPDATE/DELETE, `app.tg_facility_review_aggs`): 내부에서 `app.refresh_facility_aggs()` 를 호출해 시설의 `review_count`/`avg_rating`(소수1자리) 재계산.
+- `trg_notify_facility_review` (AFTER INSERT, facility_reviews): 후기가 달린 시설을 **승인된 업체 계정**이 갖고 있으면 그 사장에게 `facility_review_received` 알림. 대상 판정에 `public.facility_sibling_ids()` 를 써서 같은 장소의 중복 등록(형제 시설)까지 포괄한다.
+- `trg_facility_review_recall` (AFTER UPDATE, facility_reviews): 후기가 `visible` 에서 벗어나면(숨김·삭제) 아직 **안 읽은** `facility_review_received` 알림을 회수(§8.10).
+- `trg_frc_authored_as` / `trg_frc_soft_delete_ts` / `trg_notify_review_comment` (facility_review_comments): 각각 작성 모드 스탬프, soft delete 시각 세팅, 후기 작성자에게 `review_comment` 알림(본인 댓글 제외, **알림 실패는 삼킨다** — 댓글 자체는 남는다).
+- `trg_pawings_recall` (AFTER DELETE, pawings): 팔로우를 끊으면 안 읽은 `pawing_follow` 알림 회수(§8.10).
 - `trg_notifications_push` (AFTER INSERT, `app.on_notification_push`): `push_status='pending'` 이고 무음이 아니면 `app.push_config` 의 URL 로 `net.http_post`(헤더 `x-push-secret`) — Edge Function 즉시 기동.
 - `trg_notifications_read_ts` (BEFORE UPDATE): 읽음 전환 시 `read_at` 세팅.
 - `trg_notifications_unread_count` (AFTER INSERT/UPDATE): `users.unread_notification_count` 증감 캐시 유지.
+- `trg_notifications_block_filter` (BEFORE INSERT, 2026-08-04 신설): 수신자와 행위자가 차단 관계면 **`NULL` 을 반환해 알림을 조용히 버린다**(예외가 아니다 — 알림 실패가 원 동작을 되돌리면 안 되므로). 알림 생성 지점이 10곳이 넘어 발신부마다 조건을 다는 대신 마지막 관문 한 곳에 뒀다(0032 §2).
 - `trg_audit_reports` (AFTER UPDATE): 관리자의 신고 상태 변경을 `admin_logs`(update_report_status, before/after) 기록.
 
-또한 DB 수준 **이벤트 트리거** `ensure_rls`(ddl_command_end → `public.rls_auto_enable()`, §7.10)가 걸려 있어 public 에 새 테이블이 생기면 RLS 가 자동 활성화된다.
+### 8.10. 가로지르는 두 패턴
+
+**① 알림 회수(recall).** 원 행동을 되돌리면 **아직 안 읽은** 알림만 지운다 — `trg_post_hearts_recall`(좋아요 취소), `trg_pawings_recall`(팔로우 해제), `trg_facility_review_recall`(후기 숨김·삭제). 읽은 알림을 남기는 건 의도된 것이다: 이미 본 사실을 사후에 지우면 이용자 기록이 어긋난다. 회수는 `notifications` 를 **하드 삭제**하므로 `users.unread_notification_count` 와 어긋날 수 있다 — 보정은 `app.reconcile_unread_counts()`.
+
+**② 위치 이용 기록.** 같은 함수 `app.tg_log_location_usage(purpose)` 가 세 테이블에 붙어 `app.location_usage_logs` 에 (user_id, purpose) 를 남긴다 — 위치정보법 §16 의 이용·제공사실 기록 의무를 DB 레벨에서 이행한다. purpose 는 트리거 인자로 주입된다.
+
+| 테이블 | 시점 | WHEN | purpose |
+|---|---|---|---|
+| `location_verifications` | AFTER INSERT | 없음(항상) | 동네 인증 |
+| `posts` | AFTER INSERT | `actual_lat` 또는 `actual_lng` NOT NULL | 게시글 |
+| `photo_verifications` | AFTER INSERT | `shot_lat` 또는 `shot_lng` NOT NULL | 사진 검증 |
+
+`WHEN` 절이 붙은 두 개는 **좌표가 실제로 저장될 때만** 기록한다 — 좌표 없이 지역코드만 쓰는 경로까지 위치 이용으로 세면 기록이 부풀려져 이용내역 열람이 오히려 부정확해진다.
+
+또한 DB 수준 **이벤트 트리거** `ensure_rls`(ddl_command_end → `public.rls_auto_enable()`, §7.12)가 걸려 있어 public 에 새 테이블이 생기면 RLS 가 자동 활성화된다.
 
 ---
 
 ## 9. RLS 정책
 
-public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISSIVE, 대상 롤은 public(storage 는 authenticated). 판별은 전적으로 `app.uid()` / `app.is_admin()` / `app.is_*` 헬퍼에 의존하므로 **JWT 없이(anon) 접근하면 `app.uid()=NULL` 이 되어 "내 것" 조건이 모두 false** 가 된다.
+public 스키마 **76개** + storage **7개** = 총 83개 정책(2026-08-04 실측). 전부 PERMISSIVE, 대상 롤은 public(storage 는 authenticated). 판별은 전적으로 `app.uid()` / `app.is_admin()` / `app.is_*` 헬퍼에 의존하므로 **JWT 없이(anon) 접근하면 `app.uid()=NULL` 이 되어 "내 것" 조건이 모두 false** 가 된다.
 
 ### 테이블별 요약
 
@@ -1616,7 +1924,8 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 | `admin_logs` | 관리자만 | — | — | — |
 | `applications` | 지원자 본인 또는 글 관리자(`is_post_manager`) | 본인 명의만(`applicant_id=uid`) | 지원자 본인 또는 글 관리자 | — |
 | `appointments` | 당사자(글 소유측/지원자) 또는 관리자 | — (트리거가 생성) | 당사자 또는 관리자 (WITH CHECK 동일) | — |
-| `business_profiles` | 전체 공개 | 본인 또는 관리자 | 본인 또는 관리자 | — |
+| `business_profiles` | **본인 행만**(`user_id=uid`) — 관리자도 REST 로는 못 본다 | — | — | — |
+| `business_match_rules` | 관리자만 | — | — | — |
 | `chat_message_deletions` | 본인 것만 | 본인 명의만 | — | — |
 | `chat_messages` | 방 멤버 또는 관리자 | 본인 발신 + 방 멤버일 때만 | **관리자만** (일반 사용자는 메시지 수정/삭제 불가 — 관리자 RPC 로만 soft delete) | — |
 | `chat_room_members` | 본인 행, 같은 방 멤버, 관리자 | 본인 등록 또는 관리자 | 본인 행만(읽음 포인터 갱신용) | — |
@@ -1625,6 +1934,7 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 | `device_tokens` | ALL: 본인 것만 (SELECT/INSERT/UPDATE/DELETE 일괄) | | | |
 | `facilities` | 전체 공개 | — | — | — |
 | `facility_cache` | 전체 공개 | 관리자 | 관리자 | 관리자 |
+| `facility_review_comments` | 미삭제 전체 또는 관리자(삭제 포함) | 본인 명의만 | 본인 또는 관리자 | — |
 | `facility_reviews` | visible 리뷰 전체 + 본인 리뷰(숨김 포함) | — (RPC 전용) | — | — |
 | `location_verifications` | 본인 또는 관리자 | 본인 명의만 (실제로는 svc RPC 사용) | — | — |
 | `notification_preferences` | ALL: 본인 것만 | | | |
@@ -1648,72 +1958,117 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 - **삭제는 대부분 soft delete**: comments/chat_messages/posts/facility_reviews 는 DELETE 정책이 없거나 관리자 전용이고, `is_deleted`/`visibility_status` 갱신으로 처리한다.
 - **정지 계정 처리**: `users_select` 가 suspended 를 숨기고, `app.uid()` 자체가 active 만 인정하므로 정지 즉시 모든 권한이 소멸한다.
 - INSERT 가 막힌 테이블(appointments, notifications, facility_reviews 등)은 SECURITY DEFINER RPC/트리거만 쓸 수 있다.
+- **`business_profiles` 는 정책이 SELECT 하나뿐이다** — 업체 정보를 남에게 보여 주는 건 테이블이 아니라 SECURITY DEFINER 뷰(`public_profiles`, `v_post_feed`, `v_chat_rooms`, `v_comment_feed`)이고, 등록·수정·승인은 전부 RPC(`apply_business_profile`, `update_my_business_info`, `set_my_business_photo`, `admin_set_business_status`)다. 관리자 조회조차 RPC(`admin_list_business_applications`)를 거친다 — 컬럼 권한 때문에 테이블 직접 노출을 피한 것(§10).
 
-### storage.objects 정책 (버킷 `media`)
+### storage.objects 정책 7개
 
 | 정책 | 대상 | 내용 |
 |---|---|---|
 | `media owner insert` | authenticated INSERT | `bucket_id='media'` 이고 **경로 첫 폴더명 = 본인 uid** 일 때만 업로드 (`storage.foldername(name)[1] = app.uid()::text`) |
 | `media owner update` | authenticated UPDATE | 동일 조건 — 자기 폴더 안 객체만 |
 | `media owner delete` | authenticated DELETE | 동일 조건 — 자기 폴더 안 객체만 |
+| `media lite review insert` | authenticated INSERT | 자기 폴더의 **두 번째 칸이 `facility_review` 일 때만**, 판별은 `app.uid_lite()`. 간이 회원용 좁은 통로(2026-08-04, 0032 §1.1) |
+| `business docs owner insert` | authenticated INSERT | `bucket_id='business-docs'` + 자기 폴더 |
+| `business docs owner select` | authenticated SELECT | 자기 폴더 안 객체만 읽기 |
+| `business docs admin select` | authenticated SELECT | `app.is_admin()` — 심사용 전체 열람 |
 
-즉 파일 경로 규약은 `media/<user_id>/...` 이고, 쓰기·수정·삭제는 자기 폴더로 한정된다. SELECT 정책은 없다(공개 버킷이라 public URL 로 읽음, §11).
+- `media` 경로 규약은 `media/<user_id>/<category>/...`, 쓰기·수정·삭제는 자기 폴더로 한정된다. **`media` 에는 SELECT 정책이 없다** — 공개 버킷이라 public URL 로 읽는다(§11).
+- `business-docs` 는 비공개 버킷이라 SELECT 정책이 실제 열람 통제로 작동한다 — 본인과 관리자만.
+- **`business-docs` 에는 DELETE 정책이 없다.** 증빙 파기는 사용자가 아니라 `purge-business-docs` Edge Function 이 service_role 로 수행한다(§3.8 큐 + pg_cron).
 
 ---
 
 ## 10. 컬럼 권한 및 함수 실행 권한
 
-### 10.1. users 테이블 — 컬럼 단위 SELECT/UPDATE (핵심 프라이버시 장치)
+RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **컬럼**까지 볼 수 있나" 는
+컬럼 단위 GRANT 가 정하고, `users`·`posts`·`pets` 세 테이블이 그걸 쓴다. 아래는
+2026-08-04 `information_schema.column_privileges` 실측이다.
 
-`users` 는 **테이블 수준 SELECT/UPDATE/INSERT 권한이 회수**되어 있고(authenticated 에는 REFERENCES/TRIGGER/TRUNCATE 만 잔존), 필요한 컬럼에만 컬럼 단위 GRANT 가 있다. 이로써 RLS 로는 막을 수 없는 **컬럼 숨김**을 구현했다.
+### 10.1. users — 컬럼 단위 SELECT/UPDATE (핵심 프라이버시 장치)
+
+`users` 는 **테이블 수준 SELECT/UPDATE/INSERT 권한이 회수**되어 있고(authenticated 에는 REFERENCES/TRIGGER/TRUNCATE 만 잔존), 필요한 컬럼에만 컬럼 단위 GRANT 가 있다.
 
 | 권한 | anon | authenticated |
 |---|---|---|
-| SELECT | id, nickname, user_type, profile_image_url, profile_image_thumbnail_url, address, is_location_verified, created_at | 왼쪽 + last_verified_at |
+| SELECT | id, nickname, user_type, profile_image_url, profile_image_thumbnail_url, address, is_location_verified, created_at | 왼쪽 8개 + **last_verified_at, active_mode** |
 | UPDATE | — | nickname, profile_image_url, profile_image_thumbnail_url, profile_image_mime_type, profile_image_file_size, push_enabled |
 
-- **`username`(로그인 ID), `phone`, `password_hash`, `latitude`/`longitude`(정확 좌표), `token_version`, `status`, `region_code`, 미읽음 카운트 등은 SELECT 불가.** → username 은 관리자 RPC(`admin_list_users`)와 SECURITY DEFINER 함수 내부에서만 접근된다. **검증 완료: username 은 컬럼 GRANT 로 숨겨져 있음.**
-- 일반 사용자가 UPDATE 할 수 있는 것도 닉네임/프로필 이미지/푸시 on-off 뿐 — user_type, status, is_location_verified 등은 클라이언트가 직접 조작 불가(RPC/트리거 전용).
+- **`username`(로그인 ID), `phone`, `password_hash`, `latitude`/`longitude`(정확 좌표), `token_version`, `status`, `region_code`, 미읽음 카운트 등은 SELECT 불가.** username 은 관리자 RPC(`admin_list_users`)와 SECURITY DEFINER 함수 내부에서만 닿는다.
+- 일반 사용자가 UPDATE 할 수 있는 건 닉네임/프로필 이미지/푸시 on-off 뿐이다. `user_type`·`status`·`is_location_verified`·`active_mode` 는 전부 RPC/트리거 전용 — 특히 `active_mode` 는 SELECT 는 되지만 UPDATE 는 안 된다(`switch_account_mode` 가 승인 여부를 확인한 뒤에만 바꾼다).
 
 ### 10.2. posts / pets — 컬럼 단위 권한
 
-`posts` 도 테이블 수준 SELECT/INSERT/UPDATE 가 없고 컬럼 GRANT 로 제한된다:
+`posts` 도 테이블 수준 SELECT/INSERT/UPDATE 가 없다:
 
-- **SELECT (anon/authenticated 동일)**: id, category, title, content, user_id, 각종 image_*, scheduled_at, display_address, display_lat, display_lng, is_location_hidden, location_radius_m, region_code, heart/comment/view_count, progress_status, visibility_status, created/updated/deleted_at.
-  → **`actual_lat`/`actual_lng`(실제 좌표), `photo_verification_id`, `ai_pet_species`, `is_pet_verified` 는 조회 불가.** 위치는 display_* 만 공개.
-- **INSERT (authenticated)**: category, title, content, scheduled_at, image_*, user_id 만 — 좌표/지역/검증 필드는 직접 넣을 수 없고 `create_post_verified` RPC + 트리거가 채운다.
-- **UPDATE (authenticated)**: 다수 컬럼 허용(진행/가시성 상태 포함 — 단 상태 전이는 트리거가 검증).
+- **SELECT (anon/authenticated 동일, 29컬럼)**: id, category, title, content, user_id, authored_as, 각종 image_*, scheduled_at, display_address, display_lat, display_lng, is_location_hidden, location_radius_m, region_code, heart/comment/view_count, progress_status, visibility_status, created/updated/edited/deleted_at.
+  → **`actual_lat`/`actual_lng`(정확 좌표), `photo_verification_id`, `ai_pet_species`, `is_pet_verified` 는 조회 불가.** 위치로 나가는 건 display_* 뿐이다.
+- **INSERT (authenticated, 11컬럼)**: category, title, content, scheduled_at, image_*, user_id 만 — 좌표/지역/검증 필드는 직접 못 넣고 `create_post_verified` RPC + 트리거가 채운다.
+- **UPDATE (authenticated, 23컬럼)**: 위 SELECT 집합에서 카운터(heart/comment/view_count)와 `authored_as`·`edited_at` 을 뺀 나머지. 진행/가시성 상태도 들어 있지만 전이 자체는 `trg_posts_validate_transition` 이 검증한다.
+
+> **2026-08-04 회수**: UPDATE 그랜트에 `actual_lat`/`actual_lng` 가 남아 있어, 인증 사용자가
+> 자기 글에 PATCH 로 **정확 좌표를 써 넣을 수** 있었다(읽지는 못하지만 DB 에는 남는다).
+> 그렇게 들어온 값은 `log_location_usage` 가 AFTER **INSERT** 라 위치 이용 기록에도 안 남고,
+> 어떤 뷰·RPC 로도 노출되지 않아 **아무도 모른 채 쌓인다** — "수집하지 않는다" 고 공지한 값이
+> 조용히 저장될 수 있는 상태였다. 앱에 해당 컬럼 참조가 없고 실제 저장 행도 0건임을 확인한
+> 뒤 `20260804140000` 으로 회수했다. 값을 채우는 `create_post_verified` 는 SECURITY DEFINER
+> 라 이 그랜트가 필요 없다.
 
 `pets`:
 - **SELECT**: 전체 프로필·AI 판정 컬럼 공개(anon 포함).
-- **INSERT (authenticated)**: 기본 프로필 컬럼 + primary_guardian_id 만 — `identity_verified`, `ai_*`, `pet_match_count` 등은 직접 설정 불가.
-- **UPDATE (authenticated)**: 프로필 컬럼 + pet_status 만.
+- **INSERT (authenticated, 14컬럼)**: 기본 프로필 컬럼 + `primary_guardian_id` 만 — `identity_verified`, `ai_*`, `pet_match_count`, `trust_score`, `verify_post_count` 는 직접 설정 불가(트리거·RPC 가 올린다).
+- **UPDATE (authenticated, 14컬럼)**: 프로필 컬럼 + `pet_status`. `primary_guardian_id` 는 INSERT 에만 있고 UPDATE 에는 **없다** — 소유권 이전은 트리거/RPC 만 할 수 있다.
 
-기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용). 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
+기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용). `post_pets` 는 2026-08-03 부터 쓰기 3종이 REVOKE 됐다(0032 §3). 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
 
-### 10.3. 함수 EXECUTE 권한 (proacl 기준)
+### 10.3. 함수 EXECUTE 권한 (2026-08-04 실측, PostGIS 제외 108개)
 
-**service_role 전용 (anon/authenticated EXECUTE 없음— 서버/Edge Function 만 호출 가능):**
+| 부류 | 개수 | 뜻 |
+|---|---|---|
+| service_role 전용 | 29 | 서버(Edge Function)·크론만 호출 |
+| authenticated 만 | 69 | 로그인 필요 |
+| anon 포함 | 10 | 로그인 전에도 호출 가능 |
 
-`_push_pref_allows`, `bump_token_version`, `change_password_and_rotate`, `change_password_svc`, `enroll_pet_identity`, `login_issue_refresh`, `push_dispatch_batch`, `push_report`, `rate_limit_hit`, `record_location_verification`, `record_photo_verification`, `reset_password_user`, `rt_issue`, `rt_revoke_family`, `rt_revoke_user`, `rt_rotate`, `set_pet_ai_reference`, `signup_user` — **18개**. 토큰 발급/회전, 가입, 비밀번호 재설정, 검증 기록, 푸시 파이프라인 등 신뢰 경계 밖에 노출하면 안 되는 함수가 전부 잠겨 있다.
+**service_role 전용 29개** — 토큰 발급·회전, 가입, 비밀번호, 검증 기록, 푸시 파이프라인, 업체 심사 접수, 공유 뷰어처럼 신뢰 경계 밖에 두면 안 되는 것들:
+`_push_pref_allows`, `apply_business_profile`, `bump_token_version`, `business_doc_purge_done`, `business_doc_purge_take`, `change_password_and_rotate`, `dong_centroid_seeds`, `enroll_pet_identity`, `get_login_user`, `get_password_hash`, `login_issue_refresh`, `push_dispatch_batch`, `push_report`, `rate_limit_hit`, `record_auth_log`, `record_location_verification`, `record_photo_verification`, `reset_password_user`, `rls_auto_enable`, `rt_issue`, `rt_revoke_family`, `rt_revoke_user`, `rt_rotate`, `set_pet_ai_reference`, `share_view_click`, `share_view_load`, `signup_lite_user`, `signup_user`, `update_password_hash`.
 
-**authenticated + service_role (anon 불가):** `register_device_token`, `start_direct_chat`.
+**anon 포함 10개** — `check_username_available`(로그인 전 필요), `session_alive`, 시설 조회 5종(`facilities_search`, `facilities_within`, `facility_all_categories`, `facility_review_by_id`, `facility_reviews_of`, `facility_sibling_ids`), `record_client_error`(§7.12), 그리고 `block_user`.
+- `block_user` 가 anon 목록에 있는 건 **그랜트가 필요 이상으로 넓은 것**이다. 함수 첫 줄이 `app.uid()` NULL 이면 42501 을 던지므로 실제 위험은 없지만, 의도한 대상은 authenticated 다.
 
-**anon 포함 호출 가능:** `login_user`, `check_username_available`(로그인 전 필요) 및 나머지 일반 RPC(admin_* 포함). 단 `admin_*` 계열은 함수 본문 첫 줄의 `app.is_admin()` 체크로 42501 을 던지므로 실질적으로 관리자 전용이다. `app` 스키마 함수들은 클라이언트 롤에 스키마 USAGE 가 없어 직접 호출 경로가 없다.
+**`admin_*` 계열은 anon 이 아니라 authenticated 전용**이고, 그 위에 함수 본문 첫 줄의 `app.is_admin()` 체크가 42501 `forbidden` 을 던진다 — 권한 판정을 그랜트가 아니라 본문에 둔 이유는 §7.9 참조.
+
+`app` 스키마 함수들은 클라이언트 롤에 스키마 USAGE 자체가 없어 직접 호출 경로가 없다.
 
 ---
 
 ## 11. Storage
 
-### 버킷
+### 버킷 (2026-08-04 실측)
 
 | id | public | file_size_limit | allowed_mime_types |
 |---|---|---|---|
 | `media` | **true (공개)** | 제한 없음(NULL) | 제한 없음(NULL) |
+| `business-docs` | false (비공개) | 10,485,760 (10MB) | `image/jpeg`, `image/png`, `image/webp`, `application/pdf` |
 
-- 버킷은 하나(`media`)뿐이며 **공개 버킷**이다 — 업로드된 객체는 public URL 로 누구나 읽을 수 있다(프로필/게시글/채팅 이미지, 시설 리뷰 사진, 펫 신원 프레임 등).
-- 쓰기 통제는 §9 의 storage.objects 정책 3개: 경로 규약 `media/<user_id>/...` 아래에서만 본인(authenticated + `app.uid()`)이 INSERT/UPDATE/DELETE 가능. anon 은 업로드 불가.
-- 참고: 파일 크기·MIME 제한이 버킷 레벨에 없으므로 검증은 앱/서버 계층 책임이다. 또한 공개 버킷 특성상 URL 을 아는 누구나 원본(예: 사진 검증 원본, 펫 신원 프레임)을 볼 수 있다는 점은 운영상 유의 사항.
+- `media` 는 **공개 버킷**이다 — 업로드된 객체는 public URL 로 누구나 읽을 수 있다(프로필/게시글/채팅 이미지, 시설 후기 사진·영상, 펫 신원 프레임 등). 경로 규약은 `<user_id>/<category>/<파일>`.
+- `business-docs` 는 비공개이며 업체 증빙 서류 전용. 파기는 `app.business_doc_purge_queue` + pg_cron `business-docs-purge`(§3.8).
+
+### storage.objects RLS 정책 7개
+
+| 정책 | cmd | 대상 |
+|---|---|---|
+| `media owner insert` / `update` / `delete` | INSERT/UPDATE/DELETE | `media` 아래 **자기 폴더**(`app.uid()`) |
+| `media lite review insert` | INSERT | 자기 폴더의 **`facility_review/` 한 칸만**, `app.uid_lite()` 기준(2026-08-04 신설) |
+| `business docs owner insert` / `owner select` | INSERT/SELECT | `business-docs` 아래 자기 폴더 |
+| `business docs admin select` | SELECT | `business-docs` 전체, `app.is_admin()` |
+
+- `media` 의 **공개 읽기 정책은 없다.** 공개 버킷이라 읽기는 정책이 아니라 버킷 속성으로 열린다 — 초기에 있던 `media public read` 는 이후 마이그레이션이 drop 했다.
+- `media lite review insert` 가 별도로 필요한 이유: 다른 정책은 전부 `app.uid()` 기준이라 **`status='lite'` 인 간이 회원은 후기 사진을 올릴 수 없었다**(0032 §1.1). 범위를 `facility_review/` 로 좁혀 열었다.
+
+> ⚠️ **알려진 위험 두 가지.**
+> ① `media` 에 크기·MIME 제한이 없고, `enroll-pet-identity`·`verify-post-photo` 가
+> **클라이언트가 보낸 `mimeType` 을 그대로 `contentType` 으로 저장**한다 → 공개 CDN 에
+> 임의 파일을 올릴 통로가 된다(0032 §9.2, 미조치).
+> ② 공개 버킷이라 URL 을 아는 누구나 원본(사진 검증 원본·펫 신원 프레임)을 볼 수 있다.
 
 ## 12. Realtime
 
@@ -1727,6 +2082,14 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 - 두 테이블 모두 전 컬럼이 발행되며 row filter 는 없다 — 수신 범위 제한은 **RLS 로 강제**된다(chat_messages 는 방 멤버만, notifications 는 본인 것만 SELECT 가능하므로 Realtime 도 그 범위만 전달됨).
 - 그 외 테이블(posts, comments 등)은 Realtime 발행 대상이 아니다 — 폴링/재조회 방식.
 
+> ⚠️ **2026-08-04까지 `notifications` 는 마이그레이션에 없었다.** 운영에는 있었지만
+> 어느 시점에 직접 추가된 것이라, **마이그레이션만으로 세운 DB(CI·재해복구·스테이징)
+> 에서는 앱의 알림 구독이 오류 없이 조용히 아무 이벤트도 못 받았다** — 구독은 성공으로
+> 보이는데 벨 배지·알림 목록·포그라운드 알림이 전부 죽는다. publication 은 데이터베이스
+> 레벨 객체라 `pg_dump -n public -n app` 대조 밖이어서 리플레이 CI 도 못 잡았다.
+> `20260804120000` 으로 남겼고, 이제 `supabase/schema/outofband.txt` 가 함께 대조된다
+> (0032 §6.3).
+
 ---
 
 ### 부록: 오류 코드 관례
@@ -1738,8 +2101,17 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 
 ## 13. 마이그레이션 이력
 
-이 저장소에서 관리하는 마이그레이션 77개 (적용 순서 = 파일명 타임스탬프). 설명은 각 파일의 헤더 주석 첫 줄.
-`20260603*` 이전의 기반 스키마는 Supabase 프로젝트에 이미 적용되어 있으며 이 저장소 범위 밖이다.
+이 저장소가 관리하는 마이그레이션 **192건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+`20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
+
+> ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
+> 에는 MCP `apply_migration` 이 적용한 **시각**이 들어가 있어 파일명과 다르다. 재현의
+> 정본은 **파일명 순서**이고(리플레이 CI 가 그렇게 쌓는다), 이력 테이블은 참고용이다.
+> `supabase db push` 는 쓰지 않는다(README).
+>
+> 파일명이 겹치는 쌍이 둘 있다 — `20260716120000`(business_hours / facility_review_comments),
+> `20260718090000`(notification_polish / sibling_match_relax). 글롭 사전순이 결정적이고
+> 대상 객체가 겹치지 않아 무해하지만, 버전 문자열이 유일하다는 전제는 깨져 있다.
 
 | 버전 | 파일명 | 내용 |
 |---|---|---|
@@ -1818,12 +2190,120 @@ public 스키마 **73개** + storage **3개** = 총 76개 정책. 전부 PERMISS
 | `20260701170000` | `push_delivery_core` | 푸시 발송 파이프라인(사장님 스캐폴딩 완성): device_tokens/notification_preferences/ |
 | `20260701170500` | `push_delivery_triggers` | 푸시 발송 트리거링: (1) notifications insert 시 즉시 pg_net 으로 send-push 호출(단건, 저지연), |
 | `20260701180000` | `chat_message_notifications` | 채팅 푸시: 채팅 메시지 insert 시 수신자(발신자 제외 룸 멤버)에게 'chat_message' 알림 생성. |
-| `20260702120000` | `facility_all_categories` | 같은 업체(이름+주소 동일)의 전체 카테고리 조회 RPC — 시설 상세용. |
-| `20260702130000` | `drop_dup_device_token_index` | device_tokens.token 중복 유니크 인덱스(`device_tokens_token_uq`) 제거 — `device_tokens_token_key`만 유지. |
-| `20260709170000` | `withdraw_and_consents` | 회원 탈퇴(withdraw_account: 익명화+분리보관 30일 cron 파기) + 가입 약관 동의 기록(terms_agreed_at/marketing_opt_in). |
-| `20260710090000` | `argon2id_password_hashing` | 비밀번호 해싱 bcrypt→argon2id(엣지 해싱). get_login_user/update_password_hash/get_password_hash 추가, signup·reset·rotate 는 해시 수신으로 변경, 평문 RPC(login_user 등) 드롭. |
-| `20260710120000` | `rt_rotate_lost_rotation_recovery` | 세션 소실 버그 수정: 회전 응답 유실 재시도를 탈취와 구분해 복구('recovered'). grace 모호참조 수정, 로그아웃 토큰 grace 부활 차단. |
-| `20260711120000` | `admin_ops_metrics` | 관리자 운영 지표 RPC: `admin_ops_metrics()`(AI 사진인증 건수·성공률·비용, Solapi 문자 건수·비용, DAU 오늘+14일), `admin_photo_verification_failures()`(AI 인증 실패 로그). is_admin 게이트 SECURITY DEFINER. |
-| `20260711130000` | `retention_purge_batch` | `app.cleanup_retention()` + pg_cron `retention-purge`(매일 03:23): phone_verifications 1일, location_verifications·photo_verifications 6개월, **삭제·탈퇴자 게시글 실좌표 스크럽**, **post_views(ip_hash) 3개월** 자동 파기. photo_verifications 는 pets/posts FK 참조로 미참조 행만 삭제·참조 행은 촬영 좌표만 스크럽(FK 위반→잡 전체 롤백 방지). posts 좌표 스크럽은 INSERT 전용 트리거·status 미변경이라 안전. |
-| `20260711140000` | `auth_logs` | 로그인 접속 로그 `app.auth_logs`(user_id·ip_hash·created_at, RLS 정책없음) + `public.record_auth_log()`(service_role, login 엣지펑션이 호출). 처리방침 §3 접속 로그·IP 3개월 보존 이행. cleanup_retention 에 auth_logs 3개월 파기 편입. |
-| `20260711150000` | `post_delete_scrub_coords` | `delete_my_post()`·`admin_set_post_visibility()` 가 삭제 전이 시 posts.actual_lat/lng 를 즉시 NULL 파기("지체 없이"). retention-purge 는 백스톱. |
+| `20260702120000` | `facility_all_categories` | 같은 업체(이름+주소 동일)가 공공데이터상 카테고리별 여러 행으로 존재(예: 동물병원이면서 |
+| `20260702130000` | `drop_dup_device_token_index` | device_tokens.token 에 unique 인덱스가 2개 존재(중복): 원래 UNIQUE 제약의 |
+| `20260703100000` | `update_my_post_and_schedule_notify` | 내 게시글 수정(제목/내용/약속일정) + 일정 변경 시 진행 중 지원자에게 알림. |
+| `20260703110000` | `post_edited_at_and_image_edit` | 게시글 수정 보강: (A) 수정됨 표기용 edited_at, (B) free/adoption 사진 편집. |
+| `20260703120000` | `pet_trust_score` | 펫 신뢰도(trust_score) 시스템. |
+| `20260705120000` | `revoke_anon_execute_write_admin_rpcs` | 로그인/관리자 전용 RPC 에서 anon(비로그인) 실행권한 제거. |
+| `20260709100000` | `pet_guardians_public_rpc` | 펫 공개 프로필의 보호자 목록(공동보호자 포함) 조회 RPC. |
+| `20260709150000` | `chat_leave_room` | 채팅방 나가기 (0033 후속): chat_room_members.left_at + 목록 제외 + 나가기 RPC. |
+| `20260709160000` | `chat_block_when_left` | 나간 채팅방 잠금: 한쪽이 나간(left_at) 방에는 누구도 새 메시지를 보낼 수 없다. |
+| `20260709170000` | `withdraw_and_consents` | 회원 탈퇴 + 가입 동의 기록 (법률 문서 정합 작업 후속). |
+| `20260710090000` | `argon2id_password_hashing` | 비밀번호 해싱을 bcrypt(pgcrypto) → argon2id(엣지펑션 해싱)로 전환. |
+| `20260710120000` | `rt_rotate_lost_rotation_recovery` | refresh 회전 유실 복구 — 세션 소실 버그 수정. |
+| `20260710150000` | `chat_new_room_after_leave` | 나간 뒤 다시 대화를 시작하면 새 채팅방 생성 (0033/0034 후속). |
+| `20260710180000` | `chat_rooms_profile_image` | 채팅 목록에 상대 프로필 사진 노출 — 타일 블러 배경용 (뷰 끝에 컬럼 추가). |
+| `20260710200000` | `notifications_delete_policy` | 본인 알림 삭제 허용 — 확인한 알림은 목록에서 제거(읽음 아카이빙 대신 삭제 UX). |
+| `20260711120000` | `admin_ops_metrics` | 관리자 운영 지표·비용 RPC (AI 사진인증 / Solapi 문자 / 일일 활성 사용자). |
+| `20260711130000` | `retention_purge_batch` | 위치정보/인증코드/접속기록 보존기간 경과분 자동 파기 |
+| `20260711140000` | `auth_logs` | 로그인 접속 로그 (개인정보 처리방침 §3: 접속 로그·IP 3개월 보존). IP 는 SHA-256 해시로만 저장. |
+| `20260711150000` | `post_delete_scrub_coords` | 게시글 삭제 시 실좌표 즉시 파기("지체 없이" — 사업계획서 §3.4 / 위치기반서비스 이용약관 제8조④). |
+| `20260712033510` | `location_usage_logs` | 위치정보 이용·제공사실 확인자료 자동 기록·파기 (위치정보법 제16조 제2항, |
+| `20260712041855` | `withdraw_purge_location_history` | 탈퇴(=위치정보 이용 동의 철회) 시 본인 위치 이력 즉시 파기. |
+| `20260712045112` | `admin_broadcast_system_notice` | 전체 공지 발송 RPC (약관·처리방침 개정 고지 등). |
+| `20260713112529` | `photo_verifications_purpose_pet_identity` | 반려동물 신원 인증(enroll-pet-identity) 실패도 photo_verifications 에 기록하기 위해 |
+| `20260713112812` | `photo_verifications_purpose_widen` | purpose varchar(10) → varchar(20): 'pet_identity'(12자) 수용. |
+| `20260713200335` | `create_post_region_gate` | create_post_verified v3 — 동네(지역) 인증 게이트 추가. |
+| `20260713201500` | `create_post_region_gate_overload12` | create_post_verified 12-파라미터 오버로드에도 동네 인증 게이트 적용. |
+| `20260713202000` | `drop_create_post_verified_9param` | create_post_verified 9-파라미터(구버전) 오버로드 제거 — 단일화. |
+| `20260713202500` | `posts_region_gate_trigger` | posts INSERT 최종 방어선 — 동네 인증 게이트를 트리거로. |
+| `20260713210000` | `leave_room_block_support` | 고객센터(admin_inquiry) 방은 나갈 수 없게 — leave_chat_room 게이트. |
+| `20260714000000` | `block_self_guardian_invite` | 자기 자신 공동보호자 초대 차단 (DB 백스톱). |
+| `20260714120000` | `business_account_core` | 업체(사업자) 계정 — 코어 스키마 (0025 §2·§3.3·§4). |
+| `20260714121000` | `business_apply_rpcs` | 업체 등록 신청 RPC + 계정 전환 RPC (0025 §4~§5). |
+| `20260714122000` | `business_admin_rpcs_withdraw` | 업체 승인 관리자 RPC + 규칙 튜닝 RPC + 탈퇴 연동 (0025 §6·§2.2·§3.3). |
+| `20260715090000` | `business_rows_retention_purge` | 업체 인증 '행 데이터' 보존기간 파기 (0025 §3.3 · 처리방침 §3 정합). |
+| `20260715100000` | `business_docs_purge_cron` | 업체 서류 파기 크론 연결 (0025 §3.3 · 운영점검주기 v1.2 의 "크론 연결 대기" 해소). |
+| `20260715120000` | `posts_authored_as` | 게시글 작성 모드 구분 (업체 프로필 분리 — "같은 계정, 분리된 프로필"). |
+| `20260715130000` | `business_info_edit_sync` | 승인 업체 정보 수정 + 지도(facilities) 동기화 (0025 후속 — 업체 프로필 분리 2차). |
+| `20260715140000` | `business_photo_map_hero` | 업체 대표 사진 → 지도 상세 히어로 (0025 후속 — 업체 프로필 분리 3차). |
+| `20260715160000` | `business_chat_context_public_fields` | 업체 채팅 분리(컨텍스트 축) + 공개 프로필 업체 필드 (0025 후속 — 프로필 분리 4차). |
+| `20260715170000` | `business_identity_privacy` | 개인↔업체 정체성 연결 차단 (0025 후속 — "어떤 사용자가 어떤 업체를 운영하는지 |
+| `20260715180000` | `comments_authored_as` | 댓글 작성 모드 분리 (0026 §5-1 해소) — 업체 모드로 단 댓글은 상호로 표시. |
+| `20260715190000` | `applications_block_business_mode` | 업체 모드의 매칭 흐름 차단 (0026 §5-2 해소). |
+| `20260715200000` | `business_face_always_public` | 업체 얼굴 상시 공개 (0026 §2 개정) — "일반 모드 = 업체 오프라인" 결합 해제. |
+| `20260715210000` | `business_photo_face` | 업체 얼굴의 프로필 사진 = 대표 사진 (0026 §2 보강). |
+| `20260715220000` | `facilities_owner_link` | 지도 시설 → 인증 업주 링크 (지도 상세 히어로 탭 → 업체 프로필 이동용). |
+| `20260715230000` | `facility_reviews_multiple` | 시설 후기 복수 작성 허용 + 방문 차수(visit_no) 표시. |
+| `20260716000000` | `posts_news_category` | 업체 소식(news) 카테고리 (0025 후속). |
+| `20260716010000` | `business_news_region_exempt` | 업체 소식(news)은 동네 인증 없이 작성 가능 — 지역은 사업장 주소 기준. |
+| `20260716090000` | `facilities_owner_definer` | 지도 시설 RPC 의 owner_user_id 가 앱에서 항상 NULL 이던 버그 수정. |
+| `20260716120000` | `business_hours` | 업체 영업시간 (자유 서식 한 줄, 예: "매일 10:00 - 20:00 (월 휴무)") |
+| `20260716120000` | `facility_review_comments` | 시설 방문 후기 댓글 — 게시글 댓글(comments) 문법 미러링. |
+| `20260716130000` | `facility_review_by_id` | 후기 단건 조회 RPC — 후기 댓글 알림(review_comment) 딥링크용. |
+| `20260716150000` | `block_own_facility_review` | 자기 업체 후기 금지 (0025/0026 후속) |
+| `20260717000000` | `pawing_context_and_news_region_fallback` | 업체 소식 피드 미노출 + 업체 팔로우 목록 미표시 수정 (0025 후속). |
+| `20260717010000` | `pawing_dual_face` | 두 얼굴(개인/업체) 독립 팔로우 (0025 후속). |
+| `20260717090000` | `facilities_owner_verified_at` | 지도 시설 RPC 에 업주 인증(승인) 시각 노출 — 인증 마커끼리 충돌 시 |
+| `20260717120000` | `multi_category_unify` | 다중 카테고리 업체 통합 (병원+미용 병행 등 — 같은 업체가 카테고리별 별도 행) |
+| `20260717121000` | `facilities_lateral_after_limit` | 20260717120000 후속 성능 보정 — 업주/평점 lateral 을 LIMIT 이후에. |
+| `20260717150000` | `engagement_notifications` | 참여 알림 3종: 게시글 하트(post_heart) · 포잉(pawing_follow) · |
+| `20260718000000` | `review_notification_wording` | 사용자 평가 → '후기' 용어 통일(앱 UI 변경과 동기화): 알림 문구 변경. |
+| `20260718010000` | `pawmate_face_separation` | Pawmate(나를 팔로우) 얼굴 분리 (0025 후속). |
+| `20260718065841` | `security_advisor_hardening` | Security advisor 급증 대응 (2026-07-18, advisor 99건 → 76건) |
+| `20260718071543` | `dong_centroid_seeds_service_only` | RPC 게이트 전수 감사(2026-07-18) 후속: dong_centroid_seeds 는 sync-dong-centroids |
+| `20260718090000` | `notification_polish` | 알림 문구 다듬기 + 업체 방문 후기 알림 신설 |
+| `20260718090000` | `sibling_match_relax` | 같은 업체(형제 행) 판정 보강 — 주소 정확 일치의 실데이터 함정 수정 |
+| `20260718091000` | `facilities_single_sibling_scan` | 20260718090000 후속 성능 보정 — 형제 스캔을 행당 한 번으로. |
+| `20260718120000` | `review_owner_switch_hint` | 후기 상세 딥링크 진입 시 '업체 모드로 전환할까요?' 제안 판정 |
+| `20260718150000` | `mode_action_guards` | 계정 모드별 행동 격리 (양방향) |
+| `20260718160000` | `pawing_new_post_face_filter` | pawing_new_post 얼굴 필터 복원. |
+| `20260718170000` | `delete_my_chat_message` | 채팅 메시지 삭제(본인 것만) — SECURITY DEFINER RPC. |
+| `20260718180000` | `chat_retention_admin_history` | 채팅 삭제 30일 유예 하드삭제 + 관리자 대화 내역 조회. |
+| `20260718190000` | `retention_restore_lost_purges` | cleanup_retention 유실 항목 복원. |
+| `20260719090000` | `sibling_match_name_contains` | 같은 업체(형제 행) 판정 3차 보강 — 이름이 다른 다중 카테고리 업체(댕댕즈 사례) |
+| `20260719091000` | `sibling_match_inline_perf` | 20260719090000 성능 보정 — 형제 판정의 st_dwithin 을 인라인해 gist 인덱스 사용. |
+| `20260719120000` | `search_dedupe_siblings` | 시설 검색 결과에서 같은 업장(형제 행) 중복 제거 |
+| `20260719150000` | `search_sibling_categories` | 검색 dedupe 대표 행에 형제 전체 카테고리 배열(categories) 노출 |
+| `20260719180000` | `public_profiles_counts` | public_profiles 뷰에 개인 얼굴 통계(받은 후기·Pawing·Pawmate) 추가 |
+| `20260719210000` | `public_user_pets` | 타 사용자 프로필의 반려동물 목록 — 공동보호(co_guardian) 펫 포함 |
+| `20260719230000` | `notify_pet_in_post` | 게시글에 공동보호 펫 등록 시 다른 보호자에게 알림 |
+| `20260720090000` | `pawing_suppress_pet_in_post` | pawing_new_post 억제 — 같은 게시글에 pet_in_post 가 이미 갔으면 중복 방지 |
+| `20260720100000` | `post_photo_any_pet_target` | 게시글 사진 인증: 촬영 대상을 '연결한 펫 중 아무나'로 완화. |
+| `20260722120000` | `check_nickname_available` | 닉네임 중복확인 RPC — 내정보 수정 실시간 선체크용. |
+| `20260722160000` | `share_viewer_p0` | 0028 P0 — 공유 뷰어 기반: share_links · funnel_events · 발급/회수 RPC |
+| `20260722180000` | `posts_block_trader` | 0028 §2 — 영업자 공통 차단선: 승인 업체 계정의 분양·입양 게시 금지 |
+| `20260722200000` | `review_incentive_disclosure` | 0028 §6 — 대가성 후기 표시 (표시광고법 경제적 이해관계 표시 의무) |
+| `20260722220000` | `business_licenses` | 0028 §1 — 업종 모듈 권한: business_licenses (계정당 업종별 증빙 1행) |
+| `20260722230000` | `funnel_retention_cron` | 퍼널 원시 이벤트 보존 1년 크론 (0028 §7 — "원시 이벤트 1년, 경과분 배치 삭제"). |
+| `20260722235000` | `share_view_hero` | share_view_load 에 인증 업체 대표 사진·영업시간 추가 (0028 §3 콜드스타트 완화) |
+| `20260723000000` | `share_view_review_photos` | share_view_load 후기에 사진 썸네일 추가 (0028 §3) |
+| `20260723001000` | `share_view_photo_first` | 공유 뷰어 후기 정렬: 사진 후기 우선 → 최신순 (0028 §3) |
+| `20260723002000` | `share_view_owner_verified` | share_view_load 에 owner_verified 플래그 추가 (0028 §3) |
+| `20260723010000` | `care_reports_p1` | 0028 P1 — 케어 리포트(미용 전후 사진) 서버: care_reports · 발행/목록/claim RPC |
+| `20260723030000` | `license_apply_with_registration` | 업종 인증을 업체 등록과 한 번에 신청 (0028 §1 보완) |
+| `20260724100000` | `boarding_journal_p2` | 0028 P2 — 위탁 알림장 서버: care_threads · 반복 발행 · 스레드 claim |
+| `20260724150000` | `starter_p3` | 0028 P3 — 분양 스타터: 스타터 QR 랜딩 · 접종 일정 알림 |
+| `20260724180000` | `media_video` | 영상 첨부 — 게시글(자유·소식) · 시설 후기 · 채팅 |
+| `20260725100000` | `post_share` | 게시글 공유 — 모든 카테고리 게시글을 공유 뷰어 링크로 (0028 §3 인프라 재사용) |
+| `20260726120000` | `share_view_post_id` | 공유 뷰어 → 웹앱 연결: post 분기에 게시글 id 노출 |
+| `20260727100000` | `lite_reviewer` | 간이 회원(lite) — 후기 작성 전용 비회원 계정 (0029 P0) |
+| `20260727170000` | `guest_facility_read` | 시설 조회 RPC 를 비로그인에 개방 (0029 후속) |
+| `20260728103000` | `photo_gate_post_milestones` | 게시글 사진 인증 게이트 — '신뢰도 3 이상 면제'에서 '펫별 1·4·10번째 글'로 변경. |
+| `20260728180000` | `device_tokens_web_platform` | 웹 푸시(Phase D) — device_tokens.platform 에 'web' 허용 |
+| `20260729070000` | `capture_prod_drift` | 운영 DB 드리프트 포착 — 마이그레이션 없이 직접 적용됐던 정의를 저장소로 되돌린다. |
+| `20260730090000` | `lock_post_after_appointment` | 약속이 완료된 게시글은 수정할 수 없다 |
+| `20260731080000` | `client_error_collection` | 클라이언트 오류 수집 — 외부 리포팅 서비스 대신 우리 DB 로 (0031) |
+| `20260801090000` | `client_error_ratelimit_per_ip` | record_client_error 보완 두 가지. |
+| `20260801100000` | `block_user` | 사용자 차단 — 실행 RPC + 피드 필터링 (App Store 1.2 대응) |
+| `20260801130000` | `block_chat_and_comments` | 차단 효력 확대 — 채팅(전송·목록)과 댓글 (App Store 1.2) |
+| `20260801140000` | `ratelimit_trusted_client_ip` | 익명 레이트리밋의 IP 출처를 x-forwarded-for → cf-connecting-ip 로 바꾼다. |
+| `20260803090000` | `token_release_and_reconcile_rpc` | 클라이언트가 부를 수 있어야 하는 두 가지를 public 으로 노출한다. |
+| `20260803180000` | `lite_token_scope` | 간이 후기 토큰의 권한 범위를 실제로 '후기만' 으로 좁힌다. |
+| `20260803181000` | `reset_password_consume_verification` | 비밀번호 재설정 인증을 **소진**시킨다 — 30분 재사용 창을 닫는다. |
+| `20260803182000` | `post_pets_revoke_direct_writes` | post_pets 직접 쓰기 권한 회수 — 사진 인증 게이트(1·4·10번째)의 우회로를 막는다. |
+| `20260803190000` | `block_severs_contact` | 차단이 실제로 연결을 끊게 한다 — 표시만 가리던 것을 접촉 자체 차단으로. |
+| `20260804090000` | `lite_account_phone_purge` | 간이 후기 계정의 전화번호 파기 — 이미 이용자에게 한 약속을 실제로 이행한다. |
+| `20260804120000` | `realtime_publication_notifications` | notifications 를 supabase_realtime publication 에 넣는다 — **운영에는 이미 있다.** |
+| `20260804140000` | `posts_revoke_actual_coords_update` | posts.actual_lat/lng 의 클라이언트 UPDATE 권한 회수 — 안 받겠다고 한 값이 조용히 저장될 수 있었다. |
