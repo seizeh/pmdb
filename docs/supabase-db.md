@@ -2088,7 +2088,13 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 - **INSERT (authenticated, 14컬럼)**: 기본 프로필 컬럼 + `primary_guardian_id` 만 — `identity_verified`, `ai_*`, `pet_match_count`, `trust_score`, `verify_post_count` 는 직접 설정 불가(트리거·RPC 가 올린다).
 - **UPDATE (authenticated, 14컬럼)**: 프로필 컬럼 + `pet_status`. `primary_guardian_id` 는 INSERT 에만 있고 UPDATE 에는 **없다** — 소유권 이전은 트리거/RPC 만 할 수 있다.
 
-기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용). `post_pets` 는 2026-08-03 부터 쓰기 3종이, `pet_guardian_invites` 는 2026-08-04 부터 INSERT 가 REVOKE 됐다(0032 §3·§7.6) — 둘 다 정책은 남겨 뒀다. 지금은 도달할 수 없지만 그랜트가 되살아나는 날에도 조건은 남아 있어야 한다. 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
+기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용).
+
+> ⚠️ **그랜트가 있다고 읽히는 건 아니다.** `dong_centroids`·`phone_verifications`·`photo_verifications` 는 **RLS 가 켜져 있고 정책이 0개**다 — 정책 없는 RLS 는 전면 거부이므로, SELECT 그랜트가 있어도 클라이언트는 **항상 0행**을 받는다(읽기는 전부 SECURITY DEFINER RPC 경유). 앱이 이 세 테이블을 직접 조회하는 곳은 없어 동작 문제는 없다.
+>
+> 다만 이 그랜트들은 **아무 일도 하지 않으면서 오해를 만든다.** 특히 `phone_verifications` 는 OTP 코드를 담으므로, 훗날 누군가 RLS 를 끄거나 "그랜트가 있으니 읽어도 되는 표" 로 착각하면 그 순간 열린다. 지우는 게 맞지만 동작이 안 바뀌는 정리라 별도 건으로 둔다.
+>
+> `app` 스키마 테이블 9개도 같은 상태(RLS on + 정책 0)인데 그쪽은 **의도한 그대로**다 — 스키마 USAGE 자체가 없어 클라이언트 경로가 아예 없고, service_role 만 접근한다. `post_pets` 는 2026-08-03 부터 쓰기 3종이, `pet_guardian_invites` 는 2026-08-04 부터 INSERT 가 REVOKE 됐다(0032 §3·§7.6) — 둘 다 정책은 남겨 뒀다. 지금은 도달할 수 없지만 그랜트가 되살아나는 날에도 조건은 남아 있어야 한다. 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
 
 ### 10.3. 함수 EXECUTE 권한 (2026-08-04 실측, PostGIS 제외 109개)
 
