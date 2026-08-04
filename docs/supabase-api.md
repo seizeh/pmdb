@@ -55,7 +55,7 @@
 - **`verifyAccess(token, secret)`** — 수동 검증: ① 3파트 구조 확인 ② 헤더 `alg === "HS256"` 고정 확인(alg-confusion/`none` 공격 방어) ③ HMAC 서명 검증 ④ `exp` 만료 확인. 실패 시 `null`, 성공 시 클레임 객체 반환.
 - **`bearer(req)`** — `Authorization: Bearer <token>` 파싱.
 - **`clientUa(req)`** — `user-agent`를 300자로 절단(refresh_tokens.user_agent 저장용, 비대화 방지).
-- **`clientIp(req)`** — 레이트리밋 키용 IP. 신뢰 프록시 헤더(`cf-connecting-ip` → `x-real-ip`) 우선, `x-forwarded-for` leftmost는 클라 주입 가능(스푸핑)이라 최후 폴백. 식별 불가 시 `null` → 호출부는 IP 버킷을 건너뜀(전역 'unknown' 버킷 오작동 방지). IP 제한은 보조 방어선일 뿐, 1차 방어는 스푸핑 불가한 토큰해시·계정 버킷.
+- **`clientIp(req)`** — 레이트리밋 키용 IP. **`cf-connecting-ip` 하나만 쓰고 폴백하지 않는다.** 이 헤더는 위조하면 Cloudflare 엣지가 요청 자체를 거부하고(에러 1000), 이 배포에서는 항상 붙는다 — 2026-08-01 ADR-0011 증상 4 실측, 2026-08-03 Edge Function 경로 재확인. 따라서 **IP 버킷은 '보조선' 이 아니라 실제로 지켜지는 상한이다.** `x-real-ip`/`x-forwarded-for` 폴백은 제거했다 — 폴백이 곧 우회로가 되기 때문이고(헤더 하나로 매 요청 다른 IP), DB 경로가 같은 이유로 이미 지웠다(`20260801140000_ratelimit_trusted_client_ip.sql`). 헤더가 없으면 `null` → 호출부는 IP 버킷을 건너뛰고, 스푸핑 불가한 1차 버킷(계정·토큰해시·전화번호)과 전역 상한이 받는다.
 - **`rateLimited(supabase, key, max, windowSeconds)`** — RPC `rate_limit_hit(p_key, p_max, p_window_seconds)` 1회 소모. `true`=제한 초과(차단). **리미터 자체 오류는 fail-open**(가용성 우선 — 로그인/갱신을 막지 않음). `rate_limit_hit`은 ~2% 확률로 만료행을 기회적으로 삭제(백스톱).
 - **`sha256Hex(input)`** — refresh 토큰 저장용 해시(원문 저장 금지).
 - **`randomToken(bytes=32)`** — 불투명 refresh 토큰 원문(256bit, `crypto.getRandomValues` → base64url).
