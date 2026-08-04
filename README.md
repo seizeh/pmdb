@@ -81,6 +81,27 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 쌓은 뒤 `pg_dump` 결과를 `schema.sql` 과 diff 한다. 어긋나면 실패하므로,
 마이그레이션 없이 운영 DB 에 직접 친 DDL 이나 갱신을 잊은 스냅샷도 같이 잡힌다.
 
+### public·app **밖** 객체 — `supabase/schema/outofband.txt`
+
+`pg_dump` 는 `-n public -n app` 으로 제한돼 있어 다음은 위 대조에 들어가지 않는다:
+
+- `supabase_realtime` 퍼블리케이션 멤버십 (realtime 구독이 실제로 도착하는지)
+- `storage.buckets` 설정 (공개 여부·용량·MIME 제한)
+- `storage.objects` RLS 정책 (**사용자 사진의 접근 제어**)
+- `cron.job` (**보존기간 파기 배치**)
+
+즉 "직접 친 DDL 을 즉시 잡는다" 는 보증이 사진 접근 제어와 파기 배치에는 **적용되지
+않았다.** 실제로 퍼블리케이션 드리프트가 하나 있었고(`notifications`, 20260804120000)
+그동안 아무도 몰랐다 — 마이그레이션만으로 세운 DB 에서는 알림 realtime 이 조용히
+죽는 상태였다.
+
+그래서 그 넷만 골라 텍스트로 뽑아 `outofband.txt` 에 두고(`dump_schema.sh` 가 생성),
+`replay` 잡이 리플레이 DB 와 대조한다. 스냅샷 DB 가 아니라 **커밋된 파일**과 대는
+이유는 `schema.sql` 에 이 객체들이 아예 없어서 복원해도 아무것도 안 생기기 때문이다.
+
+이 스키마들을 통째로 `pg_dump` 대상에 넣지 않는 이유: 확장·플랫폼이 만든 객체가
+대부분이고 소유자도 `supabase_admin` 이라 맨바닥 컨테이너에서 재현되지 않는다.
+
 ## Edge Functions
 
 | 함수 | 설명 | verify_jwt |

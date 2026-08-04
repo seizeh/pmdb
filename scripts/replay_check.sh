@@ -96,6 +96,30 @@ OUT_DIFF="${REPLAY_DIFF_OUT:-replay-diff.txt}"
 if diff -u "$WORK/a.sql" "$WORK/b.sql" > "$WORK/diff.txt"; then
   echo "✅ 리플레이 결과가 스냅샷과 일치 ($(wc -l < "$WORK/b.sql" | tr -d ' ') 줄)"
   : > "$OUT_DIFF"
+
+  # ── public·app 밖 대조 ────────────────────────────────────────────────────
+  # 여기는 스냅샷 DB 와 비교할 수 없다 — schema.sql 에 이 객체들이 없어서
+  # 복원해도 아무것도 안 생긴다. 그래서 **커밋된 파일(운영에서 뽑은 것)** 과
+  # 리플레이 DB 를 직접 댄다. baseline.sql 과 같은 성격의 생성물이다.
+  OOB_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../supabase/schema/outofband.txt"
+  if [ -f "$OOB_FILE" ]; then
+    echo "== 5b/5 퍼블리케이션·storage·cron 대조"
+    dump_outofband_to "$REPLAY_URL" "$WORK/oob_replay.txt"
+    if diff -u "$OOB_FILE" "$WORK/oob_replay.txt" > "$WORK/oob_diff.txt"; then
+      echo "✅ 퍼블리케이션·storage·cron 도 일치 ($(wc -l < "$WORK/oob_replay.txt" | tr -d ' ') 줄)"
+      exit 0
+    fi
+    cat "$WORK/oob_diff.txt" >> "$OUT_DIFF"
+    echo "❌ public·app **밖** 객체가 다름 — 스키마는 맞는데 여기서 갈렸다."
+    echo "   대상: supabase_realtime 퍼블리케이션 · storage 버킷/정책 · cron 잡"
+    echo "   · 운영에 직접 친 것이면 마이그레이션으로 남길 것"
+    echo "   · 마이그레이션이 맞다면 ./scripts/dump_schema.sh 로 스냅샷 갱신"
+    echo
+    echo "(-- 는 커밋된 파일=운영에만, ++ 는 리플레이 결과에만)"
+    cat "$WORK/oob_diff.txt"
+    exit 1
+  fi
+  echo "⚠️  supabase/schema/outofband.txt 가 없어 밖 객체 대조를 건너뜀"
   exit 0
 fi
 
