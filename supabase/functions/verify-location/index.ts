@@ -14,60 +14,20 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// 유료 외부 API 호출 상한 — 사용자당. 지역 인증(30일 주기)에서 부른다. 재시도를 감안해도 시간당 30 이면 넉넉하다.
+const API_MAX = 30;
+const API_WINDOW_SEC = 3600;
+
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const NAVER_KEY_ID = Deno.env.get("NAVER_MAP_KEY_ID");
 const NAVER_KEY = Deno.env.get("NAVER_MAP_KEY");
 
 const FAIL_LIMIT = 5; // 연속 실패 임계
 const BLOCK_MINUTES = 60; // 차단 시간(분)
-
-// base64url 디코딩 → 바이트
-function b64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-// 커스텀 로그인 JWT(HS256) 검증 → sub(uid). 실패 시 null.
-async function getUidFromJwt(req: Request, secret: string): Promise<string | null> {
-  const auth = req.headers.get("Authorization") ?? "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const parts = m[1].split(".");
-  if (parts.length !== 3) return null;
-  const [encHeader, encPayload, encSig] = parts;
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    b64urlToBytes(encSig),
-    new TextEncoder().encode(`${encHeader}.${encPayload}`),
-  );
-  if (!valid) return null;
-
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(encPayload)));
-  } catch {
-    return null;
-  }
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < nowSec) return null;
-  return typeof payload.sub === "string" ? payload.sub : null;
-}
 
 // Naver Reverse Geocoding → 행정동코드 + 라벨. 실패/해상 등은 null.
 // 엔드포인트는 NCP Maps 신 도메인(maps.apigw.ntruss.com) 사용.
@@ -125,8 +85,16 @@ Deno.serve(async (req: Request) => {
     return json({ error: "server_misconfigured" }, 500);
   }
 
-  const uid = await getUidFromJwt(req, JWT_SECRET);
+  // 정지·회수·간이 토큰까지 걸러낸다(app.uid() 와 같은 판정) — service_role 로
+  // 진행하므로 RLS 가 받아 주지 않는다.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  const uid = await activeUid(req, JWT_SECRET, admin);
   if (!uid) return json({ error: "unauthorized" }, 401);
+
+  // 유료 API 상한 — 외부 호출 전에 소모한다(제한에 걸린 요청이 밖으로 나가지 않게).
+  if (await rateLimited(admin, `geoloc:${uid}`, API_MAX, API_WINDOW_SEC)) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   let p: { lat?: number; lng?: number; accuracy?: number; isMocked?: boolean };
   try {
@@ -141,8 +109,6 @@ Deno.serve(async (req: Request) => {
   }
   const accuracy = Math.round(Number(p.accuracy ?? 0)) || 0;
   const isMocked = p.isMocked === true;
-
-  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
   // 2) 차단 여부
   const { data: u } = await admin

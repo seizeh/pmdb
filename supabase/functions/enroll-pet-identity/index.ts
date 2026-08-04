@@ -17,10 +17,15 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// 유료 외부 API 호출 상한 — 사용자당. 펫 신원 등록은 드물다. 영상 판별이라 호출당 비용이 가장 크다.
+const API_MAX = 10;
+const API_WINDOW_SEC = 3600;
+
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const GEMINI_KEY = Deno.env.get("GEMINI_API_KEY");
 
@@ -69,52 +74,11 @@ async function geminiGenerate(parts: unknown[], schema: object): Promise<any> {
   }
 }
 
-function b64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
-}
-
-async function getUidFromJwt(req: Request, secret: string): Promise<string | null> {
-  const auth = req.headers.get("Authorization") ?? "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const parts = m[1].split(".");
-  if (parts.length !== 3) return null;
-  const [encHeader, encPayload, encSig] = parts;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    b64urlToBytes(encSig),
-    new TextEncoder().encode(`${encHeader}.${encPayload}`),
-  );
-  if (!valid) return null;
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(encPayload)));
-  } catch {
-    return null;
-  }
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < nowSec) return null;
-  return typeof payload.sub === "string" ? payload.sub : null;
 }
 
 const clamp01 = (n: unknown) => Math.min(1, Math.max(0, Number(n) || 0));
@@ -222,8 +186,16 @@ Deno.serve(async (req: Request) => {
   if (!JWT_SECRET) return json({ error: "server_misconfigured" }, 500);
   if (!GEMINI_KEY) return json({ error: "server_misconfigured" }, 500);
 
-  const uid = await getUidFromJwt(req, JWT_SECRET);
+  // 정지·회수·간이 토큰까지 걸러낸다(app.uid() 와 같은 판정) — service_role 로
+  // 진행하므로 RLS 가 받아 주지 않는다.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  const uid = await activeUid(req, JWT_SECRET, admin);
   if (!uid) return json({ error: "unauthorized" }, 401);
+
+  // 유료 API 상한 — 외부 호출 전에 소모한다(제한에 걸린 요청이 밖으로 나가지 않게).
+  if (await rateLimited(admin, `aienroll:${uid}`, API_MAX, API_WINDOW_SEC)) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   let p: {
     petId?: string;
@@ -246,8 +218,6 @@ Deno.serve(async (req: Request) => {
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
   if (frames.length < 3) return json({ enrolled: false, reason: "too_few_frames" }, 400);
-
-  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
   // 1) 보호자 확인
   const { data: g } = await admin

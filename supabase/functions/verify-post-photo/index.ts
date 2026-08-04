@@ -14,10 +14,15 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+// 유료 외부 API 호출 상한 — 사용자당. 게시글 사진 인증(펫별 1·4·10번째)에서 부른다. 실패 재촬영을 감안한 값.
+const API_MAX = 30;
+const API_WINDOW_SEC = 3600;
+
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
 const NAVER_KEY_ID = Deno.env.get("NAVER_MAP_KEY_ID");
 const NAVER_KEY = Deno.env.get("NAVER_MAP_KEY");
@@ -31,15 +36,6 @@ const IDENTITY_PASS_THRESHOLD = 0.63; // 동일 개체 통과선(중간신뢰)
 const GEMINI_MODEL = "gemini-2.5-pro"; // 유료 등급(billing) — 멀티이미지
 const TOKEN_TTL_MIN = 15;
 const REVERIFY_DAYS = 30; // 위치기반서비스 이용약관과 동일하게 유지할 것
-
-function b64urlToBytes(s: string): Uint8Array {
-  const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -55,38 +51,6 @@ function bytesToB64(bytes: Uint8Array): string {
     bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
   return btoa(bin);
-}
-
-async function getUidFromJwt(req: Request, secret: string): Promise<string | null> {
-  const auth = req.headers.get("Authorization") ?? "";
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const parts = m[1].split(".");
-  if (parts.length !== 3) return null;
-  const [encHeader, encPayload, encSig] = parts;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["verify"],
-  );
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    key,
-    b64urlToBytes(encSig),
-    new TextEncoder().encode(`${encHeader}.${encPayload}`),
-  );
-  if (!valid) return null;
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(encPayload)));
-  } catch {
-    return null;
-  }
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp === "number" && payload.exp < nowSec) return null;
-  return typeof payload.sub === "string" ? payload.sub : null;
 }
 
 async function reverseGeocode(lng: number, lat: number) {
@@ -214,8 +178,16 @@ Deno.serve(async (req: Request) => {
   if (!NAVER_KEY_ID || !NAVER_KEY) return json({ error: "server_misconfigured" }, 500);
   if (!GEMINI_KEY) return json({ error: "server_misconfigured" }, 500);
 
-  const uid = await getUidFromJwt(req, JWT_SECRET);
+  // 정지·회수·간이 토큰까지 걸러낸다(app.uid() 와 같은 판정) — service_role 로
+  // 진행하므로 RLS 가 받아 주지 않는다.
+  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
+  const uid = await activeUid(req, JWT_SECRET, admin);
   if (!uid) return json({ error: "unauthorized" }, 401);
+
+  // 유료 API 상한 — 외부 호출 전에 소모한다(제한에 걸린 요청이 밖으로 나가지 않게).
+  if (await rateLimited(admin, `aiphoto:${uid}`, API_MAX, API_WINDOW_SEC)) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   let p: {
     imageBase64?: string;
@@ -246,8 +218,6 @@ Deno.serve(async (req: Request) => {
   //   걸러진다(직접 POST 로 위조 가능). 서버 권위 방어는 Gemini 판정뿐이며,
   //   위조 좌표 차단(App Attest/Play Integrity, 이동속도 타당성)은 출시 전 과제.
   const isMocked = p.isMocked === true;
-
-  const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
   const logFail = (
     reason: string,

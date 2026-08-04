@@ -56,12 +56,15 @@
 - **`bearer(req)`** — `Authorization: Bearer <token>` 파싱.
 - **`clientUa(req)`** — `user-agent`를 300자로 절단(refresh_tokens.user_agent 저장용, 비대화 방지).
 - **`clientIp(req)`** — 레이트리밋 키용 IP. **`cf-connecting-ip` 하나만 쓰고 폴백하지 않는다.** 이 헤더는 위조하면 Cloudflare 엣지가 요청 자체를 거부하고(에러 1000), 이 배포에서는 항상 붙는다 — 2026-08-01 ADR-0011 증상 4 실측, 2026-08-03 Edge Function 경로 재확인. 따라서 **IP 버킷은 '보조선' 이 아니라 실제로 지켜지는 상한이다.** `x-real-ip`/`x-forwarded-for` 폴백은 제거했다 — 폴백이 곧 우회로가 되기 때문이고(헤더 하나로 매 요청 다른 IP), DB 경로가 같은 이유로 이미 지웠다(`20260801140000_ratelimit_trusted_client_ip.sql`). 헤더가 없으면 `null` → 호출부는 IP 버킷을 건너뛰고, 스푸핑 불가한 1차 버킷(계정·토큰해시·전화번호)과 전역 상한이 받는다.
+- **`activeUid(req, secret, supabase)`** — **service_role 로 진행하는 함수의 인증 관문.** DB 의 `app.uid()` 와 같은 판정을 Edge 쪽에서 재현한다: 서명·`exp` 검증 → `users.status = 'active'` → `token_version == tv` 클레임 → `lite` 클레임 없음. 통과하면 uid, 아니면 `null`(호출부는 401). 조회 실패는 **fail-closed**(`rateLimited` 의 fail-open 과 반대 — 이쪽은 인증이라 열어 둘 이유가 없다). 사용처: `verify-location` · `verify-post-photo` · `enroll-pet-identity` · `resolve-region` · `search-petcafe` · `sync-dong-centroids` · `apply-business` · `check-business-no`.
 - **`rateLimited(supabase, key, max, windowSeconds)`** — RPC `rate_limit_hit(p_key, p_max, p_window_seconds)` 1회 소모. `true`=제한 초과(차단). **리미터 자체 오류는 fail-open**(가용성 우선 — 로그인/갱신을 막지 않음). `rate_limit_hit`은 ~2% 확률로 만료행을 기회적으로 삭제(백스톱).
 - **`sha256Hex(input)`** — refresh 토큰 저장용 해시(원문 저장 금지).
 - **`randomToken(bytes=32)`** — 불투명 refresh 토큰 원문(256bit, `crypto.getRandomValues` → base64url).
 - **상수**: `ACCESS_TTL_CAPABLE = 8h`(refresh 지원 클라), `ACCESS_TTL_LEGACY = 30d`(레거시, 추후 축소 예정), `REFRESH_GRACE_SECONDS = 30`.
 
-주의: `verify-location`, `verify-post-photo`, `enroll-pet-identity`, `search-petcafe`, `resolve-region`, `sync-dong-centroids`는 이 모듈 대신 **각자 파일 안에 동일한 JWT 검증 로직(`getUidFromJwt`)을 복제**해 갖고 있다(기능 동일 — 단, `alg` 헤더 고정 확인은 없음, `sub`/`exp`만 사용). `signup`, `reset-password`, `send-push`는 CORS/json 헬퍼도 자체 복제한다(`_shared/cors.ts` 미사용).
+주의: `signup`, `reset-password`, `send-push`는 CORS/json 헬퍼를 자체 복제한다(`_shared/cors.ts` 미사용).
+
+~~`verify-location`, `verify-post-photo`, `enroll-pet-identity`, `search-petcafe`, `resolve-region`, `sync-dong-centroids`가 JWT 검증 로직(`getUidFromJwt`)을 각자 복제해 갖고 있다~~ → **2026-08-04 해소.** 여섯 함수 모두 `activeUid()`로 통일했고 사본은 전부 제거됐다. 사본이 여섯 개였던 것 자체가 드리프트 원인이었다 — 실제로 그 사본들은 `alg` 헤더 고정 확인이 없었고, `status`/`token_version`도 보지 않아 **정지된 계정과 회수된 토큰이 그대로 통과**했다(0031 §3.1).
 
 ### 2.2 `_shared/cors.ts` — CORS + JSON 응답 헬퍼
 
