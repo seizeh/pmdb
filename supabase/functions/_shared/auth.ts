@@ -86,15 +86,29 @@ export function clientUa(req: Request): string | null {
   return ua ? ua.slice(0, 300) : null;
 }
 
-/// 레이트리밋 키용 클라이언트 IP. 신뢰 프록시가 설정하는 헤더(cf-connecting-ip/x-real-ip)
-/// 우선 — x-forwarded-for leftmost 는 클라가 주입 가능(스푸핑 가능)이라 최후 폴백.
-/// 식별 불가 시 null → 호출부는 IP 버킷을 건너뛴다(전역 'unknown' 버킷 오작동 방지).
-/// ⚠ IP 제한은 보조 방어선일 뿐(스푸핑 가능). 1차 방어는 스푸핑 불가한 토큰해시·계정 버킷.
+/// 레이트리밋 키용 클라이언트 IP — **`cf-connecting-ip` 하나만 쓴다.**
+///
+/// 이 값은 위조할 수 없다. 실측이다(ADR-0011 증상 4, 2026-08-01 운영 대상):
+///
+///   x-forwarded-for              통과 — 맨 왼쪽이 공격자 값
+///   x-real-ip / sb-forwarded-for 무시됨(엣지가 걷어내고 실제 IP 유지)
+///   cf-connecting-ip             **엣지가 요청 자체를 거부**(Cloudflare 1000)
+///
+/// Edge Function 경로도 같은지 2026-08-03 별도 확인했다 — 정상 요청은 함수에
+/// 도달(400), `CF-Connecting-IP` 위조는 엣지에서 거부(1000), `cf-ray` 존재.
+///
+/// 그러므로 IP 버킷은 '보조선' 이 아니라 실제로 지켜지는 상한이다. 예전 주석은
+/// 반대로 적혀 있었는데(“보조 방어선일 뿐 — 스푸핑 가능”), **재 보지 않고 쓴
+/// 문장이었고 그 주석을 믿은 다른 판단까지 틀리게 만들었다**(0031 §3.7).
+///
+/// ⚠ **폴백을 두지 않는다.** 헤더가 없으면 null 이다 — 호출부는 IP 버킷을
+/// 건너뛰고 스푸핑 불가한 1차 버킷(계정·토큰해시·전화번호)과 전역 상한이 받는다.
+/// x-forwarded-for 로 폴백하면 그 폴백이 곧 우회로가 된다(헤더 하나 붙이면 매
+/// 요청 다른 IP 가 되어 버킷이 무한히 갈린다). DB 경로가 같은 이유로 이미 폴백을
+/// 지웠다 — `20260801140000_ratelimit_trusted_client_ip.sql`. 두 경로를 맞춘다.
 export function clientIp(req: Request): string | null {
-  const trusted = req.headers.get("cf-connecting-ip") ?? req.headers.get("x-real-ip");
-  if (trusted) return trusted.trim();
-  const xff = req.headers.get("x-forwarded-for");
-  return xff ? (xff.split(",")[0].trim() || null) : null;
+  const ip = req.headers.get("cf-connecting-ip");
+  return ip ? (ip.trim() || null) : null;
 }
 
 /// 레이트리밋 1회 소모. true=제한 초과(차단해야 함), false=허용.
