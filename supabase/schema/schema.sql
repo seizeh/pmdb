@@ -12959,8 +12959,8 @@ GRANT ALL ON TABLE public.device_tokens TO service_role;
 -- Name: TABLE dong_centroids; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT,MAINTAIN ON TABLE public.dong_centroids TO anon;
-GRANT SELECT,MAINTAIN ON TABLE public.dong_centroids TO authenticated;
+GRANT MAINTAIN ON TABLE public.dong_centroids TO anon;
+GRANT MAINTAIN ON TABLE public.dong_centroids TO authenticated;
 GRANT ALL ON TABLE public.dong_centroids TO service_role;
 
 
@@ -13232,8 +13232,8 @@ GRANT SELECT(verify_post_count) ON TABLE public.pets TO authenticated;
 -- Name: TABLE phone_verifications; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT,MAINTAIN ON TABLE public.phone_verifications TO anon;
-GRANT ALL ON TABLE public.phone_verifications TO authenticated;
+GRANT MAINTAIN ON TABLE public.phone_verifications TO anon;
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.phone_verifications TO authenticated;
 GRANT ALL ON TABLE public.phone_verifications TO service_role;
 
 
@@ -13241,8 +13241,8 @@ GRANT ALL ON TABLE public.phone_verifications TO service_role;
 -- Name: TABLE photo_verifications; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT,MAINTAIN ON TABLE public.photo_verifications TO anon;
-GRANT SELECT,MAINTAIN ON TABLE public.photo_verifications TO authenticated;
+GRANT MAINTAIN ON TABLE public.photo_verifications TO anon;
+GRANT MAINTAIN ON TABLE public.photo_verifications TO authenticated;
 GRANT ALL ON TABLE public.photo_verifications TO service_role;
 
 

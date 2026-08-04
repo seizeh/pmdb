@@ -67,7 +67,7 @@
 - **`clientUa(req)`** — `user-agent`를 300자로 절단(refresh_tokens.user_agent 저장용, 비대화 방지).
 - **`clientIp(req)`** — 레이트리밋 키용 IP. **`cf-connecting-ip` 하나만 쓰고 폴백하지 않는다.** 이 헤더는 위조하면 Cloudflare 엣지가 요청 자체를 거부하고(에러 1000), 이 배포에서는 항상 붙는다 — 2026-08-01 ADR-0011 증상 4 실측, 2026-08-03 Edge Function 경로 재확인. 따라서 **IP 버킷은 '보조선' 이 아니라 실제로 지켜지는 상한이다.** `x-real-ip`/`x-forwarded-for` 폴백은 제거했다 — 폴백이 곧 우회로가 되기 때문이고(헤더 하나로 매 요청 다른 IP), DB 경로가 같은 이유로 이미 지웠다(`20260801140000_ratelimit_trusted_client_ip.sql`). 헤더가 없으면 `null` → 호출부는 IP 버킷을 건너뛰고, 스푸핑 불가한 1차 버킷(계정·토큰해시·전화번호)과 전역 상한이 받는다.
 - **`activeUid(req, secret, supabase)`** — **service_role 로 진행하는 함수의 인증 관문.** DB 의 `app.uid()` 와 같은 판정을 Edge 쪽에서 재현한다: 서명·`exp` 검증 → `users.status = 'active'` → `token_version == tv` 클레임 → `lite` 클레임 없음. 통과하면 uid, 아니면 `null`(호출부는 401). 조회 실패는 **fail-closed**(`rateLimited` 의 fail-open 과 반대 — 이쪽은 인증이라 열어 둘 이유가 없다). 사용처: `verify-location` · `verify-post-photo` · `enroll-pet-identity` · `resolve-region` · `search-petcafe` · `sync-dong-centroids` · `apply-business` · `check-business-no`.
-- **`rateLimited(supabase, key, max, windowSeconds)`** — RPC `rate_limit_hit(p_key, p_max, p_window_seconds)` 1회 소모. `true`=제한 초과(차단). **리미터 자체 오류는 fail-open**(가용성 우선 — 로그인/갱신을 막지 않음). `rate_limit_hit`은 ~2% 확률로 만료행을 기회적으로 삭제(백스톱).
+- **`rateLimited(supabase, key, max, windowSeconds)`** — RPC `rate_limit_hit(p_key, p_max, p_window_seconds)` 1회 소모. `true`=제한 초과(차단). **리미터 자체 오류는 fail-open**(가용성 우선 — 로그인/갱신을 막지 않음). `rate_limit_hit`은 ~2% 확률로 만료행을 기회적으로 삭제(백스톱). 초과분은 `app.rate_limit_trips` 에 **계열·분 단위로 접혀** 기록되고(2026-08-04) 운영 알람이 그걸 본다 — 전체 버킷 목록은 아래 §2.5.
 - **`sha256Hex(input)`** — refresh 토큰 저장용 해시(원문 저장 금지).
 - **`randomToken(bytes=32)`** — 불투명 refresh 토큰 원문(256bit, `crypto.getRandomValues` → base64url).
 - **상수**: `ACCESS_TTL_CAPABLE = 8h`(refresh 지원 클라), `ACCESS_TTL_LEGACY = 30d`(레거시, 추후 축소 예정), `REFRESH_GRACE_SECONDS = 30`.
@@ -92,6 +92,42 @@
 ### 2.4 `_shared/edge_alert.ts` — 엣지 실패 관리자 알림 (pmdart#157 베타 관측성)
 
 - **`alertAdmins(admin, key, title, body)`** — 활성 관리자(`user_type='admin'`) 전원에게 `notifications` INSERT(→ 기존 트리거로 인앱+FCM 푸시). 타입은 기존 `system_notice` 재사용(새 타입은 CHECK·클라 매핑 동시 수정 필요 — 실수 여지 회피). 같은 `key` 는 **30분 1회** 스로틀(`rate_limit_hit('edgealert:<key>')`) — 장애 폭주가 알림 폭주로 번지지 않게. 절대 throw 하지 않음(알림 실패는 본 흐름에 무영향). 사용처: `enroll-pet-identity`(`ai_unavailable`/`video_too_large`/`internal_error`), `verify-post-photo`(`ai_unavailable`/`internal_error`).
+
+### 2.5 레이트리밋 버킷 전체 목록 (2026-08-05 실측)
+
+키의 **첫 토큰이 계열(family)** 이고, `app.rate_limit_trips` 와 운영 알람이 그 단위로 센다.
+개별 식별자(uid·전화·IP)는 기록에 남기지 않는다 — 보관할 이유가 없다.
+
+| 계열 | 키 모양 | 상한 | 창 | 어디서 |
+|---|---|---|---|---|
+| `login` | `login:user:<id소문자>` | 10 | 5분 | login (1차) |
+| | `login:ip:<ip>` | 20 | 1분 | login (보조, IP 식별 시) |
+| `refresh` | `refresh:tok:<해시>` | 20 | 1분 | refresh — grace 창 남용 캡 |
+| | `refresh:ip:<ip>` | 120 | 1분 | refresh |
+| `sms` | `sms:ip:<ip>` | 20 | 1시간 | send-phone-code |
+| | `sms:global` | 200 | 1시간 | send-phone-code — 전역 안전판(문자 비용) |
+| `pwreset` | `pwreset:phone:<번호>` | 10 | 10분 | reset-password |
+| | `pwreset:ip:<ip>` | 30 | 10분 | reset-password |
+| `lite` | `lite:phone:<번호>` | 10 | 10분 | signup-lite |
+| | `lite:ip:<ip>` | 30 | 10분 | signup-lite |
+| `ginv` | `ginv:any:<uid>` | 20 | 1일 | invite-guardian — **모든 초대 시도**(가입 여부 무관, 열거 방지) |
+| | `ginv:u:<uid>` | 10 | 1일 | invite-guardian — SMS 발송 |
+| | `ginv:p:<번호>` | 1 | 1일 | invite-guardian — 같은 번호 SMS |
+| `aiphoto` | `aiphoto:<uid>` | 30 | 1시간 | verify-post-photo (유료 AI) |
+| `aienroll` | `aienroll:<uid>` | 10 | 1시간 | enroll-pet-identity (유료 AI) |
+| `geoloc` | `geoloc:<uid>` | 30 | 1시간 | verify-location |
+| `georev` | `georev:<uid>` | 60 | 1시간 | resolve-region |
+| `geosearch` | `geosearch:<uid>` | 120 | 1시간 | search-petcafe |
+| `dongsync` | `dongsync:<uid>` | 5 | 1시간 | sync-dong-centroids (배치) |
+| `bizapply` | `bizapply:<uid>` | 10 | 1시간 | apply-business |
+| `ntscheck` | `ntscheck:<uid>` | 30 | 1시간 | check-business-no (국세청 조회) |
+| `edgealert` | `edgealert:<key>` | 1 | 30분 | `_shared/edge_alert.ts` — 알림 폭주 억제 |
+| `cerr` | `cerr:<uid>` / `cerr:ip:<md5>` / `cerr:anon` | 30 | 1분 | **DB 쪽** `record_client_error` |
+| | `cerr:anon:all` | 300 | 1분 | 익명 전역 안전판 |
+
+- `send-phone-code` 에는 위 버킷과 별개로 **같은 번호 60초 재발송 금지**가 있다(테이블 조회 기반, `rate_limit_hit` 미사용).
+- IP 버킷은 `cf-connecting-ip` 로만 식별하고 폴백하지 않는다(§2.1) — 헤더가 없으면 그 버킷을 건너뛴다.
+- `DEMO_PHONES`/`DEMO_OTP` 로 지정한 심사용 번호는 레이트리밋이 **면제**된다(§4 send-phone-code).
 
 ## 3. 인증/토큰 수명주기 흐름
 
