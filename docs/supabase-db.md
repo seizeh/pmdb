@@ -25,9 +25,9 @@
 
 ## 1. 개요
 
-- **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **16개**(§3.8)
+- **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **19개**(§3.8)
 - **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
-- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 9개 · **마이그레이션** 192건
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 193건
 - **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
 - **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
 - **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
@@ -1002,7 +1002,7 @@ PostGIS 확장이 설치하는 좌표계(SRID) 참조 시스템 테이블. 애�
 
 ## 3.8 `app` 스키마 테이블
 
-인증 인프라 전용 내부 테이블 3개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. RLS 없이 스키마 격리로 보호.
+인증 인프라·운영 전용 내부 테이블 19개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. RLS 없이 스키마 격리로 보호.
 
 ### app.refresh_tokens
 
@@ -1262,6 +1262,50 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 
 - **RLS on, 정책 없음** — service_role 전용. 시크릿을 담으므로 노출 경로가 없어야 한다
 
+### app.ops_alarm_config
+
+운영 알람 임계값. `id boolean` 싱글턴. **임계값을 코드가 아니라 DB 에 두는 이유**: 출시 직후 트래픽을 모르는 상태에서 고른 숫자라 반드시 조정하게 되는데, 그때마다 마이그레이션을 치고 싶지 않다.
+
+| 컬럼 | 기본값 | 뜻 |
+|---|---|---|
+| enabled | true | 전체 스위치 |
+| window_minutes | 15 | 관측 창 |
+| cooldown_minutes | 60 | 같은 알람 재발사 억제 |
+| client_error_per_key | 20 | 한 지점(`where_key`)에서 창 내 이 건수면 발사 |
+| client_error_total | 100 | 지점 무관 총량 |
+| rate_limit_trips | 100 | 한 계열의 창 내 차단 횟수 |
+| push_failed | 20 | 창 내 푸시 실패 건수 |
+| cron_failed | 1 | 창 내 크론 실패 건수 |
+| purge_overdue_hours | 24 | 이 시간 넘게 안 지워진 증빙이 **1건이라도** 있으면 발사 |
+
+> ⚠️ **이 INSERT 는 데이터라 `pg_dump --schema-only` 에 안 담긴다.** 스냅샷으로 세운
+> DB(CI·재해복구)에서는 이 테이블이 비어 있다. 그래서 `app.ops_alarm_sweep()` 은 행이
+> 없으면 **조용히 꺼지는 대신 기본값 행을 다시 넣고 진행한다** — 알람이 죽은 걸 알람이
+> 알려 줄 수는 없기 때문이다.
+
+### app.ops_alarms
+
+발사된 알람 이력. `bigint identity` PK.
+
+| 컬럼 | 뜻 |
+|---|---|
+| alarm_key | 쿨다운 단위(`client_error:<지점>`, `ratelimit:<계열>`, `push_failed`, `cron_failed`, `purge_overdue`) |
+| title / body | 알림에 그대로 나가는 문구 |
+| detail | jsonb — 건수·창 길이 등 근거 |
+| fired_at | 발사 시각 |
+
+- 이력을 따로 남기는 이유: 알람은 푸시로 나가는데 **푸시 파이프라인이 죽으면 그 알람도 못 온다.** 이력·앱 내 알림·푸시 세 군데에 남겨 한 경로가 죽어도 되짚을 수 있게 한다. 조회는 `admin_ops_alarms`(§7.9).
+- 보존 30일(`retention-purge`). `client_errors` 와 같은 기간으로 맞췄다 — 같이 보게 되는 자료라 기간이 다르면 "왜 이때는 알람이 없지" 가 보존 차이인지 실제인지 구분이 안 된다.
+
+### app.rate_limit_trips
+
+레이트리밋이 **실제로 막은** 횟수. PK `(family, minute)`.
+
+- `family` = 버킷 키의 첫 토큰(`login:ip:1.2.3.4` → `login`). 개별 식별자(uid·전화·IP)는 **일부러 버린다** — 알람은 "어느 계열이 얼마나 막혔나" 를 답하면 되고, 누가 막혔는지까지 남기면 보관할 이유 없는 개인정보가 된다.
+- 분 단위로 접는다. 공격 중 발동은 초당 수백 건이 될 수 있어 발동마다 한 행이면 관측하려다 테이블을 채운다.
+- 기록은 `public.rate_limit_hit` 이 **초과했을 때만** 한다. 그 INSERT 는 예외를 삼킨다 — 관측이 제한기를 죽이면 안 된다.
+- 종전에는 발동이 **아무 흔적도 남기지 않았다**(카운트만 세고 버렸다). 0032 §9.3 의 항목.
+
 ### pg_cron 스케줄 잡
 
 | 잡 이름 | 스케줄 | 동작 |
@@ -1271,6 +1315,10 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 | `withdrawn-users-purge` | `43 3 * * *` (매일 03:43) | `delete from app.withdrawn_users where withdrawn_at < now() - interval '30 days'` — 탈퇴자 격리 30일 후 삭제 |
 | `funnel-events-retention` | `53 3 * * *` (매일 03:53) | `delete from app.funnel_events where created_at < now() - interval '1 year'` — 퍼널 원시 이벤트 보존 1년 (0028 §7) |
 | `care-report-hmac-purge` | `58 3 * * *` (매일 03:58) | 링크 만료(30일) 지난 미연결 케어 리포트 + 마지막 발행 30일 지난 미연결 스레드의 `recipient_phone_hmac` 파기 (0028 §4.2) |
+| `engagement-sweep` | `* * * * *` (매분) | `app.dispatch_engagement_notifications()` — 팔로우 새 글 등 참여 알림 배치 |
+| `vaccine-reminder-sweep` | `0 0 * * *` (매일 00:00) | KST 기준 오늘·내일 예정 접종에 `vaccine_reminder` 알림(발송분은 `notified_at` 으로 1회 보장) |
+| `business-docs-purge` | `13 4 * * *` (매일 04:13) | `app.business_purge_config` 의 URL 로 `net.http_post` — `purge-business-docs` 기동(증빙 파기) |
+| `ops-alarm-sweep` | `*/5 * * * *` (5분마다) | `app.ops_alarm_sweep()` — 오류 급증·레이트리밋 다발·푸시 실패·크론 실패·파기 적체를 보고 관리자에게 알린다. 창(15분)보다 짧아야 급증이 창 밖으로 빠져나가기 전에 잡힌다 |
 | `retention-purge` | `23 3 * * *` (매일 03:23) | `app.cleanup_retention()` — 전화 인증코드 1일 / 위치 인증 이력·사진 인증 로그 6개월 / **삭제·탈퇴자 게시글 실좌표 스크럽** / **post_views(ip_hash)·app.auth_logs(접속 로그) 3개월** 파기 / **소프트 삭제된 채팅 메시지 30일 유예 후 하드 삭제**(신고 대응 기간 확보 후 파기). photo_verifications 는 pets·posts FK 참조 때문에 미참조 행만 삭제·참조 행은 촬영 좌표(shot_*)만 스크럽 (→ §13 `20260711130000`·`20260711140000`) |
 
 ---
@@ -1436,7 +1484,7 @@ SELECT pr.id AS user_id, pr.nickname, pr.user_type, p.created_at,
 
 ## 7. 데이터베이스 함수(RPC)
 
-public 스키마에 **108개**의 함수가 있다(PostGIS 확장 함수 제외, 이벤트 트리거 함수 `rls_auto_enable` 포함) — 클라이언트 호출 가능 79개 + service_role 전용 29개. 2026-08-04 실측.
+public 스키마에 **109개**의 함수가 있다(PostGIS 확장 함수 제외, 이벤트 트리거 함수 `rls_auto_enable` 포함) — 클라이언트 호출 가능 80개 + service_role 전용 29개. 2026-08-04 실측.
 거의 전부 `SECURITY DEFINER` + `SET search_path` 고정. 실행 권한(EXECUTE) 관점에서 두 부류로 나뉜다 — §10 참조:
 
 - **클라이언트 호출 가능(anon/authenticated EXECUTE)**: 일반 RPC.
@@ -1709,6 +1757,7 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - `admin_ops_metrics() → json` — 운영 원가·활동 지표. SMS 9원/AI 20원 단가를 넣어 사진 검증·전화 인증 건수로 비용을 추정하고, 리프레시 토큰·메시지·댓글·글·하트를 합쳐 활성 사용자를 KST 기준 일자로 집계한다.
 - `admin_photo_verification_failures(p_limit=50, p_offset=0)` — 사진 검증 **실패분**만 최신순(최대 200). fail_reason·ai_reason·지역일치·매칭점수·purpose 를 함께 준다 — AI 게이트 오탐률을 눈으로 재는 창구(펫 신원 섀도 운영).
 - `admin_location_usage_logs(p_user, ...)` — 특정 사용자의 위치 이용·제공 기록 열람(위치정보법 §16 대응, §8.10 이 쌓는 것).
+- `admin_ops_alarms(p_limit=50, p_offset=0)` — 발사된 운영 알람 이력(§3.8 `app.ops_alarms`). 푸시를 못 받았거나 지웠을 때 되짚는 창구다 — 알람의 1차 경로가 푸시라서 이 조회가 없으면 파이프라인이 죽었을 때 알람 자체가 사라진다.
 - `admin_client_errors(p_where?, ...)` / `admin_client_error_summary(p_hours=24)` — 클라이언트 오류 원본 조회와 지점(`where_key`)별 집계(건수·영향 사용자 수·마지막 발생). 수집은 `record_client_error`(§7.12).
 - `admin_list_business_applications(p_status?, p_track?, p_auto_only?, ...)` / `admin_set_business_status(p_user, p_status, p_reason?)` — 업체 신청 심사 큐와 승인/거절. 거절에는 **사유가 필수**(`reason_required`), 같은 상태로의 재설정은 `no_change` 로 막는다(감사 로그 오염 방지).
 - `admin_list_business_licenses(p_status?, ...)` / `admin_review_business_license(p_license, p_status, p_reason?)` — 영업 허가증 심사. 승인은 **업체 프로필이 이미 approved 여야** 가능하다 — 허가만 먼저 통과해 자격이 앞서 나가는 걸 막는다.
@@ -1769,6 +1818,14 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
   - 익명 식별은 **`cf-connecting-ip` 만** 쓴다. `x-forwarded-for` 는 맨 왼쪽이 클라이언트 주장값이라 위조하면 버킷이 무한 생성된다. 헤더가 없으면 폴백하지 않고 공용 버킷으로 떨어뜨린다 — **폴백이 곧 우회로**다.
   - 과대 페이로드는 버리지 않고 **잘린 사실과 앞부분을 남긴다**.
 - 조회는 관리자 RPC(`admin_client_errors`, `admin_client_error_summary`).
+
+#### `app.ops_alarm_sweep() → integer` [SD][cron]
+- 5분마다 도는 운영 알람 스윕(§3.8). 다섯 가지를 본다 — ① 지점별 앱 오류 급증 ② 총량 급증 ③ 레이트리밋 계열별 다발 ④ 푸시 발송 실패 ⑤ 크론 실패 ⑥ 증빙 파기 적체. 발사는 `app.ops_alarm_fire()` 한 곳을 지나며 거기서 쿨다운을 판정한다.
+- **지점별과 총량을 둘 다 보는 이유**: 지점별만 보면 서버가 죽어 모든 화면이 조금씩 실패하는 경우를 놓친다(지점별로는 임계 미달, 총량은 폭증). 총량만 보면 한 화면이 터진 걸 평상시 잡음에 묻는다.
+- **쿨다운이 필요한 이유**: 급증은 몇 분간 이어진다. 5분마다 같은 알람이 오면 사람은 알림을 꺼 버리고, 그러면 관측 장치가 없는 것과 같아진다.
+- 크론 조건은 `to_regclass('cron.job_run_details')` 로 존재를 먼저 확인한다 — **pg_cron 은 운영에만 있다.** pgTAP CI 는 `prelude + schema.sql`(= `-n public -n app` 덤프)만 복원하므로 cron 스키마가 없고, 그냥 참조하면 알람을 검증하려고 부르는 순간 함수가 통째로 터진다.
+- 한계: **pg_cron 자체가 멈추면 이 스윕도 안 돈다.** 자기 자신의 부재는 감지할 수 없다.
+- pgTAP: t21(12건).
 
 #### `rls_auto_enable() → event_trigger` [SD]
 - DDL 이벤트 트리거 함수: public 스키마에 `CREATE TABLE` 류가 실행되면 **자동으로 해당 테이블 RLS 를 활성화**. "RLS 켜는 걸 잊는" 실수 방지 가드레일. 이 함수를 실행하는 이벤트 트리거의 이름은 **`ensure_rls`**(ddl_command_end).
@@ -2020,12 +2077,12 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용). `post_pets` 는 2026-08-03 부터 쓰기 3종이 REVOKE 됐다(0032 §3). 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
 
-### 10.3. 함수 EXECUTE 권한 (2026-08-04 실측, PostGIS 제외 108개)
+### 10.3. 함수 EXECUTE 권한 (2026-08-04 실측, PostGIS 제외 109개)
 
 | 부류 | 개수 | 뜻 |
 |---|---|---|
 | service_role 전용 | 29 | 서버(Edge Function)·크론만 호출 |
-| authenticated 만 | 69 | 로그인 필요 |
+| authenticated 만 | 70 | 로그인 필요 |
 | anon 포함 | 10 | 로그인 전에도 호출 가능 |
 
 **service_role 전용 29개** — 토큰 발급·회전, 가입, 비밀번호, 검증 기록, 푸시 파이프라인, 업체 심사 접수, 공유 뷰어처럼 신뢰 경계 밖에 두면 안 되는 것들:
@@ -2101,7 +2158,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 ## 13. 마이그레이션 이력
 
-이 저장소가 관리하는 마이그레이션 **192건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+이 저장소가 관리하는 마이그레이션 **193건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
 `20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
 
 > ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
@@ -2307,3 +2364,4 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 | `20260804090000` | `lite_account_phone_purge` | 간이 후기 계정의 전화번호 파기 — 이미 이용자에게 한 약속을 실제로 이행한다. |
 | `20260804120000` | `realtime_publication_notifications` | notifications 를 supabase_realtime publication 에 넣는다 — **운영에는 이미 있다.** |
 | `20260804140000` | `posts_revoke_actual_coords_update` | posts.actual_lat/lng 의 클라이언트 UPDATE 권한 회수 — 안 받겠다고 한 값이 조용히 저장될 수 있었다. |
+| `20260804160000` | `ops_alarms` | 운영 알람 — 모으기만 하고 알려 주지 않던 것을 알리게 한다. |
