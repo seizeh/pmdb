@@ -25,14 +25,21 @@ async function hmacKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey> {
 }
 
 /// access JWT 서명(HS256). role/aud=authenticated, iss=supabase, tv 클레임 포함.
+///
+/// `extra` 는 권한 범위를 좁히는 클레임을 얹는 자리다. 현재 유일한 사용처는
+/// signup-lite 의 `{ lite: true }` — DB 의 app.uid() 가 그 클레임을 보고 거부하고
+/// app.uid_lite() 만 통과시킨다(20260803180000). **권한을 넓히는 용도로 쓰지 말 것**:
+/// 이 클레임들은 서명 안에 들어가므로 클라이언트가 못 고치지만, 반대로 우리가 잘못
+/// 넣으면 DB 쪽에서 되돌릴 방법이 토큰 만료뿐이다.
 export async function signAccess(
   sub: string, tv: number, ttlSec: number, secret: string,
+  extra?: Record<string, unknown>,
 ): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = strToB64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const payload = strToB64url(JSON.stringify({
     sub, role: "authenticated", aud: "authenticated", iss: "supabase",
-    iat: now, exp: now + ttlSec, tv,
+    iat: now, exp: now + ttlSec, tv, ...(extra ?? {}),
   }));
   const data = `${header}.${payload}`;
   const key = await hmacKey(secret, ["sign"]);

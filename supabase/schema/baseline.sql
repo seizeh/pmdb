@@ -1887,7 +1887,17 @@ CREATE FUNCTION app.uid() RETURNS uuid
     and u.status = 'active'
     and u.token_version = coalesce(
       ((nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'tv')::int, 0)
+    -- 간이 후기 전용 토큰은 여기까지 오면 안 된다(signup-lite 가 lite=true 를 박는다).
+    and coalesce(
+      (nullif(current_setting('request.jwt.claims', true),'')::jsonb)->>'lite', '') <> 'true'
 $$;
+
+
+--
+-- Name: FUNCTION uid(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.uid() IS '인증된 사용자 uuid. status=active + token_version 일치 + 간이(lite) 토큰이 아닐 것.';
 
 
 --
@@ -2581,6 +2591,13 @@ CREATE TABLE public.post_pets (
     post_id uuid NOT NULL,
     pet_id uuid NOT NULL
 );
+
+
+--
+-- Name: TABLE post_pets; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.post_pets IS '게시글↔펫 연결. 쓰기는 create_post_verified(definer) 전용 — 직접 INSERT 는 pets.verify_post_count 를 부풀려 사진 인증 게이트를 우회시킨다(20260803182000).';
 
 
 --
@@ -5637,7 +5654,7 @@ GRANT ALL ON TABLE public.post_hearts TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_pets TO anon;
-GRANT ALL ON TABLE public.post_pets TO authenticated;
+GRANT SELECT,REFERENCES,TRIGGER,MAINTAIN ON TABLE public.post_pets TO authenticated;
 GRANT ALL ON TABLE public.post_pets TO service_role;
 
 

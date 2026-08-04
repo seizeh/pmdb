@@ -14,8 +14,13 @@
 //   다음 후기를 쓰려면 문자 인증을 다시 받는다. DB 쪽 add_facility_review 도
 //   같은 15분 창의 review 인증을 요구하므로 둘이 어긋나지 않는다.
 //
-// 이 함수로 만들어지는 계정은 users.status='lite' 라 app.uid() 에서 제외된다.
-// 즉 이 토큰으로는 후기 작성 말고 아무것도 못 한다(채팅·게시글·펫 전부 차단).
+// **권한 범위는 계정 상태가 아니라 토큰 클레임이 정한다 — 20260803180000**
+//   새로 만드는 계정은 users.status='lite' 라 app.uid() 에서 제외되지만, 아래 3)이
+//   설명하듯 **기존 정식 회원(status='active')도 그대로 반환**된다. 그때 발급되는
+//   토큰은 app.uid() 조건을 완전히 충족해서, "후기만 쓸 수 있는 토큰" 이 실제로는
+//   채팅·게시글·펫·프로필 전부에 통했다(2026-08-03 감사에서 발견).
+//   그래서 토큰에 `lite: true` 를 박는다 — app.uid() 가 이 클레임을 거부하고
+//   app.uid_lite() 만 통과시키므로, 계정 상태와 무관하게 후기 3종으로 제한된다.
 // verify_jwt=true: 다른 전화 인증 함수와 같이 publishable 키를 얇은 남용 게이트로.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -126,8 +131,12 @@ Deno.serve(async (req: Request) => {
     return json({ error: "internal_error" }, 500);
   }
 
+  // 5) 간이 전용 클레임. 이 한 줄이 "후기만 쓸 수 있다" 를 **실제로** 만든다 —
+  //    계정이 active 든 lite 든 app.uid() 는 이 토큰을 거부한다(20260803180000).
+  //    빼면 정식 회원 계정에 대한 완전 세션이 다시 발급된다.
   const token = await signAccess(
     uid as string, (uRow.token_version as number | undefined) ?? 0, LITE_TTL, secret,
+    { lite: true },
   );
 
   return json({
