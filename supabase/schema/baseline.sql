@@ -5865,8 +5865,8 @@ GRANT UPDATE(pet_status) ON TABLE public.pets TO authenticated;
 -- Name: TABLE phone_verifications; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT SELECT,MAINTAIN ON TABLE public.phone_verifications TO anon;
-GRANT ALL ON TABLE public.phone_verifications TO authenticated;
+GRANT MAINTAIN ON TABLE public.phone_verifications TO anon;
+GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.phone_verifications TO authenticated;
 GRANT ALL ON TABLE public.phone_verifications TO service_role;
 
 

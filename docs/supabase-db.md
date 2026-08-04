@@ -28,7 +28,7 @@
 
 - **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **19개**(§3.8)
 - **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
-- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 198건
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 199건
 - **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
 - **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
 - **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
@@ -2091,9 +2091,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용).
 
-> ⚠️ **그랜트가 있다고 읽히는 건 아니다.** `dong_centroids`·`phone_verifications`·`photo_verifications` 는 **RLS 가 켜져 있고 정책이 0개**다 — 정책 없는 RLS 는 전면 거부이므로, SELECT 그랜트가 있어도 클라이언트는 **항상 0행**을 받는다(읽기는 전부 SECURITY DEFINER RPC 경유). 앱이 이 세 테이블을 직접 조회하는 곳은 없어 동작 문제는 없다.
->
-> 다만 이 그랜트들은 **아무 일도 하지 않으면서 오해를 만든다.** 특히 `phone_verifications` 는 OTP 코드를 담으므로, 훗날 누군가 RLS 를 끄거나 "그랜트가 있으니 읽어도 되는 표" 로 착각하면 그 순간 열린다. 지우는 게 맞지만 동작이 안 바뀌는 정리라 별도 건으로 둔다.
+> **`dong_centroids`·`phone_verifications`·`photo_verifications` 는 목록에서 빠졌다**(2026-08-05, `20260805100000`). 셋 다 **RLS 가 켜져 있고 정책이 0개**라 SELECT 그랜트가 있어도 클라이언트는 항상 0행을 받았다 — 즉 그 그랜트는 아무 일도 하지 않으면서 권한 목록만 "읽어도 되는 표" 로 보이게 했다. `phone_verifications` 는 OTP 코드를 담으므로 그 오해가 특히 비싸다. 읽기는 전부 SECURITY DEFINER RPC 가 한다.
 >
 > `app` 스키마 테이블 9개도 같은 상태(RLS on + 정책 0)인데 그쪽은 **의도한 그대로**다 — 스키마 USAGE 자체가 없어 클라이언트 경로가 아예 없고, service_role 만 접근한다. `post_pets` 는 2026-08-03 부터 쓰기 3종이, `pet_guardian_invites` 는 2026-08-04 부터 INSERT 가 REVOKE 됐다(0032 §3·§7.6) — 둘 다 정책은 남겨 뒀다. 지금은 도달할 수 없지만 그랜트가 되살아나는 날에도 조건은 남아 있어야 한다. 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
 
@@ -2189,7 +2187,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 ## 13. 마이그레이션 이력
 
-이 저장소가 관리하는 마이그레이션 **198건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+이 저장소가 관리하는 마이그레이션 **199건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
 `20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
 
 > ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
@@ -2401,3 +2399,4 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 | `20260804220000` | `rls_initplan` | RLS 의 무인자 헬퍼를 `(select …)` 로 감싸 행마다 부르던 것을 한 번만. |
 | `20260804230000` | `fk_indexes` | 조회 경로가 있는 FK 7건에 인덱스. |
 | `20260805090000` | `block_hides_reads` | 차단이 읽기도 막게 — 화면만 가려져 있고 데이터는 열려 있었다. |
+| `20260805100000` | `revoke_dead_selects` | 효과 없는 SELECT 그랜트 3건 회수 — 권한 목록이 '읽어도 되는 표' 로 보이게 했다. |
