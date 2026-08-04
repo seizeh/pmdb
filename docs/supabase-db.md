@@ -27,7 +27,7 @@
 
 - **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **19개**(§3.8)
 - **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
-- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 193건
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 194건
 - **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
 - **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
 - **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
@@ -1919,7 +1919,7 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - `trg_notify_pet_in_post` (AFTER INSERT): 그 펫의 **다른 공동보호자들**에게 `pet_in_post` 알림. 같은 글에 대해 중복 발송하지 않는다.
 - `trg_post_pets_bump_verify_count` (AFTER INSERT): 글 카테고리가 `walk_together/walk_proxy/care/give_away` 면 `pets.verify_post_count+1` — 사진 검증을 거친 글에 등장한 횟수로, 펫 신뢰 표시의 재료.
 
-> `post_pets` 는 2026-08-03 부터 클라이언트 직접 쓰기가 **REVOKE** 돼 있다(0032 §3). 위 트리거들은 이제 RPC 경유 INSERT 에만 걸린다.
+> `post_pets` 는 2026-08-03 부터 클라이언트 직접 쓰기가 **REVOKE** 돼 있다(0032 §3). 위 트리거들은 이제 RPC 경유 INSERT 에만 걸린다. `pet_guardian_invites` 도 2026-08-04 부터 INSERT 가 회수돼, 아래 초대 트리거들은 `invite-guardian`(service_role) 경유로만 돈다.
 
 ### 8.7. `pets` / `pet_guardians` / `pet_guardian_invites`
 
@@ -1997,7 +1997,7 @@ public 스키마 **76개** + storage **7개** = 총 83개 정책(2026-08-04 실�
 | `notification_preferences` | ALL: 본인 것만 | | | |
 | `notifications` | 본인 또는 관리자 | **관리자만** (일반 알림은 트리거/SECURITY DEFINER 가 생성) | 본인 또는 관리자(읽음 처리) | — |
 | `pawings` | 전체 공개(팔로우 관계는 공개 정보) | 본인이 follower 일 때만 | — | 본인이 follower 일 때만(언팔) |
-| `pet_guardian_invites` | 초대자/피초대자/펫 owner/관리자 | 초대자 본인 + (invite 는 owner 만, request 는 누구나) | 관리자, invite 는 피초대자, request 는 펫 owner (응답 권한) | — |
+| `pet_guardian_invites` | 초대자/피초대자/펫 owner/관리자 | **REVOKE(2026-08-04)** — 정책은 남아 있으나 그랜트가 없어 도달 불가 | 관리자, invite 는 피초대자, request 는 펫 owner (응답 권한) | — |
 | `pet_guardians` | 그 펫의 보호자(아무 역할) 또는 관리자 | 펫 owner 또는 관리자 | 펫 owner 또는 관리자 | 펫 owner 또는 관리자 |
 | `pet_identity_frames` | 그 펫의 보호자 또는 관리자만 (신원 프레임은 비공개) | — | — | — |
 | `pets` | `pet_status<>'deleted'` 전체 공개 + 삭제펫은 보호자/관리자만 | `primary_guardian_id=uid` 본인 명의만 | 펫 owner 또는 관리자 | — |
@@ -2075,7 +2075,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 - **INSERT (authenticated, 14컬럼)**: 기본 프로필 컬럼 + `primary_guardian_id` 만 — `identity_verified`, `ai_*`, `pet_match_count`, `trust_score`, `verify_post_count` 는 직접 설정 불가(트리거·RPC 가 올린다).
 - **UPDATE (authenticated, 14컬럼)**: 프로필 컬럼 + `pet_status`. `primary_guardian_id` 는 INSERT 에만 있고 UPDATE 에는 **없다** — 소유권 이전은 트리거/RPC 만 할 수 있다.
 
-기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용). `post_pets` 는 2026-08-03 부터 쓰기 3종이 REVOKE 됐다(0032 §3). 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
+기타: `dong_centroids`, `facilities`, `facility_reviews`, `pet_identity_frames`, `photo_verifications`, `public_profiles` 및 모든 뷰는 anon/authenticated 에 **SELECT 만** 부여(쓰기는 RPC/서버 전용). `post_pets` 는 2026-08-03 부터 쓰기 3종이, `pet_guardian_invites` 는 2026-08-04 부터 INSERT 가 REVOKE 됐다(0032 §3·§7.6) — 둘 다 정책은 남겨 뒀다. 지금은 도달할 수 없지만 그랜트가 되살아나는 날에도 조건은 남아 있어야 한다. 나머지 일반 테이블은 테이블 수준 풀 권한 + RLS 로 통제. (`spatial_ref_sys`, `geometry_columns` 등 PostGIS 시스템 객체는 기본 그랜트 그대로.)
 
 ### 10.3. 함수 EXECUTE 권한 (2026-08-04 실측, PostGIS 제외 109개)
 
@@ -2158,7 +2158,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 ## 13. 마이그레이션 이력
 
-이 저장소가 관리하는 마이그레이션 **193건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+이 저장소가 관리하는 마이그레이션 **194건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
 `20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
 
 > ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
@@ -2365,3 +2365,4 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 | `20260804120000` | `realtime_publication_notifications` | notifications 를 supabase_realtime publication 에 넣는다 — **운영에는 이미 있다.** |
 | `20260804140000` | `posts_revoke_actual_coords_update` | posts.actual_lat/lng 의 클라이언트 UPDATE 권한 회수 — 안 받겠다고 한 값이 조용히 저장될 수 있었다. |
 | `20260804160000` | `ops_alarms` | 운영 알람 — 모으기만 하고 알려 주지 않던 것을 알리게 한다. |
+| `20260804180000` | `pgi_revoke_direct_insert` | 공동보호자 초대 직접 INSERT 회수 — 엣지 함수의 열거 방지 리밋을 우회할 수 있었다. |

@@ -8,7 +8,8 @@
 //         초대 안내 SMS 발송. 미가입자가 나중에 가입하면 tg_users_after_insert
 //         가 대기 초대를 연결하고 알림을 만든다.
 //
-//   남용 방지: 초대자당 하루 10건, 동일 번호로는 하루 1건만 SMS.
+//   남용 방지: **모든 초대 시도**가 초대자당 하루 20건(가입 여부와 무관) + SMS 는
+//   초대자당 하루 10건·동일 번호 하루 1건. 직접 INSERT 는 20260804180000 이 회수했다.
 //   verify_jwt=false 배포(수동 검증).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -20,6 +21,10 @@ import { loadSolapiConfig, normalizePhone, sendSms } from "../_shared/solapi.ts"
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
+// 가입 여부와 **무관하게** 모든 초대 시도에 걸리는 상한. 이게 없으면 가입자 번호를
+// 넣었을 때 아무 비용 없이 즉시 응답이 와서, 회원 여부를 무제한으로 캐낼 수 있다
+// (미가입 경로에만 리밋이 있었다). 공동보호자를 하루 20명 넘게 초대할 일은 없다.
+const INVITES_PER_INVITER_PER_DAY = 20;
 const SMS_PER_INVITER_PER_DAY = 10;
 const SMS_PER_PHONE_PER_DAY = 1;
 
@@ -63,7 +68,14 @@ Deno.serve(async (req: Request) => {
   if (role?.role !== "owner") return json({ error: "forbidden" }, 403);
   if (me.phone === phone) return json({ error: "self_invite" }, 400);
 
-  // 1) 대상 가입 여부 (SMS 필요 여부 판단).
+  // 1) **분기 전에** 시도 자체를 센다. 가입자/미가입자 어느 쪽으로 갈리든 예산을
+  //    쓰게 해야 열거가 묶인다. 형식 오류·권한 오류는 여기 오기 전에 걸러지므로
+  //    정상 사용자가 오타 때문에 예산을 잃지는 않는다.
+  if (await rateLimited(admin, `ginv:any:${uid}`, INVITES_PER_INVITER_PER_DAY, 86400)) {
+    return json({ error: "rate_limited" }, 429);
+  }
+
+  // 2) 대상 가입 여부 (SMS 필요 여부 판단 — 응답에는 싣지 않는다).
   const { data: target } = await admin
     .from("users")
     .select("id")
@@ -71,7 +83,7 @@ Deno.serve(async (req: Request) => {
     .limit(1)
     .maybeSingle();
 
-  // 2) 초대 INSERT — 가입자면 트리거가 invitee 연결 + 인앱 알림까지 처리.
+  // 3) 초대 INSERT — 가입자면 트리거가 invitee 연결 + 인앱 알림까지 처리.
   const { error: insErr } = await admin.from("pet_guardian_invites").insert({
     pet_id: petId,
     kind: "invite",
@@ -84,15 +96,18 @@ Deno.serve(async (req: Request) => {
     return json({ error: "internal_error" }, 500);
   }
 
-  if (target) return json({ ok: true, registered: true });
+  // 응답은 **가입 여부와 무관하게 동일하다.** 예전에는 registered:true|false 를 그대로
+  // 돌려줘서, 번호만 바꿔 부르면 회원 명부를 훑을 수 있었다. 초대자에게 필요한 정보는
+  // "초대됐다" 뿐이고, 상대가 가입 전이면 문자로 안내가 간다는 사실은 문구로 덮인다.
+  if (target) return json({ ok: true });
 
-  // 3) 미가입 번호 — rate limit 통과 시 초대 안내 SMS.
+  // 4) 미가입 번호 — SMS 상한을 따로 본다(문자 비용·스팸 방지는 열거와 별개 문제).
   const limited =
     (await rateLimited(admin, `ginv:u:${uid}`, SMS_PER_INVITER_PER_DAY, 86400)) ||
     (await rateLimited(admin, `ginv:p:${phone}`, SMS_PER_PHONE_PER_DAY, 86400));
   if (limited) {
     // 초대 자체는 저장됨 — 가입하면 연결된다. SMS 만 생략.
-    return json({ ok: true, registered: false, sms: "rate_limited" });
+    return json({ ok: true });
   }
   try {
     const cfg = loadSolapiConfig();
@@ -106,9 +121,9 @@ Deno.serve(async (req: Request) => {
       `공동보호자로 초대했어요. PawMate 앱에서 이 번호로 가입하면 초대를 확인할 수 있어요.`;
     const res = await sendSms(cfg, phone, text);
     if (!res.ok) console.error("invite sms failed", res.status, res.body);
-    return json({ ok: true, registered: false, sms: res.ok ? "sent" : "failed" });
+    return json({ ok: true });
   } catch (e) {
     console.error("invite sms error", e);
-    return json({ ok: true, registered: false, sms: "failed" });
+    return json({ ok: true });
   }
 });

@@ -28,7 +28,7 @@
 | `enroll-pet-identity` | 펫 신원 등록 (인증 영상 → AI 검증(+프레임 출처) → 기준 프레임) | 커스텀 JWT Bearer | false | ACTIVE v8 |
 | `search-petcafe` | 애견카페 실시간 검색 (네이버 지역검색 프록시) | 커스텀 JWT Bearer | false | ACTIVE v9 |
 | `resolve-region` | 좌표 → 행정동 역지오코딩 (부수효과 없음) | 커스텀 JWT Bearer | false | ACTIVE v3 |
-| `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS) | 커스텀 JWT Bearer | false | ACTIVE v1 |
+| `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS). **응답은 가입 여부와 무관하게 `{ok:true}` 로 통일**(2026-08-04) — 예전 `registered` 필드는 회원 여부 오라클이었다. 상한: 모든 시도 20/일·초대자, SMS 10/일·초대자 + 1/일·번호. 직접 INSERT 는 DB 에서 REVOKE | 커스텀 JWT Bearer | false | ACTIVE v1 |
 | `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `send-push` | pending 알림 FCM(HTTP v1) 발송 | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
