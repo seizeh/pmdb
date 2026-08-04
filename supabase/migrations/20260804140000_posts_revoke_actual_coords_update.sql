@@ -1,0 +1,16 @@
+-- posts.actual_lat/actual_lng 의 클라이언트 UPDATE 권한 회수.
+--
+-- 게시글 위치는 작성 GPS 가 아니라 **작성자 지역인증(users.region_code)** 기준이고,
+-- 정확 좌표는 저장하지 않는 것이 정책이다. SELECT 컬럼 그랜트에도 두 컬럼은 없다.
+-- 그런데 UPDATE 그랜트에는 남아 있어서, 인증 사용자가 자기 글에 PATCH 로
+-- 정확 좌표를 **써 넣을 수** 있었다(읽지는 못하지만 DB 에는 남는다).
+--
+-- 그 경로로 들어온 좌표는:
+--   · 위치 이용 기록에 안 남는다 — log_location_usage 는 AFTER **INSERT** 라 UPDATE 를 안 본다.
+--   · 어떤 뷰/RPC 로도 노출되지 않아 아무도 모른 채 쌓인다.
+-- 즉 "수집 안 한다"고 공지한 값이 조용히 저장될 수 있는 상태였다.
+--
+-- 실사용 없음을 확인하고 닫는다: 앱 코드에 actual_lat/actual_lng 참조가 없고,
+-- 값을 채우는 create_post_verified 는 SECURITY DEFINER 라 이 그랜트가 필요 없다.
+-- 적용 시점 기준 actual_lat/actual_lng 가 들어 있는 행은 0건이었다.
+revoke update (actual_lat, actual_lng) on public.posts from authenticated;
