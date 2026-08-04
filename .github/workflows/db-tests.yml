@@ -42,8 +42,13 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # 러너 기본 셸은 `-e` 다. 실패를 '받아서' 세는 게 이 스텝의 일이므로
+          # 여기서만 끈다 — 안 끄면 deno check 가 실패하는 순간 스크립트가 죽어
+          # 상한 비교에 도달하지도 못한다(집계가 아니라 무조건 빨간불이 된다).
+          set +e
           MAX=1
-          out=$(deno check supabase/functions/*/index.ts 2>&1); rc=$?
+          out=$(deno check supabase/functions/*/index.ts 2>&1)
+          rc=$?
           # 색상 이스케이프를 걷어내고 `TS####  [ERROR]` 헤더 줄을 센다.
           #
           # ⚠️ 종전에는 'Found N errors' 를 파싱했는데 **deno 는 오류가 1건이면 그 줄을
