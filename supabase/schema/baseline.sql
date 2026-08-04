@@ -2104,6 +2104,61 @@ COMMENT ON TABLE app.location_usage_logs IS '위치정보 이용·제공사실 �
 
 
 --
+-- Name: ops_alarm_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.ops_alarm_config (
+    id boolean DEFAULT true NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    window_minutes integer DEFAULT 15 NOT NULL,
+    cooldown_minutes integer DEFAULT 60 NOT NULL,
+    client_error_per_key integer DEFAULT 20 NOT NULL,
+    client_error_total integer DEFAULT 100 NOT NULL,
+    rate_limit_trips integer DEFAULT 100 NOT NULL,
+    push_failed integer DEFAULT 20 NOT NULL,
+    cron_failed integer DEFAULT 1 NOT NULL,
+    purge_overdue_hours integer DEFAULT 24 NOT NULL,
+    CONSTRAINT ops_alarm_config_client_error_per_key_check CHECK ((client_error_per_key > 0)),
+    CONSTRAINT ops_alarm_config_client_error_total_check CHECK ((client_error_total > 0)),
+    CONSTRAINT ops_alarm_config_cooldown_minutes_check CHECK (((cooldown_minutes >= 1) AND (cooldown_minutes <= 10080))),
+    CONSTRAINT ops_alarm_config_cron_failed_check CHECK ((cron_failed > 0)),
+    CONSTRAINT ops_alarm_config_id_check CHECK (id),
+    CONSTRAINT ops_alarm_config_purge_overdue_hours_check CHECK ((purge_overdue_hours > 0)),
+    CONSTRAINT ops_alarm_config_push_failed_check CHECK ((push_failed > 0)),
+    CONSTRAINT ops_alarm_config_rate_limit_trips_check CHECK ((rate_limit_trips > 0)),
+    CONSTRAINT ops_alarm_config_window_minutes_check CHECK (((window_minutes >= 1) AND (window_minutes <= 1440)))
+);
+
+
+--
+-- Name: ops_alarms; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.ops_alarms (
+    id bigint NOT NULL,
+    alarm_key text NOT NULL,
+    title text NOT NULL,
+    body text NOT NULL,
+    detail jsonb,
+    fired_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: ops_alarms_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarms ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.ops_alarms_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: push_config; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -2112,6 +2167,17 @@ CREATE TABLE app.push_config (
     function_url text NOT NULL,
     trigger_secret text DEFAULT encode(extensions.gen_random_bytes(24), 'hex'::text) NOT NULL,
     CONSTRAINT push_config_singleton CHECK (id)
+);
+
+
+--
+-- Name: rate_limit_trips; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.rate_limit_trips (
+    family text NOT NULL,
+    minute timestamp with time zone NOT NULL,
+    trips integer DEFAULT 0 NOT NULL
 );
 
 
@@ -2933,11 +2999,35 @@ ALTER TABLE ONLY app.location_usage_logs
 
 
 --
+-- Name: ops_alarm_config ops_alarm_config_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.ops_alarm_config
+    ADD CONSTRAINT ops_alarm_config_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ops_alarms ops_alarms_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.ops_alarms
+    ADD CONSTRAINT ops_alarms_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: push_config push_config_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
 ALTER TABLE ONLY app.push_config
     ADD CONSTRAINT push_config_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rate_limit_trips rate_limit_trips_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.rate_limit_trips
+    ADD CONSTRAINT rate_limit_trips_pkey PRIMARY KEY (family, minute);
 
 
 --
@@ -3341,6 +3431,27 @@ CREATE INDEX idx_location_usage_logs_used ON app.location_usage_logs USING btree
 --
 
 CREATE INDEX idx_location_usage_logs_user ON app.location_usage_logs USING btree (user_id, used_at DESC);
+
+
+--
+-- Name: ops_alarms_at_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX ops_alarms_at_idx ON app.ops_alarms USING btree (fired_at DESC);
+
+
+--
+-- Name: ops_alarms_key_at_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX ops_alarms_key_at_idx ON app.ops_alarms USING btree (alarm_key, fired_at DESC);
+
+
+--
+-- Name: rate_limit_trips_minute_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX rate_limit_trips_minute_idx ON app.rate_limit_trips USING btree (minute);
 
 
 --

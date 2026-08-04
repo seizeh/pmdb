@@ -245,6 +245,11 @@ CREATE FUNCTION app.cleanup_retention() RETURNS void
      and u.created_at < now() - interval '1 day'
      and not exists (
        select 1 from public.facility_reviews r where r.user_id = u.id);
+
+  -- ▼ 관측 데이터. client_errors 와 같은 30일로 맞춘다(같이 보게 되는 자료라 기간이
+  --   다르면 "왜 이때는 알람이 없지" 가 보존 차이인지 실제인지 구분이 안 된다).
+  delete from app.ops_alarms       where fired_at < now() - interval '30 days';
+  delete from app.rate_limit_trips where minute   < now() - interval '30 days';
 $$;
 
 
@@ -656,6 +661,163 @@ begin
     end if;
   end if;
   return new;
+end $$;
+
+
+--
+-- Name: ops_alarm_fire(text, integer, text, text, jsonb); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.ops_alarm_fire(p_key text, p_cooldown_min integer, p_title text, p_body text, p_detail jsonb) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if exists (
+    select 1 from app.ops_alarms a
+     where a.alarm_key = p_key
+       and a.fired_at > now() - make_interval(mins => p_cooldown_min)
+  ) then
+    return 0;
+  end if;
+
+  insert into app.ops_alarms (alarm_key, title, body, detail)
+  values (p_key, p_title, p_body, p_detail);
+
+  -- 활성 관리자 전원에게. actor_user_id 가 없으므로 차단 필터(§8.9)에 걸리지 않는다.
+  insert into public.notifications
+    (user_id, notification_type, is_system, title, body)
+  select u.id, 'system_notice', true, p_title, p_body
+    from public.users u
+   where u.user_type = 'admin' and u.status = 'active';
+
+  return 1;
+end $$;
+
+
+--
+-- Name: ops_alarm_sweep(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.ops_alarm_sweep() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  c      app.ops_alarm_config%rowtype;
+  v_from timestamptz;
+  v_n    integer := 0;
+  v_cnt  bigint;
+  r      record;
+begin
+  select * into c from app.ops_alarm_config limit 1;
+  -- 설정 행이 없으면 **조용히 꺼지는 대신 기본값으로 되살린다.**
+  -- 설정 INSERT 는 스키마가 아니라 데이터라 pg_dump --schema-only 에 안 담긴다 —
+  -- 스냅샷으로 세운 DB(테스트·재해복구)에서는 이 테이블이 비어 있다. 거기서
+  -- "행이 없으니 return 0" 이면 알람이 죽은 걸 알람이 알려 줄 수 없다.
+  if not found then
+    insert into app.ops_alarm_config (id) values (true) on conflict (id) do nothing;
+    select * into c from app.ops_alarm_config limit 1;
+  end if;
+  if not c.enabled then
+    return 0;
+  end if;
+  v_from := now() - make_interval(mins => c.window_minutes);
+
+  -- ① 앱 오류 급증 — 지점(where_key)별로 본다.
+  --    총량으로만 보면 여러 지점의 평상시 잡음이 합쳐져 임계를 넘고, 정작 한 지점이
+  --    터진 건 못 잡는다. 알람은 "어디가" 를 답해야 쓸모가 있다.
+  for r in
+    select e.where_key as k, count(*) as n
+      from app.client_errors e
+     where e.created_at > v_from
+     group by 1
+    having count(*) >= c.client_error_per_key
+  loop
+    v_n := v_n + app.ops_alarm_fire(
+      'client_error:' || r.k, c.cooldown_minutes,
+      '앱 오류 급증',
+      r.k || ' 에서 ' || r.n || '건 (최근 ' || c.window_minutes || '분)',
+      jsonb_build_object('where', r.k, 'count', r.n, 'window_min', c.window_minutes));
+  end loop;
+
+  -- ①-2 총량. 지점별만 보면 **넓게 깨진 경우를 놓친다** — 서버가 죽으면 모든 화면이
+  --     조금씩 실패해서 지점별로는 임계에 못 미치는데 총량은 폭증한다.
+  select count(*) into v_cnt
+    from app.client_errors e
+   where e.created_at > v_from;
+  if v_cnt >= c.client_error_total then
+    v_n := v_n + app.ops_alarm_fire(
+      'client_error_total', c.cooldown_minutes,
+      '앱 오류 총량 급증',
+      v_cnt || '건 (최근 ' || c.window_minutes || '분, 지점 무관)',
+      jsonb_build_object('count', v_cnt, 'window_min', c.window_minutes));
+  end if;
+
+  -- ② 레이트리밋 발동 — 계열별.
+  for r in
+    select t.family as k, sum(t.trips) as n
+      from app.rate_limit_trips t
+     where t.minute > v_from
+     group by 1
+    having sum(t.trips) >= c.rate_limit_trips
+  loop
+    v_n := v_n + app.ops_alarm_fire(
+      'ratelimit:' || r.k, c.cooldown_minutes,
+      '레이트리밋 다발',
+      r.k || ' 계열이 ' || r.n || '회 차단됨 (최근 ' || c.window_minutes || '분)',
+      jsonb_build_object('family', r.k, 'trips', r.n, 'window_min', c.window_minutes));
+  end loop;
+
+  -- ③ 푸시 발송 실패.
+  select count(*) into v_cnt
+    from public.notifications n
+   where n.push_status = 'failed'
+     and n.updated_at > v_from;
+  if v_cnt >= c.push_failed then
+    v_n := v_n + app.ops_alarm_fire(
+      'push_failed', c.cooldown_minutes,
+      '푸시 발송 실패 다발',
+      v_cnt || '건 실패 (최근 ' || c.window_minutes || '분)',
+      jsonb_build_object('count', v_cnt, 'window_min', c.window_minutes));
+  end if;
+
+  -- ④ 크론 실패. 'running' 은 진행 중이므로 세지 않는다.
+  --    이 스윕 자신이 실패하면 이 조건도 못 돈다 — 다음 회차가 지난 실패를 잡는다.
+  --
+  --    to_regclass 로 먼저 확인하는 이유: pg_cron 은 **운영에만 있다**. pgTAP CI 는
+  --    prelude + schema.sql(= -n public -n app 덤프)만 복원하므로 cron 스키마가 없고,
+  --    그냥 참조하면 이 함수는 그 환경에서 통째로 못 돈다 — 알람을 검증하려고
+  --    부르는 순간 터진다. 없으면 이 조건만 건너뛴다.
+  v_cnt := 0;
+  if to_regclass('cron.job_run_details') is not null then
+    select count(*) into v_cnt
+      from cron.job_run_details d
+     where d.status = 'failed'
+       and d.end_time > v_from;
+  end if;
+  if v_cnt >= c.cron_failed then
+    v_n := v_n + app.ops_alarm_fire(
+      'cron_failed', c.cooldown_minutes,
+      '크론 잡 실패',
+      v_cnt || '건 실패 (최근 ' || c.window_minutes || '분)',
+      jsonb_build_object('count', v_cnt, 'window_min', c.window_minutes));
+  end if;
+
+  -- ⑤ 증빙 파기 적체 — 법정 의무가 미이행인 상태이므로 급증이 아니라 **1건이라도** 본다.
+  select count(*) into v_cnt
+    from app.business_doc_purge_queue q
+   where q.purged_at is null
+     and q.purge_after < now() - make_interval(hours => c.purge_overdue_hours);
+  if v_cnt > 0 then
+    v_n := v_n + app.ops_alarm_fire(
+      'purge_overdue', c.cooldown_minutes,
+      '증빙 파기 지연',
+      v_cnt || '건이 ' || c.purge_overdue_hours || '시간 넘게 파기되지 않음',
+      jsonb_build_object('count', v_cnt, 'overdue_hours', c.purge_overdue_hours));
+  end if;
+
+  return v_n;
 end $$;
 
 
@@ -3144,6 +3306,27 @@ $$;
 
 
 --
+-- Name: admin_ops_alarms(integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_ops_alarms(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, alarm_key text, title text, body text, detail jsonb, fired_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  return query
+  select a.id, a.alarm_key, a.title, a.body, a.detail, a.fired_at
+    from app.ops_alarms a
+   order by a.fired_at desc
+   limit greatest(1, least(coalesce(p_limit, 50), 200))
+  offset greatest(0, coalesce(p_offset, 0));
+end $$;
+
+
+--
 -- Name: admin_ops_metrics(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -5352,6 +5535,19 @@ begin
   values (v_bucket, 1, now() + make_interval(secs => p_window_seconds))
   on conflict (bucket) do update set count = app.rate_limits.count + 1
   returning count into v_count;
+
+  if v_count > p_max then
+    -- 관측이 제한기를 죽이면 안 된다. 기록이 실패해도 판정은 그대로 나간다.
+    begin
+      insert into app.rate_limit_trips (family, minute, trips)
+      values (split_part(p_key, ':', 1), date_trunc('minute', now()), 1)
+      on conflict (family, minute) do update
+        set trips = app.rate_limit_trips.trips + 1;
+    exception when others then
+      null;
+    end;
+  end if;
+
   return v_count <= p_max;
 end $$;
 
@@ -6864,6 +7060,61 @@ COMMENT ON TABLE app.location_usage_logs IS '위치정보 이용·제공사실 �
 
 
 --
+-- Name: ops_alarm_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.ops_alarm_config (
+    id boolean DEFAULT true NOT NULL,
+    enabled boolean DEFAULT true NOT NULL,
+    window_minutes integer DEFAULT 15 NOT NULL,
+    cooldown_minutes integer DEFAULT 60 NOT NULL,
+    client_error_per_key integer DEFAULT 20 NOT NULL,
+    client_error_total integer DEFAULT 100 NOT NULL,
+    rate_limit_trips integer DEFAULT 100 NOT NULL,
+    push_failed integer DEFAULT 20 NOT NULL,
+    cron_failed integer DEFAULT 1 NOT NULL,
+    purge_overdue_hours integer DEFAULT 24 NOT NULL,
+    CONSTRAINT ops_alarm_config_client_error_per_key_check CHECK ((client_error_per_key > 0)),
+    CONSTRAINT ops_alarm_config_client_error_total_check CHECK ((client_error_total > 0)),
+    CONSTRAINT ops_alarm_config_cooldown_minutes_check CHECK (((cooldown_minutes >= 1) AND (cooldown_minutes <= 10080))),
+    CONSTRAINT ops_alarm_config_cron_failed_check CHECK ((cron_failed > 0)),
+    CONSTRAINT ops_alarm_config_id_check CHECK (id),
+    CONSTRAINT ops_alarm_config_purge_overdue_hours_check CHECK ((purge_overdue_hours > 0)),
+    CONSTRAINT ops_alarm_config_push_failed_check CHECK ((push_failed > 0)),
+    CONSTRAINT ops_alarm_config_rate_limit_trips_check CHECK ((rate_limit_trips > 0)),
+    CONSTRAINT ops_alarm_config_window_minutes_check CHECK (((window_minutes >= 1) AND (window_minutes <= 1440)))
+);
+
+
+--
+-- Name: ops_alarms; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.ops_alarms (
+    id bigint NOT NULL,
+    alarm_key text NOT NULL,
+    title text NOT NULL,
+    body text NOT NULL,
+    detail jsonb,
+    fired_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: ops_alarms_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarms ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.ops_alarms_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: push_config; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -6872,6 +7123,17 @@ CREATE TABLE app.push_config (
     function_url text NOT NULL,
     trigger_secret text DEFAULT encode(extensions.gen_random_bytes(24), 'hex'::text) NOT NULL,
     CONSTRAINT push_config_singleton CHECK (id)
+);
+
+
+--
+-- Name: rate_limit_trips; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.rate_limit_trips (
+    family text NOT NULL,
+    minute timestamp with time zone NOT NULL,
+    trips integer DEFAULT 0 NOT NULL
 );
 
 
@@ -8324,11 +8586,35 @@ ALTER TABLE ONLY app.location_usage_logs
 
 
 --
+-- Name: ops_alarm_config ops_alarm_config_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.ops_alarm_config
+    ADD CONSTRAINT ops_alarm_config_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: ops_alarms ops_alarms_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.ops_alarms
+    ADD CONSTRAINT ops_alarms_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: push_config push_config_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
 ALTER TABLE ONLY app.push_config
     ADD CONSTRAINT push_config_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rate_limit_trips rate_limit_trips_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.rate_limit_trips
+    ADD CONSTRAINT rate_limit_trips_pkey PRIMARY KEY (family, minute);
 
 
 --
@@ -8884,6 +9170,27 @@ CREATE INDEX idx_location_usage_logs_used ON app.location_usage_logs USING btree
 --
 
 CREATE INDEX idx_location_usage_logs_user ON app.location_usage_logs USING btree (user_id, used_at DESC);
+
+
+--
+-- Name: ops_alarms_at_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX ops_alarms_at_idx ON app.ops_alarms USING btree (fired_at DESC);
+
+
+--
+-- Name: ops_alarms_key_at_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX ops_alarms_key_at_idx ON app.ops_alarms USING btree (alarm_key, fired_at DESC);
+
+
+--
+-- Name: rate_limit_trips_minute_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX rate_limit_trips_minute_idx ON app.rate_limit_trips USING btree (minute);
 
 
 --
@@ -11470,6 +11777,20 @@ GRANT ALL ON FUNCTION app.mark_push_skipped(p_notification_id uuid, p_reason tex
 
 
 --
+-- Name: FUNCTION ops_alarm_fire(p_key text, p_cooldown_min integer, p_title text, p_body text, p_detail jsonb); Type: ACL; Schema: app; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app.ops_alarm_fire(p_key text, p_cooldown_min integer, p_title text, p_body text, p_detail jsonb) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION ops_alarm_sweep(); Type: ACL; Schema: app; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app.ops_alarm_sweep() FROM PUBLIC;
+
+
+--
 -- Name: FUNCTION reconcile_unread_counts(p_user_id uuid); Type: ACL; Schema: app; Owner: -
 --
 
@@ -11661,6 +11982,15 @@ GRANT ALL ON FUNCTION public.admin_list_users(p_search text, p_limit integer, p_
 REVOKE ALL ON FUNCTION public.admin_location_usage_logs(p_user uuid, p_limit integer, p_offset integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.admin_location_usage_logs(p_user uuid, p_limit integer, p_offset integer) TO authenticated;
 GRANT ALL ON FUNCTION public.admin_location_usage_logs(p_user uuid, p_limit integer, p_offset integer) TO service_role;
+
+
+--
+-- Name: FUNCTION admin_ops_alarms(p_limit integer, p_offset integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_ops_alarms(p_limit integer, p_offset integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_ops_alarms(p_limit integer, p_offset integer) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_ops_alarms(p_limit integer, p_offset integer) TO service_role;
 
 
 --
