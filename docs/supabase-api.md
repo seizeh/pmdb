@@ -45,6 +45,16 @@
 
 인증 모델 요약: Supabase Auth(GoTrue)를 쓰지 않는 **완전 커스텀 인증**이다. `login`이 HS256 access JWT(프로젝트 JWT Secret으로 서명, `sub/role=authenticated/aud=authenticated/iss=supabase/tv` 클레임)를 직접 발급하고, PostgREST가 네이티브로 검증하며 `app.uid()`가 `status='active'` + `token_version(tv)` 일치를 매 요청 게이트한다. 엣지 함수들은 게이트웨이 `verify_jwt`를 끄고 `_shared/auth.ts`(또는 각 함수 내 동일 로직 복제본)로 **수동 검증**한다 — 함수별 `verify_jwt` 값은 `supabase/config.toml`(2026-07-02 추가)에 명시되어 재배포 시 결정론적으로 적용된다(전화인증/가입 계열 4개 — send-phone-code·verify-phone-code·signup·signup-lite — 만 true, 나머지 false). DB 접근은 전부 `service_role` 클라이언트 경유(관련 테이블·RPC에 anon/authenticated GRANT 없음).
 
+## 1.1 CI — Edge Function 타입 검사
+
+`db-tests.yml` 의 `denocheck` 잡이 `deno check supabase/functions/*/index.ts` 를 돌린다(2026-08-04 신설).
+
+**래칫이다 — 0 이 아니라 "현재보다 늘지 않기".** 저장소가 그동안 `deno check` 를 한 번도 돌린 적이 없어 기존 오류가 **18건** 쌓여 있다. 전부 런타임에는 무해하지만(Deno 가 타입을 지우고 실행) 진짜 타입 오류가 섞여 들어와도 구분할 방법이 없었다 — 그 구분을 만드는 게 목적이다. 줄어들면 CI 가 상한을 내리라고 알려 준다.
+
+이 잡이 **함수 배포의 게이트**이기도 하다. `deploy-functions.yml` 은 "DB Tests" 성공에 물려 있는데(workflow_run) 그 워크플로가 정작 함수 코드를 아무도 안 보고 있었다 — 배포를 유발하는 변경과 게이트가 검증하는 대상이 서로소였다(0031 §2.3 ↔ §3.6).
+
+⚠️ 오류 수가 **우리 코드와 무관하게 움직일 수 있다.** import 가 `jsr:@supabase/supabase-js@2` 처럼 범위 지정이고 lockfile 이 없어서다. lockfile 을 두지 않은 건 배포가 그걸 쓰지 않기 때문 — CI 만 고정하면 실제로 나가는 것과 다른 걸 검사하게 된다. Deno 버전(v2.9.4)은 고정해 드리프트 축을 하나 줄였다.
+
 ## 2. 공용 모듈 (_shared)
 
 ### 2.1 `_shared/auth.ts` — 커스텀 JWT/refresh 토큰 유틸

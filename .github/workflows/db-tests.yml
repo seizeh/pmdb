@@ -2,6 +2,9 @@
 #   pgtap  : 스키마 스냅샷을 복원한 뒤 pgTAP 불변식 테스트를 돌린다(빠른 회귀).
 #   replay : 빈 DB 에 baseline + 마이그레이션을 처음부터 다시 쌓아 스냅샷과 대조한다
 #            (재현성 + 스냅샷/마이그레이션 드리프트 감지 — scripts/replay_check.sh).
+#   deno   : Edge Function 타입 검사(래칫). 이 워크플로가 함수 배포의 게이트인데
+#            (deploy-functions.yml 의 workflow_run) 정작 함수 코드를 아무도 안 보고
+#            있었다 — 배포를 유발하는 변경과 게이트가 검증하는 대상이 서로소였다.
 name: DB Tests
 
 on:
@@ -11,6 +14,50 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Edge Function 타입 검사 — **래칫**이다(0 이 아니라 "현재보다 늘지 않기").
+  #
+  # 왜 0 이 아닌가: 이 저장소는 deno check 를 한 번도 돌린 적이 없어서 기존 오류가
+  # 18건 쌓여 있다. 전부 런타임에는 무해하지만(Deno 가 타입을 지우고 실행) 진짜
+  # 타입 오류가 섞여 들어와도 구분할 방법이 없었다 — 그 구분을 만드는 게 목적이다.
+  # 커버리지 래칫과 같은 방식으로 상한을 고정하고 줄여 간다(0031 §3.6).
+  #
+  # ⚠️ 숫자가 우리 코드와 무관하게 움직일 수 있다. import 가 `jsr:@supabase/supabase-js@2`
+  # 처럼 범위 지정이고 lockfile 이 없어서, 의존성이 새 버전을 내면 오류 수가 바뀐다.
+  # lockfile 을 두지 않은 이유는 **배포가 그걸 쓰지 않기 때문**이다 — CI 만 고정하면
+  # 실제로 나가는 것과 다른 걸 검사하게 된다. Deno 버전은 고정해 드리프트 축을 하나
+  # 줄였다. 늘어서 빨간불이 되면 새 오류가 우리 것인지 의존성 것인지 먼저 보고,
+  # 의존성 쪽이면 상한을 그 값으로 올리며 이유를 커밋에 남길 것.
+  denocheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          # 고정한다 — 새 Deno 가 검사를 조이면 우리 코드와 무관하게 빨간불이 된다.
+          deno-version: v2.9.4
+
+      - name: 타입 검사 (래칫 ≤18)
+        shell: bash
+        run: |
+          set -uo pipefail
+          MAX=18
+          out=$(deno check supabase/functions/*/index.ts 2>&1 || true)
+          # 오류가 0 이면 "Found N errors" 줄 자체가 없다.
+          n=$(printf '%s\n' "$out" | grep -oE 'Found [0-9]+ error' | grep -oE '[0-9]+' || true)
+          n=${n:-0}
+          echo "deno check 오류 $n건 (상한 $MAX)" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$n" -gt "$MAX" ]; then
+            echo "$out"
+            echo "::error::타입 오류가 $n건으로 상한 $MAX 을 넘었습니다."
+            echo "새로 생긴 오류가 이 PR 것인지 의존성 업데이트 탓인지 먼저 확인하세요."
+            exit 1
+          fi
+          if [ "$n" -lt "$MAX" ]; then
+            echo "::notice::오류가 $n건으로 줄었습니다 — db-tests.yml 의 MAX 를 $n 으로 내려주세요(래칫)."
+          fi
+
   pgtap:
     runs-on: ubuntu-latest
     timeout-minutes: 15
