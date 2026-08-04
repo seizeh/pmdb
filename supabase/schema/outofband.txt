@@ -1,7 +1,7 @@
 PUBLICATION supabase_realtime  public.chat_messages
 PUBLICATION supabase_realtime  public.notifications
 BUCKET business-docs  public=false  size_limit=10485760  mime=image/jpeg,image/png,image/webp,application/pdf
-BUCKET media  public=true  size_limit=-  mime=-
+BUCKET media  public=true  size_limit=104857600  mime=image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,video/mp4,video/quicktime,video/webm,video/3gpp
 STORAGE POLICY business docs admin select  cmd=SELECT  roles={authenticated}  qual=((bucket_id = 'business-docs'::text) AND app.is_admin())  check=-
 STORAGE POLICY business docs owner insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'business-docs'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))
 STORAGE POLICY business docs owner select  cmd=SELECT  roles={authenticated}  qual=((bucket_id = 'business-docs'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))  check=-
