@@ -118,6 +118,23 @@ $$;
 
 
 --
+-- Name: blocked_ids(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.blocked_ids() RETURNS uuid[]
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select coalesce(array_agg(distinct other), '{}'::uuid[])
+  from (
+    select case when b.blocker_id = app.uid() then b.blocked_id else b.blocker_id end as other
+    from public.user_blocks b
+    where b.blocker_id = app.uid() or b.blocked_id = app.uid()
+  ) s
+$$;
+
+
+--
 -- Name: chat_block_blocked_user(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -11191,7 +11208,7 @@ CREATE POLICY comments_insert ON public.comments FOR INSERT WITH CHECK ((user_id
 -- Name: comments comments_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY comments_select ON public.comments FOR SELECT USING (((is_deleted = false) OR ( SELECT app.is_admin() AS is_admin)));
+CREATE POLICY comments_select ON public.comments FOR SELECT USING ((((is_deleted = false) OR ( SELECT app.is_admin() AS is_admin)) AND (( SELECT app.is_admin() AS is_admin) OR (NOT (user_id = ANY (( SELECT app.blocked_ids() AS blocked_ids)::uuid[]))))));
 
 
 --
@@ -11620,7 +11637,7 @@ CREATE POLICY posts_insert ON public.posts FOR INSERT WITH CHECK ((user_id = ( S
 -- Name: posts posts_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY posts_select ON public.posts FOR SELECT USING ((((visibility_status)::text = 'visible'::text) OR (((visibility_status)::text = 'hidden_by_user'::text) AND (user_id = ( SELECT app.uid() AS uid))) OR ( SELECT app.is_admin() AS is_admin)));
+CREATE POLICY posts_select ON public.posts FOR SELECT USING (((((visibility_status)::text = 'visible'::text) OR (((visibility_status)::text = 'hidden_by_user'::text) AND (user_id = ( SELECT app.uid() AS uid))) OR ( SELECT app.is_admin() AS is_admin)) AND (( SELECT app.is_admin() AS is_admin) OR (NOT (user_id = ANY (( SELECT app.blocked_ids() AS blocked_ids)::uuid[]))))));
 
 
 --
@@ -11754,6 +11771,16 @@ GRANT USAGE ON SCHEMA public TO postgres;
 GRANT USAGE ON SCHEMA public TO anon;
 GRANT USAGE ON SCHEMA public TO authenticated;
 GRANT USAGE ON SCHEMA public TO service_role;
+
+
+--
+-- Name: FUNCTION blocked_ids(); Type: ACL; Schema: app; Owner: -
+--
+
+REVOKE ALL ON FUNCTION app.blocked_ids() FROM PUBLIC;
+GRANT ALL ON FUNCTION app.blocked_ids() TO anon;
+GRANT ALL ON FUNCTION app.blocked_ids() TO authenticated;
+GRANT ALL ON FUNCTION app.blocked_ids() TO service_role;
 
 
 --
