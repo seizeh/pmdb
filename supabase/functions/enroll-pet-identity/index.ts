@@ -17,6 +17,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { imageMime } from "../_shared/upload.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 
@@ -213,8 +214,11 @@ Deno.serve(async (req: Request) => {
   const videoBase64 = typeof p.videoBase64 === "string" ? p.videoBase64 : "";
   const videoMime = p.videoMime ?? "video/mp4";
   const frames = Array.isArray(p.frames) ? p.frames : [];
-  const mimeType = p.mimeType ?? "image/jpeg";
+  // 프레임은 media(공개 버킷)에 올라간다. 클라이언트 값을 그대로 믿지 않는다 —
+  // 버킷이 최종 관문이지만 여기서 걸러야 400 이 되고 오탐 알람이 안 울린다.
+  const mimeType = imageMime(p.mimeType) ?? (p.mimeType ? "" : "image/jpeg");
 
+  if (!mimeType) return json({ enrolled: false, reason: "unsupported_mime" }, 400);
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
   if (frames.length < 3) return json({ enrolled: false, reason: "too_few_frames" }, 400);

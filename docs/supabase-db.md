@@ -27,7 +27,7 @@
 
 - **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **19개**(§3.8)
 - **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
-- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 194건
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 195건
 - **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
 - **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
 - **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
@@ -2103,7 +2103,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 | id | public | file_size_limit | allowed_mime_types |
 |---|---|---|---|
-| `media` | **true (공개)** | 제한 없음(NULL) | 제한 없음(NULL) |
+| `media` | **true (공개)** | 104,857,600 (100MB) | `image/jpeg`, `image/png`, `image/webp`, `image/gif`, `image/heic`, `image/heif`, `video/mp4`, `video/quicktime`, `video/webm`, `video/3gpp` |
 | `business-docs` | false (비공개) | 10,485,760 (10MB) | `image/jpeg`, `image/png`, `image/webp`, `application/pdf` |
 
 - `media` 는 **공개 버킷**이다 — 업로드된 객체는 public URL 로 누구나 읽을 수 있다(프로필/게시글/채팅 이미지, 시설 후기 사진·영상, 펫 신원 프레임 등). 경로 규약은 `<user_id>/<category>/<파일>`.
@@ -2121,11 +2121,22 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 - `media` 의 **공개 읽기 정책은 없다.** 공개 버킷이라 읽기는 정책이 아니라 버킷 속성으로 열린다 — 초기에 있던 `media public read` 는 이후 마이그레이션이 drop 했다.
 - `media lite review insert` 가 별도로 필요한 이유: 다른 정책은 전부 `app.uid()` 기준이라 **`status='lite'` 인 간이 회원은 후기 사진을 올릴 수 없었다**(0032 §1.1). 범위를 `facility_review/` 로 좁혀 열었다.
 
-> ⚠️ **알려진 위험 두 가지.**
-> ① `media` 에 크기·MIME 제한이 없고, `enroll-pet-identity`·`verify-post-photo` 가
-> **클라이언트가 보낸 `mimeType` 을 그대로 `contentType` 으로 저장**한다 → 공개 CDN 에
-> 임의 파일을 올릴 통로가 된다(0032 §9.2, 미조치).
-> ② 공개 버킷이라 URL 을 아는 누구나 원본(사진 검증 원본·펫 신원 프레임)을 볼 수 있다.
+> **2026-08-04 제한 신설(0032 §7.7).** 그전에는 크기·MIME 제한이 **둘 다 없었다.**
+> 공개 버킷은 저장된 content-type 을 응답 헤더로 그대로 내보내고(실측: 공개 URL 에
+> `X-Content-Type-Options: nosniff` 도 `Content-Disposition` 도 없다), 쓰기 통제는
+> 경로 규약뿐이라 **로그인한 누구나 자기 폴더에 `text/html` 을 올려 supabase.co
+> 도메인에서 살아 있는 페이지를 만들 수 있었다.** `image/svg+xml` 은 이미지처럼 보이면서
+> 스크립트를 품는다. 그래서 `image/*` 와일드카드를 쓰지 않고 목록을 명시한다 —
+> 와일드카드로는 svg 를 뺄 수가 없다.
+>
+> 허용 목록이 이 모양인 근거: jpeg/png 는 현재 운영 객체 전부, webp/gif 는 갤러리 경로,
+> **heic/heif 는 `_normalizePhoto` 가 디코드 실패 시 원본을 그대로 올리기 때문**(빼면 비-Safari
+> HEIC 사용자만 조용히 깨진다), 영상 4종은 iOS(quicktime)·안드로이드 갤러리 컨테이너.
+> 크기 100MB 는 앱의 동영상 상한과 같은 값이다(버킷 상한은 MIME 별로 못 나눈다).
+>
+> ⚠️ **남는 위험**: 공개 버킷이라 URL 을 아는 누구나 원본(사진 검증 원본·펫 신원 프레임)을
+> 볼 수 있다. 또한 MIME 은 **선언값**만 검사되므로 jpeg 라고 선언하고 다른 바이트를 넣을 수는
+> 있다 — 다만 그 경우에도 서빙 헤더가 `image/jpeg` 라 브라우저가 실행하지 않는다.
 
 ## 12. Realtime
 
@@ -2158,7 +2169,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 ## 13. 마이그레이션 이력
 
-이 저장소가 관리하는 마이그레이션 **194건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+이 저장소가 관리하는 마이그레이션 **195건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
 `20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
 
 > ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
@@ -2366,3 +2377,4 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 | `20260804140000` | `posts_revoke_actual_coords_update` | posts.actual_lat/lng 의 클라이언트 UPDATE 권한 회수 — 안 받겠다고 한 값이 조용히 저장될 수 있었다. |
 | `20260804160000` | `ops_alarms` | 운영 알람 — 모으기만 하고 알려 주지 않던 것을 알리게 한다. |
 | `20260804180000` | `pgi_revoke_direct_insert` | 공동보호자 초대 직접 INSERT 회수 — 엣지 함수의 열거 방지 리밋을 우회할 수 있었다. |
+| `20260804200000` | `media_bucket_limits` | media 버킷 MIME·용량 제한 — 공개 CDN 이 임의 파일 호스팅이 되지 않게. |

@@ -14,6 +14,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { imageMime } from "../_shared/upload.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 
@@ -204,7 +205,11 @@ Deno.serve(async (req: Request) => {
     return json({ error: "invalid_json" }, 400);
   }
   const imageBase64 = typeof p.imageBase64 === "string" ? p.imageBase64 : "";
-  const mimeType = p.mimeType ?? "image/jpeg";
+  // 클라이언트가 보낸 값이다 — 그대로 contentType 으로 쓰면 공개 CDN 에 임의
+  // content-type 을 심는 통로가 된다. 버킷이 최종적으로 막지만(20260804200000)
+  // 여기서 걸러야 400 으로 돌려주고 오탐 알람이 울리지 않는다.
+  const mimeType = imageMime(p.mimeType) ?? (p.mimeType ? "" : "image/jpeg");
+  if (!mimeType) return json({ error: "unsupported_mime" }, 400);
   const lat = Number(p.lat);
   const lng = Number(p.lng);
   const petId = typeof p.petId === "string" ? p.petId : "";
