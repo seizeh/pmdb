@@ -118,16 +118,27 @@ Deno.serve(async (req: Request) => {
 
   // 0) 목적별 계정 존재 검증 — 가입된 번호에 가입용 문자를 보내지 않는다.
   //    review 는 어느 분기에도 걸리지 않는다(존재 여부 무관 발송).
+  //
+  //    ⚠️ **간이 회원(status='lite')은 '가입된 번호'가 아니다.** signup_lite_user 가
+  //    후기 작성용으로 만든 users 행일 뿐, 아이디·비밀번호가 없는 비회원이다.
+  //    status 를 안 보면 그 행 때문에 phone_taken 이 나가고, 그러면 signup 목적
+  //    인증을 영영 못 받아 **signup_user 의 승격 분기(lite → active)에 도달할 수
+  //    없다** — 간이로 후기를 쓴 사람이 정식 가입을 못 하는 막다른 골목이 된다.
+  //    (그 분기는 실제로 구현돼 있는데 앞단이 막고 있었다. 0029 §승격.)
   const { data: existing, error: exErr } = await supabase
-    .from("users").select("id").eq("phone", phone).limit(1).maybeSingle();
+    .from("users").select("id, status").eq("phone", phone).limit(1).maybeSingle();
   if (exErr) {
     console.error("phone lookup failed", exErr);
     return json({ error: "internal_error" }, 500);
   }
-  if (purpose === "signup" && existing) {
+  const isLite = existing?.status === "lite";
+  if (purpose === "signup" && existing && !isLite) {
     return json({ error: "phone_taken" }, 409);
   }
-  if (purpose === "password_reset" && !existing) {
+  //    간이 회원은 비밀번호가 없다(password_hash 는 검증 불가 sentinel '!').
+  //    재설정을 통과시키면 200 을 받고도 로그인이 안 되는 상태가 된다 —
+  //    get_login_user 가 status='active' 만 돌려주기 때문이다. 가입으로 보낸다.
+  if (purpose === "password_reset" && (!existing || isLite)) {
     return json({ error: "user_not_found" }, 404);
   }
 
