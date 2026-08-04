@@ -10,12 +10,16 @@
 // 폭주가 알림 폭주로 번지지 않게. 알림 실패가 본 흐름을 깨면 안 되므로
 // 절대 throw 하지 않는다(전부 console.error 후 무시).
 // ============================================================================
-import { createClient } from "jsr:@supabase/supabase-js@2";
-
 const ALERT_WINDOW_SECONDS = 1800; // 같은 key 30분 1회
 
+// `ReturnType<typeof createClient>` 이었는데, 타입 인자를 안 준 createClient 의
+// 스키마 제네릭이 never 로 굳어 **rpc/from 호출이 전부 타입 오류**가 났다(3건).
+// 호출부마다 캐스팅을 뿌리는 대신 _shared/auth.ts 의 rateLimited·activeUid 와
+// 같은 방식으로 맞춘다 — 이 저장소는 생성 타입을 쓰지 않으므로 여기서 얻을
+// 타입 안전성이 애초에 없었다.
+// deno-lint-ignore no-explicit-any
 export async function alertAdmins(
-  admin: ReturnType<typeof createClient>,
+  admin: any,
   key: string,
   title: string,
   body: string,
