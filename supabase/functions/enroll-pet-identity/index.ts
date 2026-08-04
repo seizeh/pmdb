@@ -147,8 +147,11 @@ reason 한국어 80자 이내.`;
 /// 실패 조회(admin_photo_verification_failures)에 노출시키기 위함. 기존에는 실패 시
 /// 아무 기록이 없어 운영자가 원인을 볼 수 없었다. 기록 실패는 응답을 막지 않는다.
 /// 촬영 좌표(shot_*)는 넣지 않으므로 위치정보 확인자료 트리거는 발화하지 않는다.
+// deno-lint-ignore no-explicit-any
 async function logEnrollFail(
-  admin: ReturnType<typeof createClient>,
+  // edge_alert.ts 와 같은 이유로 any — 타입 인자 없는 createClient 의 스키마
+  // 제네릭이 never 로 굳어 호출부마다 오류가 났다(7건).
+  admin: any,
   uid: string,
   petId: string,
   reason: string,

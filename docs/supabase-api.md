@@ -30,7 +30,7 @@
 | `resolve-region` | 좌표 → 행정동 역지오코딩 (부수효과 없음) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS). **응답은 가입 여부와 무관하게 `{ok:true}` 로 통일**(2026-08-04) — 예전 `registered` 필드는 회원 여부 오라클이었다. 상한: 모든 시도 20/일·초대자, SMS 10/일·초대자 + 1/일·번호. 직접 INSERT 는 DB 에서 REVOKE | 커스텀 JWT Bearer | false | ACTIVE v1 |
 | `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
-| `send-push` | pending 알림 FCM(HTTP v1) 발송 | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
+| `send-push` | pending 알림 FCM(HTTP v1) 발송. **죽은 토큰 판정은 토큰 원인이 확실할 때만**(2026-08-04) — `INVALID_ARGUMENT` 는 페이로드 오류로도 나와서, 종전에는 우리 버그 하나로 수신자의 모든 기기가 꺼졌다. 분류는 `_shared/fcm.ts` | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
 위 표는 17개. **원격 배포는 21개**로, 아래 4개는 이 문서에 아직 항목이 없다(0028 업체 인증·공유 뷰어 계열, 2026-07-27 확인).
 

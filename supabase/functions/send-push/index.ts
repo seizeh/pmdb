@@ -8,6 +8,8 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { classifyFcmError } from "../_shared/fcm.ts";
+import { alertAdmins } from "../_shared/edge_alert.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
@@ -92,6 +94,9 @@ Deno.serve(async (req: Request) => {
 
   const url = `https://fcm.googleapis.com/v1/projects/${sa.project_id}/messages:send`;
   const results: Array<{ notification_id: string; ok: boolean; error: string | null; dead_tokens: string[] }> = [];
+  // 사람이 봐야 하는 실패(우리 페이로드 버그·APNs 설정)를 배치 전체에서 모았다가
+  // 마지막에 한 번만 알린다. 토큰마다 알리면 알림이 알림을 덮는다.
+  let attention: string | null = null;
   for (const it of list) {
     let anyOk = false; let lastErr: string | null = null; const dead: string[] = [];
     for (const t of (it.tokens ?? [])) {
@@ -115,13 +120,25 @@ Deno.serve(async (req: Request) => {
       if (r.ok) { anyOk = true; }
       else {
         const err = await r.json().catch(() => ({}));
-        const code = err?.error?.details?.[0]?.errorCode ?? err?.error?.status ?? String(r.status);
-        lastErr = code;
-        if (code === "UNREGISTERED" || code === "INVALID_ARGUMENT" || r.status === 404) dead.push(t.token);
+        // 종전에는 INVALID_ARGUMENT 면 무조건 토큰을 껐다. 그건 **요청이 잘못됐다**
+        // 는 뜻이라 페이로드 버그로도 나오고, 그러면 그 알림의 모든 수신 기기가
+        // 한 번에 꺼진다 — 우리 잘못을 사용자 기기로 갚는 셈이다(_shared/fcm.ts).
+        const v = classifyFcmError(err, r.status);
+        lastErr = v.code;
+        if (v.tokenDead) dead.push(t.token);
+        if (v.needsAttention) {
+          attention ??= `${v.code} — ${JSON.stringify(err?.error?.details ?? err).slice(0, 160)}`;
+        }
       }
     }
     results.push({ notification_id: it.notification_id, ok: anyOk, error: anyOk ? null : lastErr, dead_tokens: dead });
   }
   await supabase.rpc("push_report", { p_results: results });
+  if (attention) {
+    // 재시도해도 낫지 않는 종류다. 저볼륨에서는 "실패 건수" 임계(운영 알람)에도
+    // 안 걸리므로 여기서 직접 알린다. 30분 중복 억제는 alertAdmins 가 한다.
+    console.error("push needs attention", attention);
+    await alertAdmins(supabase, "push_needs_attention", "[운영] 푸시 발송 오류 — 설정/페이로드 확인 필요", attention);
+  }
   return json({ ok: true, processed: list.length });
 });
