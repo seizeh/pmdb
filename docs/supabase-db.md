@@ -27,7 +27,7 @@
 
 - **테이블 수**(2026-08-04 실측): `public` **36개** (이 중 `spatial_ref_sys` 는 PostGIS 시스템 테이블이므로 실질 애플리케이션 테이블은 **35개**) + `app` 스키마 내부 테이블 **19개**(§3.8)
 - **뷰**: 7개 (`public_profiles`, `v_post_feed`, `v_comment_feed`, `v_chat_rooms`, `v_pawing`, `v_pawmate`, `v_facility_review_comment_feed` — §6). PostGIS 가 만드는 `geometry_columns`·`geography_columns` 는 제외
-- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 195건
+- **RLS 정책** 83개(public 76 + storage 7) · **트리거**(비내부) 77개(public 76 + app 1) · **pg_cron 잡** 10개 · **마이그레이션** 197건
 - **ENUM 타입**: 2개 — `public.facility_category`, `app.biz_license_type`(영업 허가 종류: grooming/boarding/sales/production 등, §7.10). 그 외 상태값은 ENUM 대신 `varchar + CHECK` 제약으로 관리한다 — 값 추가에 `alter type` 이 필요 없고, 값을 지우거나 순서를 바꾸는 것도 CHECK 쪽이 쉽다
 - **PK 규약**: 대부분 `gen_random_uuid()` 기본값의 UUID. 예외 — `review_category_counts`(복합 PK) · `dong_centroids`·`business_match_rules`(자연키) · `app.client_errors`·`app.business_doc_purge_queue`·`app.funnel_events`(**bigint identity** — 대량 append 로그라 UUID 색인 비용을 피한다) · `app.push_config`·`app.care_config`·`app.business_purge_config`(`id boolean` 싱글턴)
 - **커스텀 시퀀스**: `public`·`app` 에는 없다(identity 컬럼이 내부 시퀀스를 쓴다). `auth`·`cron`·`net` 의 것은 플랫폼·확장 소유
@@ -1972,7 +1972,20 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 
 ## 9. RLS 정책
 
-public 스키마 **76개** + storage **7개** = 총 83개 정책(2026-08-04 실측). 전부 PERMISSIVE, 대상 롤은 public(storage 는 authenticated). 판별은 전적으로 `app.uid()` / `app.is_admin()` / `app.is_*` 헬퍼에 의존하므로 **JWT 없이(anon) 접근하면 `app.uid()=NULL` 이 되어 "내 것" 조건이 모두 false** 가 된다.
+public 스키마 **76개** + storage **7개** = 총 83개 정책(2026-08-04 실측).
+
+> **무인자 헬퍼는 `(select …)` 로 감싼다**(2026-08-04, `20260804220000`). `app.uid()` 는
+> 매 호출마다 `request.jwt.claims` 를 세 번 jsonb 로 파싱하고 `public.users` 를 조회하는데,
+> RLS 조건에 맨몸으로 놓이면 **읽는 행마다** 그게 다시 돈다(플래너가 STABLE 함수를 그
+> 자리에서 자동으로 끌어올리지 않는다). 스칼라 서브쿼리로 감싸면 InitPlan 이 되어 한 번만
+> 평가된다 — 5만 행 기준 **1250ms → 6ms** 로 측정됐다.
+>
+> 감싼 것은 `app.uid()`·`app.is_admin()`·`app.uid_lite()` **77개 정책**. `app.is_pet_guardian(pet_id, …)`
+> 처럼 **컬럼을 인자로 받는** 헬퍼는 행마다 값이 달라 감쌀 수 없다(15개 정책) — 그 경로는
+> 헬퍼 안에서 다시 `app.uid()` 를 부르므로 행별 비용이 남아 있다.
+>
+> 새 정책을 쓸 때도 같은 규칙을 따를 것. Supabase 성능 린터는 `auth.uid()` 를 찾으므로
+> 우리 `app.uid()` 는 **잡아 주지 않는다.** 전부 PERMISSIVE, 대상 롤은 public(storage 는 authenticated). 판별은 전적으로 `app.uid()` / `app.is_admin()` / `app.is_*` 헬퍼에 의존하므로 **JWT 없이(anon) 접근하면 `app.uid()=NULL` 이 되어 "내 것" 조건이 모두 false** 가 된다.
 
 ### 테이블별 요약
 
@@ -2169,7 +2182,7 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 
 ## 13. 마이그레이션 이력
 
-이 저장소가 관리하는 마이그레이션 **195건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
+이 저장소가 관리하는 마이그레이션 **197건**(적용 순서 = 파일명 타임스탬프). 설명은 각 파일 헤더 주석의 첫 줄이다.
 `20260603*` 이전의 기반 스키마는 저장소 밖에서 적용됐고 `supabase/schema/baseline.sql` 로 역산해 두었다(README 참고).
 
 > ⚠️ **파일명 타임스탬프 ≠ 이력 테이블의 version.** `supabase_migrations.schema_migrations`
@@ -2378,3 +2391,5 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 | `20260804160000` | `ops_alarms` | 운영 알람 — 모으기만 하고 알려 주지 않던 것을 알리게 한다. |
 | `20260804180000` | `pgi_revoke_direct_insert` | 공동보호자 초대 직접 INSERT 회수 — 엣지 함수의 열거 방지 리밋을 우회할 수 있었다. |
 | `20260804200000` | `media_bucket_limits` | media 버킷 MIME·용량 제한 — 공개 CDN 이 임의 파일 호스팅이 되지 않게. |
+| `20260804220000` | `rls_initplan` | RLS 의 무인자 헬퍼를 `(select …)` 로 감싸 행마다 부르던 것을 한 번만. |
+| `20260804230000` | `fk_indexes` | 조회 경로가 있는 FK 7건에 인덱스. |

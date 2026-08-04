@@ -2,13 +2,13 @@ PUBLICATION supabase_realtime  public.chat_messages
 PUBLICATION supabase_realtime  public.notifications
 BUCKET business-docs  public=false  size_limit=10485760  mime=image/jpeg,image/png,image/webp,application/pdf
 BUCKET media  public=true  size_limit=104857600  mime=image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,video/mp4,video/quicktime,video/webm,video/3gpp
-STORAGE POLICY business docs admin select  cmd=SELECT  roles={authenticated}  qual=((bucket_id = 'business-docs'::text) AND app.is_admin())  check=-
-STORAGE POLICY business docs owner insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'business-docs'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))
-STORAGE POLICY business docs owner select  cmd=SELECT  roles={authenticated}  qual=((bucket_id = 'business-docs'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))  check=-
-STORAGE POLICY media lite review insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (app.uid_lite())::text) AND ((storage.foldername(name))[2] = 'facility_review'::text))
-STORAGE POLICY media owner delete  cmd=DELETE  roles={authenticated}  qual=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))  check=-
-STORAGE POLICY media owner insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))
-STORAGE POLICY media owner update  cmd=UPDATE  roles={authenticated}  qual=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (app.uid())::text))  check=-
+STORAGE POLICY business docs admin select  cmd=SELECT  roles={authenticated}  qual=((bucket_id = 'business-docs'::text) AND ( SELECT app.is_admin() AS is_admin))  check=-
+STORAGE POLICY business docs owner insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'business-docs'::text) AND ((storage.foldername(name))[1] = (( SELECT app.uid() AS uid))::text))
+STORAGE POLICY business docs owner select  cmd=SELECT  roles={authenticated}  qual=((bucket_id = 'business-docs'::text) AND ((storage.foldername(name))[1] = (( SELECT app.uid() AS uid))::text))  check=-
+STORAGE POLICY media lite review insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (( SELECT app.uid_lite() AS uid_lite))::text) AND ((storage.foldername(name))[2] = 'facility_review'::text))
+STORAGE POLICY media owner delete  cmd=DELETE  roles={authenticated}  qual=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (( SELECT app.uid() AS uid))::text))  check=-
+STORAGE POLICY media owner insert  cmd=INSERT  roles={authenticated}  qual=-  check=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (( SELECT app.uid() AS uid))::text))
+STORAGE POLICY media owner update  cmd=UPDATE  roles={authenticated}  qual=((bucket_id = 'media'::text) AND ((storage.foldername(name))[1] = (( SELECT app.uid() AS uid))::text))  check=-
 CRON auth-cleanup  [17 * * * *]  active=true  :: select app.cleanup_auth();
 CRON business-docs-purge  [13 4 * * *]  active=true  :: select net.http_post( url := (select function_url from app.business_purge_config), headers := jsonb_build_object( 'Content-Type', 'application/json', 'x-purge-secret', (select trigger_secret from app.business_purge_config)), body := '{}'::jsonb );
 CRON care-report-hmac-purge  [58 3 * * *]  active=true  :: update app.care_reports r set recipient_phone_hmac = null where r.recipient_phone_hmac is not null and r.claimed_by is null and exists (select 1 from app.share_links l where l.kind = 'care_report' and l.ref_id = r.id and l.expires_at < now()); update app.care_threads t set recipient_phone_hmac = null where t.recipient_phone_hmac is not null and t.claimed_by is null and coalesce(t.last_report_at, t.created_at) < now() - interval '30 days'
