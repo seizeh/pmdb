@@ -5,7 +5,9 @@
 //   필수 약관 동의는 앱 가입 1단계에서 전부 받은 뒤 호출된다(terms_agreed_at 기록).
 //   비밀번호는 여기서 argon2id 해싱(_shared/passwords), INSERT 는 signup_user RPC.
 //   service_role 로만 RPC 호출(클라이언트는 publishable 키로 이 함수만 호출).
-//   verify_jwt=false: 로그인 전 단계. 남용은 전화 인증 선행 + 유니크 제약으로 방어.
+//   verify_jwt=true(config.toml): publishable 키가 있어야 게이트웨이를 통과하지만
+//   그 키는 앱 번들에 실려 있어 방어가 아니다. 실제 방어는 전화 인증 선행 +
+//   유니크 제약. (종전 주석은 false 라고 적고 있어 설정과 반대였다.)
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";

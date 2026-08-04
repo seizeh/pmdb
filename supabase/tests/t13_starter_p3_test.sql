@@ -158,8 +158,14 @@ select is(
 );
 
 -- ⑪ 리마인더 스윕(크론 본문과 동일 SQL) — D-1 이내 미완료분을 보호자에게 1회 알림.
+--
+-- 기준일을 **KST 로** 잡는다. 아래 스윕이 `due_date >= (now() at time zone
+-- 'Asia/Seoul')::date` 로 거르는데, 여기서 `current_date`(= 서버 UTC 날짜)를 쓰면
+-- UTC 15:00~24:00(KST 00:00~09:00) 구간에서 UTC 날짜가 KST 날짜보다 하루 뒤라
+-- 방금 만든 행이 스윕에서 탈락한다 → 단언 ⑪⑫가 **매일 아침 9시간 동안만** 실패했다.
+-- 실제로 2026-08-04 00:09 KST 실행에서 처음 드러났다(그전 CI 는 전부 그 창 밖).
 update app.vaccination_events
-   set due_date = current_date
+   set due_date = (now() at time zone 'Asia/Seoul')::date
  where pet_id = (select id from seed where k='pet1') and done_at is null;
 with due as (
   update app.vaccination_events e
