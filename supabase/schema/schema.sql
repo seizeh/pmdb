@@ -12539,6 +12539,7 @@ GRANT ALL ON FUNCTION public.naver_facility_id(p_name text, p_address text) TO s
 REVOKE ALL ON FUNCTION public.pet_guardians_of(p_pet uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.pet_guardians_of(p_pet uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.pet_guardians_of(p_pet uuid) TO service_role;
+GRANT ALL ON FUNCTION public.pet_guardians_of(p_pet uuid) TO anon;
 
 
 --
@@ -12566,6 +12567,7 @@ GRANT ALL ON FUNCTION public.posts_by_region(p_min_lng double precision, p_min_l
 REVOKE ALL ON FUNCTION public.public_user_pets(p_user uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.public_user_pets(p_user uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.public_user_pets(p_user uuid) TO service_role;
+GRANT ALL ON FUNCTION public.public_user_pets(p_user uuid) TO anon;
 
 
 --
