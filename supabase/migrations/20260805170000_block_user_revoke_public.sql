@@ -1,0 +1,55 @@
+-- block_user 의 anon 차단이 **실제로는 걸려 있지 않았다** — revoke 대상이 틀렸다.
+--
+-- ── 무엇이 문제였나 ───────────────────────────────────────────────────────
+--
+-- 20260801100000_block_user.sql 은 의도를 분명히 적었다:
+--
+--     revoke execute on function public.block_user(uuid, text) from anon;
+--     grant  execute on function public.block_user(uuid, text) to authenticated;
+--
+-- 그런데 운영 ACL 을 보면 anon 이 여전히 실행할 수 있다:
+--
+--     block_user            {=X/postgres, postgres=X/postgres, authenticated=…, service_role=…}
+--                            ↑ 이 빈 grantee 가 PUBLIC 이다
+--     delete_my_post        {postgres=X/postgres, authenticated=…, service_role=…}
+--     update_my_post        {postgres=X/postgres, authenticated=…, service_role=…}
+--     start_direct_chat     {postgres=X/postgres, authenticated=…, service_role=…}
+--     withdraw_account      {postgres=X/postgres, authenticated=…, service_role=…}
+--     create_post_verified  {postgres=X/postgres, authenticated=…, service_role=…}
+--
+-- 형제 쓰기 RPC 들엔 PUBLIC 항목이 없는데 block_user 에만 있다. 이유는 간단하다 —
+-- **PostgreSQL 은 새 함수에 EXECUTE 를 PUBLIC 에 기본 부여한다.** `revoke … from anon`
+-- 은 anon 에게 직접 준 적이 없는 권한을 회수하려 한 것이라 아무 일도 하지 않았고,
+-- anon 은 PUBLIC 을 통해 계속 상속받았다. 회수했어야 할 대상은 PUBLIC 이다.
+--
+-- 즉 **방어가 없었던 게 아니라, 방어가 적혀 있는데 발효되지 않았다.** 코드를 읽으면
+-- 막혀 있는 것으로 보이고 어드바이저의 "anon 이 DEFINER 함수를 실행할 수 있음" 경고는
+-- 다른 12건에 섞여 의도된 공개 RPC 들과 구분되지 않는다. 어느 쪽으로도 안 보인다.
+--
+-- ── 지금까지 무해했던 이유 ────────────────────────────────────────────────
+--
+-- 함수 첫 줄이 스스로 막는다:
+--
+--     v_uid uuid := app.uid();
+--     if v_uid is null then raise exception 'not_authenticated' using errcode='42501';
+--
+-- 그래서 비로그인 호출은 42501 로 끝난다. **실제 피해는 없었다.** 고치는 건 피해를
+-- 막기 위해서가 아니라, 권한 목록이 코드의 의도와 일치하게 만들기 위해서다 —
+-- 20260805100000(효과 없는 SELECT 그랜트 회수)과 같은 종류의 작업이다. 다만 그쪽은
+-- 그랜트가 남아 있어도 RLS 가 막았고, 이쪽은 **마이그레이션이 막으려던 것을 못 막았다**
+-- 는 점에서 한 단계 더 나쁘다.
+--
+-- ── 안전 확인 (2026-08-05) ────────────────────────────────────────────────
+--
+--   · authenticated 그랜트는 그대로 둔다 — 앱의 차단 기능이 이걸 쓴다.
+--   · service_role 도 그대로(엣지·크론).
+--   · 비로그인 앱 경로에는 차단 UI 자체가 없다. 종전에도 42501 이었으므로
+--     응답 코드도 바뀌지 않는다(게이트웨이 단에서 막히느냐 함수 안에서 막히느냐 차이).
+--   · public/app 스키마 전체에서 PUBLIC EXECUTE 를 가진 함수를 훑어 확인했다.
+--     나머지 11개는 그대로 둔다:
+--       app.* 9개  — app 스키마는 PostgREST 에 노출되지 않아 REST 로 부를 수 없고,
+--                    app.uid()/is_admin() 등은 RLS 정책 안에서 실행돼야 한다.
+--       public.facility_sibling_ids · public.session_alive — INVOKER 읽기 전용.
+--     (app.* 는 "도달 불가에 기대는" 상태라 별도 항목으로 남긴다 — 0031 §3.7 과
+--      같은 유형이고, 노출 스키마 설정이 바뀌면 그날 결함이 된다.)
+revoke execute on function public.block_user(uuid, text) from public;
