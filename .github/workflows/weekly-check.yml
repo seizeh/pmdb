@@ -1,0 +1,28 @@
+# 주간 운영 점검 — scripts/weekly_check.sh 를 매주 월요일 아침에 돌린다.
+#
+# 운영 DB 는 IP 허용목록이 걸려 있어 러너에서 psql 이 닿지 않는다 — 스크립트의
+# WEEKLY_API 모드(Management API query 엔드포인트, 관리 플레인)로 우회한다.
+# WEEKLY_STRICT=1: 조치 필요(⚠) 항목이 있으면 잡이 실패해 메일 알림이 온다.
+# 결과 전문은 잡 Summary 에서 본다.
+#
+# 필요 시크릿: SUPABASE_ACCESS_TOKEN (Supabase 계정 액세스 토큰)
+name: 주간 점검
+
+on:
+  schedule:
+    - cron: "0 0 * * 1" # 매주 월요일 09:00 KST
+  workflow_dispatch:
+
+jobs:
+  weekly-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 점검 실행
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          WEEKLY_API: "1"
+          WEEKLY_STRICT: "1"
+        run: ./scripts/weekly_check.sh | tee -a "$GITHUB_STEP_SUMMARY"
