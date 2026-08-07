@@ -8421,7 +8421,7 @@ CREATE VIEW public.v_facility_review_comment_feed AS
    FROM ((public.facility_review_comments c
      LEFT JOIN public.public_profiles pr ON ((pr.id = c.user_id)))
      LEFT JOIN public.business_profiles bp ON (((bp.user_id = c.user_id) AND ((bp.status)::text = 'approved'::text))))
-  WHERE (c.is_deleted = false);
+  WHERE ((c.is_deleted = false) AND (NOT (c.user_id = ANY (( SELECT app.blocked_ids() AS blocked_ids)::uuid[]))));
 
 
 --
