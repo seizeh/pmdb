@@ -3836,13 +3836,6 @@ CREATE INDEX posts_region_idx ON public.posts USING btree (region_code, progress
 
 
 --
--- Name: posts_trgm_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX posts_trgm_idx ON public.posts USING gin (((((COALESCE(title, ''::character varying))::text || ' '::text) || COALESCE(content, ''::text))) extensions.gin_trgm_ops);
-
-
---
 -- Name: posts_user_id_idx; Type: INDEX; Schema: public; Owner: -
 --
 
