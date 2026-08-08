@@ -810,7 +810,7 @@
 
 - **RLS**: SELECT(미삭제 또는 admin) / INSERT(본인) / UPDATE(본인 또는 admin). anon 은 SELECT 만.
 - **트리거**: `trg_frc_authored_as`(BEFORE INSERT, `app.comments_set_authored_as` 재사용), `trg_frc_soft_delete_ts`(BEFORE UPDATE), `trg_notify_review_comment`(AFTER INSERT — 후기 작성자에게 `review_comment` 알림, 본인 제외).
-- **조회**: `v_facility_review_comment_feed` 뷰(업체 모드 댓글은 상호로 표시, 미삭제만). anon/authenticated SELECT.
+- **조회**: `v_facility_review_comment_feed` 뷰(업체 모드 댓글은 상호로 표시, 미삭제만, 차단 상대 제외 — `20260807120000`). anon/authenticated SELECT.
 - **푸시**: `_push_pref_allows` 에서 `review_comment` 는 post_comment(댓글) 토글을 따른다.
 
 ### public.facility_cache
@@ -1468,18 +1468,23 @@ SELECT pr.id AS user_id, pr.nickname, pr.user_type, p.created_at,
 ### 6.7. `v_facility_review_comment_feed` — 시설 후기 댓글 피드
 
 시설 후기의 댓글 목록. 작성자 표시를 뷰가 담당한다 — 업체 모드 댓글은 **상호**로,
-개인은 닉네임으로. 간이 회원(`status='lite'`)이 쓴 후기의 작성자는 `app.mask_phone`
-으로 일부만 가려 보여 준다.
+개인은 닉네임으로. 미삭제만 반환.
 
-- `security_invoker`, anon/authenticated SELECT
-- 차단 필터 포함(`app.is_blocked_pair`) — 뷰 3종과 같은 축
+- **definer** 뷰(다른 피드 뷰와 동일), anon/authenticated SELECT
+- 차단 필터 포함(`(select app.blocked_ids())` — RLS 읽기 차단과 같은 집합 축,
+  **`20260807120000` 부로**. 그 전에는 07-16 신설 시점부터 필터가 없었고 0032 §2
+  일원화 대상에서도 빠져 차단 상대의 댓글이 그대로 보였다. 이 절의 종전 서술
+  "security_invoker·is_blocked_pair 필터·mask_phone 마스킹" 은 **오기**였다 —
+  2026-08-07 운영 실측으로 확인·수정. 마스킹은 애초에 불필요: 간이(lite) 회원은
+  `frc_insert` 가 `app.uid()` 를 요구해 댓글을 쓸 수 없다)
 - 앱: `FacilityReviewRepository.fetchComments`
 
 > ⚠️ 이 뷰를 포함해 피드 뷰들은 수정 시 **본문을 통째로 다시 붙여넣는** 방식으로
 > 관리돼 왔다(`v_post_feed` 8회·`v_chat_rooms` 10회 재정의). 차단 필터는 가장 마지막
 > 정의에만 있으므로, 다음 수정이 이전 본문을 복사하면 조용히 사라진다.
 > `replay_check` 는 스냅샷↔리플레이 *일치*만 보므로(양쪽 다 빠지면 통과) 이 회귀를
-> 잡지 못한다 — pgTAP 커버리지도 0이다(0031 §7 후속 항목).
+> 잡지 못한다 — 이 뷰의 차단 필터는 `t23_facility_review_comment_block_test` 가
+> 의미 수준에서 지킨다(0031 §7 후속 일부 이행. 나머지 피드 뷰는 여전히 커버리지 0).
 
 ---
 
