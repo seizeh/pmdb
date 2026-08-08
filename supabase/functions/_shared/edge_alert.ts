@@ -25,14 +25,18 @@ export async function alertAdmins(
   body: string,
 ): Promise<void> {
   try {
-    const { data: limited, error: rlErr } = await admin.rpc("rate_limit_hit", {
+    // rate_limit_hit 반환 규약: true = 허용(이번 소모가 창의 1회), false = 초과.
+    // rateLimited()(auth.ts)가 `data === false` 를 차단으로 읽는 것과 같은 방향이다.
+    // 종전에는 이 판정이 반대로 붙어 있어 각 30분 창의 **첫** 알림이 삼켜지고
+    // 2회째부터 무제한 발송됐다(2026-08-08 교차 검토에서 발견).
+    const { data: allowed, error: rlErr } = await admin.rpc("rate_limit_hit", {
       p_key: `edgealert:${key}`,
       p_max: 1,
       p_window_seconds: ALERT_WINDOW_SECONDS,
     });
     if (rlErr) {
       console.error("edge_alert rate_limit failed", rlErr); // fail-open — 알림은 보낸다
-    } else if (limited === true) {
+    } else if (allowed === false) {
       return; // 30분 내 같은 key 이미 발송됨
     }
 
