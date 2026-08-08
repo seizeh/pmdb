@@ -9407,6 +9407,13 @@ CREATE INDEX facilities_name_addr_idx ON public.facilities USING btree (name, ad
 
 
 --
+-- Name: facilities_name_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX facilities_name_trgm_idx ON public.facilities USING gin (((name)::text) extensions.gin_trgm_ops);
+
+
+--
 -- Name: facilities_norm_name_trgm_gix; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9680,6 +9687,13 @@ CREATE INDEX posts_category_idx ON public.posts USING btree (category);
 
 
 --
+-- Name: posts_content_trgm_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX posts_content_trgm_idx ON public.posts USING gin (content extensions.gin_trgm_ops);
+
+
+--
 -- Name: posts_display_coord_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -9708,10 +9722,10 @@ CREATE INDEX posts_region_idx ON public.posts USING btree (region_code, progress
 
 
 --
--- Name: posts_trgm_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: posts_title_trgm_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX posts_trgm_idx ON public.posts USING gin (((((COALESCE(title, ''::character varying))::text || ' '::text) || COALESCE(content, ''::text))) extensions.gin_trgm_ops);
+CREATE INDEX posts_title_trgm_idx ON public.posts USING gin (((title)::text) extensions.gin_trgm_ops);
 
 
 --
@@ -12198,6 +12212,7 @@ GRANT ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_
 -- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: ACL; Schema: public; Owner: -
 --
 
+REVOKE ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) TO authenticated;
 GRANT ALL ON FUNCTION public.block_user(p_blocked uuid, p_reason text) TO service_role;
 
