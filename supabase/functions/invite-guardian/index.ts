@@ -15,7 +15,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { bearer, rateLimited, verifyAccess } from "../_shared/auth.ts";
+import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { loadSolapiConfig, normalizePhone, sendSms } from "../_shared/solapi.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -34,10 +34,6 @@ Deno.serve(async (req: Request) => {
 
   const secret = Deno.env.get("JWT_SECRET");
   if (!secret) return json({ error: "server_misconfigured" }, 500);
-  const token = bearer(req);
-  const claims = token ? await verifyAccess(token, secret) : null;
-  const uid = typeof claims?.sub === "string" ? claims.sub : null;
-  if (!uid) return json({ error: "unauthorized" }, 401);
 
   let p: { petId?: string; phone?: string };
   try {
@@ -52,13 +48,23 @@ Deno.serve(async (req: Request) => {
 
   const admin = createClient(SUPABASE_URL, SERVICE_ROLE);
 
-  // 0) 호출자 상태(active) + 펫 owner 확인 — service_role 경유라 직접 검증한다.
+  // 0) 호출자 검증 — **activeUid 를 쓴다.**
+  //
+  // 종전에는 verifyAccess(서명·만료) + status==='active' 만 봤다. 그러면 정지·
+  // 탈퇴·lite 는 막히지만 **회수된 토큰**(다른 기기에서 비밀번호 변경 등으로
+  // token_version 이 올라간 세션)은 그대로 통과한다 — 탈취된 토큰으로 SMS 초대를
+  // 계속 보낼 수 있다는 뜻이고, token_version 이 존재하는 이유가 정확히 이 경우다.
+  // 다른 함수(apply-business 등)는 모두 activeUid 를 쓴다. 여기만 예외였다.
+  const uid = await activeUid(req, secret, admin);
+  if (!uid) return json({ error: "unauthorized" }, 401);
+
+  // 펫 owner 확인 — service_role 경유라 직접 검증한다.
   const { data: me } = await admin
     .from("users")
-    .select("id, nickname, phone, status")
+    .select("id, nickname, phone")
     .eq("id", uid)
     .maybeSingle();
-  if (!me || me.status !== "active") return json({ error: "unauthorized" }, 401);
+  if (!me) return json({ error: "unauthorized" }, 401);
   const { data: role } = await admin
     .from("pet_guardians")
     .select("role")
