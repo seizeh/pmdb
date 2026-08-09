@@ -54,5 +54,9 @@ create trigger users_revoke_device_tokens
   )
   execute function app.revoke_device_tokens_on_session_revoke();
 
-comment on trigger users_revoke_device_tokens on public.users is
-  '토큰 회수·계정 비활성 시 푸시 토큰 정리 — 클라이언트는 이 시점에 이미 인증을 잃어 못 한다.';
+-- ⚠️ 트리거에는 COMMENT 를 달지 않는다.
+--
+-- build_baseline.py 의 COMMENT 처리기가 인식하는 대상에 TRIGGER 가 빠져 있어
+-- (TABLE|VIEW|SEQUENCE|COLUMN|FUNCTION|TYPE|SCHEMA 만 본다), 트리거가 베이스라인에서
+-- 빠질 때 **코멘트만 남아** 리플레이가 `trigger … does not exist` 로 죽는다.
+-- 실제로 이 마이그레이션에서 그 사고를 냈다. 설명은 위 함수 COMMENT 와 이 주석이 담는다.

@@ -10408,13 +10408,6 @@ CREATE TRIGGER users_revoke_device_tokens AFTER UPDATE ON public.users FOR EACH 
 
 
 --
--- Name: TRIGGER users_revoke_device_tokens ON users; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TRIGGER users_revoke_device_tokens ON public.users IS '토큰 회수·계정 비활성 시 푸시 토큰 정리 — 클라이언트는 이 시점에 이미 인증을 잃어 못 한다.';
-
-
---
 -- Name: auth_logs auth_logs_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
 --
 
