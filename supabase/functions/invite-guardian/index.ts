@@ -50,11 +50,19 @@ Deno.serve(async (req: Request) => {
 
   // 0) 호출자 검증 — **activeUid 를 쓴다.**
   //
-  // 종전에는 verifyAccess(서명·만료) + status==='active' 만 봤다. 그러면 정지·
-  // 탈퇴·lite 는 막히지만 **회수된 토큰**(다른 기기에서 비밀번호 변경 등으로
-  // token_version 이 올라간 세션)은 그대로 통과한다 — 탈취된 토큰으로 SMS 초대를
-  // 계속 보낼 수 있다는 뜻이고, token_version 이 존재하는 이유가 정확히 이 경우다.
-  // 다른 함수(apply-business 등)는 모두 activeUid 를 쓴다. 여기만 예외였다.
+  // 종전에는 verifyAccess(서명·만료) + status==='active' 만 봤다. 그러면 두 가지가
+  // 뚫린다.
+  //
+  //   ① 회수된 토큰 — 다른 기기에서 비밀번호를 바꿔 token_version 이 올라가도
+  //      status 는 여전히 active 라 통과했다. token_version 이 존재하는 이유가
+  //      정확히 이 경우다.
+  //   ② 간이(lite) 토큰 — **lite 는 사용자 status 가 아니라 토큰 클레임이다.**
+  //      signup-lite 는 같은 번호의 기존 계정을 그대로 돌려주므로(정식 회원 포함)
+  //      sub 가 active 회원인 lite 토큰이 발급된다. 그 토큰은 status 검사를
+  //      그대로 통과했다. 후기만 쓸 수 있어야 할 토큰으로 SMS 초대가 나갔다.
+  //
+  // activeUid 는 셋을 한 번에 본다: status·token_version·lite 클레임.
+  // 다른 함수(apply-business 등)는 모두 이걸 쓴다. 여기만 예외였다.
   const uid = await activeUid(req, secret, admin);
   if (!uid) return json({ error: "unauthorized" }, 401);
 
