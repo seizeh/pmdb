@@ -254,6 +254,7 @@ CREATE FUNCTION app.cleanup_retention() RETURNS void
 
   -- ▼ 간이 후기 계정: 남은 후기가 없으면 전화번호 파기(「간이 후기 이용조건」 §3).
   --   후기를 다 지운 경우와, 인증만 받고 작성하지 않은 경우를 한 규칙이 함께 덮는다.
+  --   ⚠️ 삭제는 소프트 삭제다 — 행의 존재가 아니라 **상태**를 봐야 한다.
   update public.users u
      set phone = null,
          phone_verified = false
@@ -261,7 +262,9 @@ CREATE FUNCTION app.cleanup_retention() RETURNS void
      and u.phone is not null
      and u.created_at < now() - interval '1 day'
      and not exists (
-       select 1 from public.facility_reviews r where r.user_id = u.id);
+       select 1 from public.facility_reviews r
+        where r.user_id = u.id
+          and r.visibility_status <> 'deleted_by_user');
 
   -- ▼ 관측 데이터. client_errors 와 같은 30일로 맞춘다(같이 보게 되는 자료라 기간이
   --   다르면 "왜 이때는 알람이 없지" 가 보존 차이인지 실제인지 구분이 안 된다).
@@ -274,7 +277,7 @@ $$;
 -- Name: FUNCTION cleanup_retention(); Type: COMMENT; Schema: app; Owner: -
 --
 
-COMMENT ON FUNCTION app.cleanup_retention() IS '일일 보존기간 파기 배치(처리방침 §3). 간이 계정은 후기가 0건이면 전화번호를 파기한다.';
+COMMENT ON FUNCTION app.cleanup_retention() IS '보존기간 만료 데이터 정리(일 1회 크론). 간이계정 전화번호는 deleted_by_user 가 아닌 후기가 없을 때 파기.';
 
 
 --
@@ -973,6 +976,31 @@ CREATE FUNCTION app.refresh_facility_aggs(p_facility uuid) RETURNS void
          where facility_id = p_facility and visibility_status = 'visible') sub
   where f.id = p_facility;
 $$;
+
+
+--
+-- Name: revoke_device_tokens_on_session_revoke(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.revoke_device_tokens_on_session_revoke() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  update public.device_tokens
+     set is_active = false,
+         updated_at = now()
+   where user_id = new.id
+     and is_active;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION revoke_device_tokens_on_session_revoke(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.revoke_device_tokens_on_session_revoke() IS '세션 회수(token_version 증가·비활성 전환) 시 그 사용자의 기기 푸시 토큰을 끈다.';
 
 
 --
@@ -10373,6 +10401,13 @@ CREATE TRIGGER trg_users_updated BEFORE UPDATE ON public.users FOR EACH ROW EXEC
 
 
 --
+-- Name: users users_revoke_device_tokens; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER users_revoke_device_tokens AFTER UPDATE ON public.users FOR EACH ROW WHEN (((new.token_version IS DISTINCT FROM old.token_version) OR (((old.status)::text = 'active'::text) AND ((new.status)::text IS DISTINCT FROM 'active'::text)))) EXECUTE FUNCTION app.revoke_device_tokens_on_session_revoke();
+
+
+--
 -- Name: auth_logs auth_logs_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -11314,7 +11349,14 @@ ALTER TABLE public.facility_reviews ENABLE ROW LEVEL SECURITY;
 -- Name: facility_reviews fr_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY fr_select ON public.facility_reviews FOR SELECT USING ((((visibility_status)::text = 'visible'::text) OR (user_id = ( SELECT app.uid() AS uid))));
+CREATE POLICY fr_select ON public.facility_reviews FOR SELECT USING (((((visibility_status)::text = 'visible'::text) OR (user_id = ( SELECT app.uid() AS uid))) AND (( SELECT app.is_admin() AS is_admin) OR (NOT (user_id = ANY (( SELECT app.blocked_ids() AS blocked_ids)::uuid[]))))));
+
+
+--
+-- Name: POLICY fr_select ON facility_reviews; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON POLICY fr_select ON public.facility_reviews IS '공개 후기 또는 본인 후기 — 단 차단 관계(양방향)인 상대의 것은 제외. 관리자는 우회.';
 
 
 --
@@ -11328,7 +11370,14 @@ CREATE POLICY frc_insert ON public.facility_review_comments FOR INSERT WITH CHEC
 -- Name: facility_review_comments frc_select; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY frc_select ON public.facility_review_comments FOR SELECT USING (((is_deleted = false) OR ( SELECT app.is_admin() AS is_admin)));
+CREATE POLICY frc_select ON public.facility_review_comments FOR SELECT USING ((((is_deleted = false) OR ( SELECT app.is_admin() AS is_admin)) AND (( SELECT app.is_admin() AS is_admin) OR (NOT (user_id = ANY (( SELECT app.blocked_ids() AS blocked_ids)::uuid[]))))));
+
+
+--
+-- Name: POLICY frc_select ON facility_review_comments; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON POLICY frc_select ON public.facility_review_comments IS '삭제되지 않은 댓글 — 단 차단 관계(양방향)인 상대의 것은 제외. 관리자는 우회.';
 
 
 --

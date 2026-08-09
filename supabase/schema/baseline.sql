@@ -450,6 +450,31 @@ COMMENT ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) IS '미읽음 �
 
 
 --
+-- Name: revoke_device_tokens_on_session_revoke(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.revoke_device_tokens_on_session_revoke() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  update public.device_tokens
+     set is_active = false,
+         updated_at = now()
+   where user_id = new.id
+     and is_active;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION revoke_device_tokens_on_session_revoke(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.revoke_device_tokens_on_session_revoke() IS '세션 회수(token_version 증가·비활성 전환) 시 그 사용자의 기기 푸시 토큰을 끈다.';
+
+
+--
 -- Name: tg_applications_block_insert(); Type: FUNCTION; Schema: app; Owner: -
 --
 
