@@ -6802,6 +6802,93 @@ $$;
 
 
 --
+-- Name: upsert_facilities(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.upsert_facilities(p_rows jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_ins int := 0;
+  v_upd int := 0;
+  v_skip int := 0;
+begin
+  if p_rows is null or jsonb_typeof(p_rows) <> 'array' then
+    raise exception 'p_rows must be a json array' using errcode = 'P0001';
+  end if;
+
+  with rows as (
+    select
+      (e->>'category')::public.facility_category as category,
+      btrim(e->>'ext_id')                        as ext_id,
+      nullif(btrim(coalesce(e->>'name','')), '')     as name,
+      nullif(btrim(coalesce(e->>'address','')), '')  as address,
+      nullif(regexp_replace(coalesce(e->>'phone',''), '\D', '', 'g'), '') as phone,
+      nullif(btrim(coalesce(e->>'biz_status','')), '') as biz_status,
+      -- 영업상태명 원문에서 파생. '폐업'·'휴업'·'취소/말소/만료/정지/중지' 는 false.
+      (coalesce(e->>'biz_status','') ~ '영업|정상')  as is_open,
+      nullif(btrim(coalesce(e->>'license_date','')), '')::date as license_date,
+      nullif(btrim(coalesce(e->>'x','')), '')::double precision as x,
+      nullif(btrim(coalesce(e->>'y','')), '')::double precision as y
+    from jsonb_array_elements(p_rows) e
+  ),
+  prepared as (
+    select r.*,
+           case when r.x is not null and r.y is not null
+                then public.st_transform(
+                       public.st_setsrid(public.st_makepoint(r.x, r.y), 5174), 4326)::public.geography
+           end as geom
+      from rows r
+     where r.ext_id is not null and r.ext_id <> '' and r.category is not null
+  ),
+  -- 신규인데 좌표가 없으면 제외(지도에 찍을 수 없다).
+  eligible as (
+    select p.* from prepared p
+     where p.geom is not null
+        or exists (select 1 from public.facilities f
+                    where f.source = 'localdata' and f.ext_id = p.ext_id)
+  ),
+  -- 같은 배치에 같은 ext_id 가 두 번 오면 마지막 것만(ON CONFLICT 는 중복을 못 견딘다).
+  deduped as (
+    select distinct on (ext_id) * from eligible order by ext_id, is_open desc
+  ),
+  ins as (
+    insert into public.facilities as f
+      (category, source, ext_id, name, address, phone, biz_status, is_open, license_date, geom)
+    select d.category, 'localdata', d.ext_id, coalesce(d.name,'(미상)'), d.address,
+           d.phone, d.biz_status, d.is_open, d.license_date, d.geom
+      from deduped d
+    on conflict (source, ext_id) do update set
+      -- 업주 수정본은 간판명·전화를 보존한다.
+      name        = case when f.owner_updated_at is null then coalesce(excluded.name, f.name) else f.name end,
+      phone       = case when f.owner_updated_at is null then excluded.phone else f.phone end,
+      address     = excluded.address,
+      biz_status  = excluded.biz_status,
+      is_open     = excluded.is_open,
+      license_date = coalesce(excluded.license_date, f.license_date),
+      geom        = coalesce(excluded.geom, f.geom),
+      updated_at  = now()
+    returning (xmax = 0) as inserted
+  )
+  select count(*) filter (where inserted),
+         count(*) filter (where not inserted),
+         (select count(*) from prepared) - (select count(*) from deduped)
+    into v_ins, v_upd, v_skip
+    from ins;
+
+  return jsonb_build_object('inserted', v_ins, 'updated', v_upd, 'skipped', v_skip);
+end $$;
+
+
+--
+-- Name: FUNCTION upsert_facilities(p_rows jsonb); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.upsert_facilities(p_rows jsonb) IS 'LOCALDATA 시설 배치 upsert(service_role 전용). 키=(localdata, 관리번호), 좌표는 5174→4326 변환. 폐업 행도 반드시 함께 보낼 것.';
+
+
+--
 -- Name: withdraw_account(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -12960,6 +13047,14 @@ GRANT ALL ON FUNCTION public.update_my_post(p_post uuid, p_title text, p_content
 
 REVOKE ALL ON FUNCTION public.update_password_hash(p_user uuid, p_old_hash text, p_new_hash text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.update_password_hash(p_user uuid, p_old_hash text, p_new_hash text) TO service_role;
+
+
+--
+-- Name: FUNCTION upsert_facilities(p_rows jsonb); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.upsert_facilities(p_rows jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.upsert_facilities(p_rows jsonb) TO service_role;
 
 
 --
