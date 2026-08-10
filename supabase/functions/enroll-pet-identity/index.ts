@@ -50,6 +50,36 @@ const MAX_INLINE_B64_CHARS = 19_000_000;
 // 클라이언트는 고정 4장(_frameTimesMs)을 보낸다. 여유를 두되 자릿수는 막는다.
 const MAX_FRAMES = 8;
 
+/// 업로드한 프레임을 되돌린다(최선 노력).
+///
+/// 정리 실패로 원래 응답을 덮지 않는다 — 호출자는 이미 실패를 알리는 중이고,
+/// 여기서 또 던지면 진짜 원인이 가려진다. 남은 파일은 로그로 추적한다.
+async function removeFrames(admin: any, paths: string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const { error } = await admin.storage.from("media").remove(paths);
+  if (error) console.error("frame cleanup failed", paths, error);
+}
+
+/// 이 펫의 프레임 폴더에서 이번에 쓰지 않는 파일을 지운다(재등록 잔여 정리).
+async function removeStaleFrames(
+  admin: any,
+  uid: string,
+  petId: string,
+  keepPaths: string[],
+): Promise<void> {
+  const dir = `${uid}/pet_identity/${petId}`;
+  const { data, error } = await admin.storage.from("media").list(dir);
+  if (error) {
+    console.error("frame list failed", dir, error);
+    return;
+  }
+  const keep = new Set(keepPaths);
+  const stale = (data ?? [])
+    .map((o: { name: string }) => `${dir}/${o.name}`)
+    .filter((p: string) => !keep.has(p));
+  await removeFrames(admin, stale);
+}
+
 /// Gemini 구조화 출력 호출 + 429(한도) 재시도(backoff).
 async function geminiGenerate(parts: unknown[], schema: object): Promise<any> {
   const url =
@@ -323,6 +353,7 @@ Deno.serve(async (req: Request) => {
     );
     if (upErr) {
       console.error("frame upload failed", upErr);
+      await removeFrames(admin, paths); // 앞서 올린 것들을 남기지 않는다
       await alertAdmins(admin, "enroll_internal_error", "[운영] 신원 인증 내부 오류",
         `enroll-pet-identity: 프레임 업로드 실패 — ${String(upErr.message ?? upErr).slice(0, 140)}`);
       return json({ error: "internal_error" }, 500);
@@ -342,10 +373,18 @@ Deno.serve(async (req: Request) => {
   });
   if (rpcErr) {
     console.error("enroll_pet_identity rpc failed", rpcErr);
+    // RPC 가 실패하면 DB 에는 이 프레임을 가리키는 행이 없다 — 파일만 남으면
+    // 아무도 참조하지 않는 반려동물 사진이 무기한 보관된다.
+    await removeFrames(admin, paths);
     await alertAdmins(admin, "enroll_internal_error", "[운영] 신원 인증 내부 오류",
       `enroll-pet-identity: enroll_pet_identity RPC 실패 — ${String(rpcErr.message ?? rpcErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
   }
+
+  // 재등록으로 프레임 수가 줄면 옛 파일이 남는다 — 경로가 0.jpg…N-1.jpg 로
+  // 고정이라 upsert 는 겹치는 것만 덮고 넘치는 것(예: 4장 → 3장이면 3.jpg)은
+  // 그대로 둔다. DB 행은 RPC 가 지우므로 참조 없는 파일만 남는 상태가 된다.
+  await removeStaleFrames(admin, uid, petId, paths);
 
   // frames_from_video 판정을 성공 등록마다 1행 기록 — 섀도 오탐률의 분모
   // (purpose='pet_identity' AND result='pass' 전체)와 분자
