@@ -7581,7 +7581,8 @@ CREATE TABLE public.facilities (
     owner_updated_at timestamp with time zone,
     owner_photo_url text,
     owner_photo_align_y real DEFAULT 0 NOT NULL,
-    business_hours character varying(100)
+    business_hours character varying(100),
+    legacy_ext_id character varying(64)
 );
 
 
@@ -7590,6 +7591,13 @@ CREATE TABLE public.facilities (
 --
 
 COMMENT ON TABLE public.facilities IS '공공데이터 반려동물 시설(병원/미용/위탁/판매). geom=WGS84(4326). 적재시 좌표 사전변환됨 (0021).';
+
+
+--
+-- Name: COLUMN facilities.legacy_ext_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.facilities.legacy_ext_id IS '2026-08-10 ext_id 를 LOCALDATA 관리번호로 교체하기 전의 옛 생성 해시(되돌림용).';
 
 
 --
