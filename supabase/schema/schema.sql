@@ -914,10 +914,20 @@ begin
   end if;
 
   -- (1) 미읽음 채팅 합계: 방별 last_read_message_id 기준 (created_at, id) 튜플 비교
+  --     범위는 v_chat_rooms 와 같아야 한다 — 나간 방·차단 상대 방은 화면에 없다.
   for r in
-    select room_id, last_read_message_id
-      from public.chat_room_members
-     where user_id = v_user
+    select m.room_id, m.last_read_message_id
+      from public.chat_room_members m
+     where m.user_id = v_user
+       and m.left_at is null
+       and not exists (
+         select 1
+           from public.chat_room_members other
+           join public.user_blocks b
+             on (b.blocker_id = v_user and b.blocked_id = other.user_id)
+             or (b.blocked_id = v_user and b.blocker_id = other.user_id)
+          where other.room_id = m.room_id
+            and other.user_id <> v_user)
   loop
     if r.last_read_message_id is null then
       select count(*) into v_per
@@ -957,7 +967,7 @@ $$;
 -- Name: FUNCTION reconcile_unread_counts(p_user_id uuid); Type: COMMENT; Schema: app; Owner: -
 --
 
-COMMENT ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) IS '미읽음 채팅/알림 카운트 캐시를 source-of-truth(메시지/알림 테이블) 기준으로 재계산. 앱 진입·재연결·다중기기 동기화 직후 호출 권장';
+COMMENT ON FUNCTION app.reconcile_unread_counts(p_user_id uuid) IS '미읽음 카운터 캐시 보정(로그인마다). 채팅 합산 범위는 v_chat_rooms 와 동일 — 나간 방·차단 상대 방 제외.';
 
 
 --
