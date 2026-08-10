@@ -45,6 +45,11 @@ const FRAMES_FROM_VIDEO_ENFORCE = false;
 // ai_unavailable 로 뭉개지지 않도록 video_too_large 로 구분해 반환한다.
 const MAX_INLINE_B64_CHARS = 19_000_000;
 
+// 프레임 **개수** 상한. 바이트 상한만으로는 부족하다 — 작은 프레임 수백 장은
+// MAX_INLINE_B64_CHARS 를 통과하면서 AI 요청 크기·비용·지연만 부풀린다.
+// 클라이언트는 고정 4장(_frameTimesMs)을 보낸다. 여유를 두되 자릿수는 막는다.
+const MAX_FRAMES = 8;
+
 /// Gemini 구조화 출력 호출 + 429(한도) 재시도(backoff).
 async function geminiGenerate(parts: unknown[], schema: object): Promise<any> {
   const url =
@@ -225,6 +230,9 @@ Deno.serve(async (req: Request) => {
   if (!petId) return json({ enrolled: false, reason: "missing_pet" }, 400);
   if (!videoBase64) return json({ enrolled: false, reason: "no_video" }, 400);
   if (frames.length < 3) return json({ enrolled: false, reason: "too_few_frames" }, 400);
+  if (frames.length > MAX_FRAMES) {
+    return json({ enrolled: false, reason: "too_many_frames" }, 400);
+  }
 
   // 1) 보호자 확인
   const { data: g } = await admin
