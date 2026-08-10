@@ -5999,6 +5999,7 @@ declare
   v_aff int;
   v_tv int;
   v_new_id uuid;
+  v_has_successor boolean := false;
 begin
   select * into r from app.refresh_tokens where token_hash = p_old_hash;
   if not found then return query select 'invalid', null::uuid, null::int; return; end if;
@@ -6037,6 +6038,17 @@ begin
     return query select 'reuse_revoked', r.user_id, null::int; return;
   end if;
 
+  -- 후속 토큰의 상태로 "회전으로 죽었나 / 회수로 죽었나" 를 가른다.
+  -- 후속이 **replaced_by 없이 revoked** = 이 패밀리는 회수당했다(로그아웃·비번변경·정지).
+  -- 그 경우 이 토큰도 죽은 세션의 일부이므로 ①②를 주지 않는다.
+  select * into s from app.refresh_tokens where id = r.replaced_by;
+  v_has_successor := found;
+  if not v_has_successor or (s.revoked_at is not null and s.replaced_by is null) then
+    update app.refresh_tokens set revoked_at = coalesce(revoked_at, v_now)
+      where family_id = r.family_id and revoked_at is null;
+    return query select 'reuse_revoked', r.user_id, null::int; return;
+  end if;
+
   -- ① 회전 직후 grace(동시요청·즉시 재시도) — 추가 토큰 발급.
   if v_now - r.revoked_at <= make_interval(secs => p_grace_seconds) then
     insert into app.refresh_tokens(user_id, token_hash, family_id, expires_at, absolute_expires_at, user_agent)
@@ -6048,8 +6060,7 @@ begin
   -- ② 유실 재시도: 후속 토큰이 한 번도 사용(회전)되지 않은 경우 — 응답을 못 받은
   --    클라이언트만 구 토큰을 다시 낼 수 있다. 미사용 후속을 회수하고 새 토큰을
   --    재발급해 세션을 복구한다(패밀리당 5회/일 제한).
-  select * into s from app.refresh_tokens where id = r.replaced_by;
-  if found and s.revoked_at is null and s.replaced_by is null
+  if s.revoked_at is null and s.replaced_by is null
      and public.rate_limit_hit('rtrec:' || r.family_id::text, 5, 86400) then
     update app.refresh_tokens set revoked_at = v_now where id = s.id;
     insert into app.refresh_tokens(user_id, token_hash, family_id, expires_at, absolute_expires_at, user_agent)
@@ -6065,6 +6076,13 @@ begin
     where family_id = r.family_id and revoked_at is null;
   return query select 'reuse_revoked', r.user_id, null::int; return;
 end $$;
+
+
+--
+-- Name: FUNCTION rt_rotate(p_old_hash text, p_new_hash text, p_user_agent text, p_grace_seconds integer); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.rt_rotate(p_old_hash text, p_new_hash text, p_user_agent text, p_grace_seconds integer) IS 'refresh 원자 회전. revoked 재사용은 후속 토큰 상태로 판정 — 패밀리 회수(로그아웃·비번변경) 후에는 grace/복구를 주지 않는다.';
 
 
 --
