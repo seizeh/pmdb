@@ -60,6 +60,37 @@ async function removeFrames(admin: any, paths: string[]): Promise<void> {
   if (error) console.error("frame cleanup failed", paths, error);
 }
 
+/// 실패한 등록이 올려 둔 파일을 되돌린다 — **단, 지울 게 확실할 때만.**
+///
+/// 경로가 `<uid>/pet_identity/<pet>/<i>.jpg` 로 고정이라 재등록은 upsert 로 옛
+/// 파일을 덮어쓴다. 그 상태에서 실패해 지워 버리면, 이전 등록의
+/// pet_identity_frames 행들이 **같은 경로를 가리킨 채 파일만 없는** 댕글링이
+/// 된다(이후 그 프레임을 읽으려는 쪽이 빈 파일을 만난다).
+///
+/// 그래서 이 펫의 프레임 행이 이미 있으면 지우지 않는다. 덮어써진 내용은 이미
+/// 되돌릴 수 없지만, 최소한 참조가 깨지지는 않는다 — 다음 등록이 성공하면
+/// removeStaleFrames 가 정리한다.
+async function removeFramesOnFailure(
+  admin: any,
+  petId: string,
+  paths: string[],
+): Promise<void> {
+  const { count, error } = await admin
+    .from("pet_identity_frames")
+    .select("pet_id", { count: "exact", head: true })
+    .eq("pet_id", petId);
+  if (error) {
+    // 확인이 안 되면 지우지 않는다 — 잘못 지우는 쪽이 남기는 쪽보다 나쁘다.
+    console.error("frame cleanup skipped (count failed)", petId, error);
+    return;
+  }
+  if ((count ?? 0) > 0) {
+    console.error("frame cleanup skipped (existing rows reference these paths)", petId);
+    return;
+  }
+  await removeFrames(admin, paths);
+}
+
 /// 이 펫의 프레임 폴더에서 이번에 쓰지 않는 파일을 지운다(재등록 잔여 정리).
 async function removeStaleFrames(
   admin: any,
@@ -353,7 +384,7 @@ Deno.serve(async (req: Request) => {
     );
     if (upErr) {
       console.error("frame upload failed", upErr);
-      await removeFrames(admin, paths); // 앞서 올린 것들을 남기지 않는다
+      await removeFramesOnFailure(admin, petId, paths); // 앞서 올린 것들을 남기지 않는다
       await alertAdmins(admin, "enroll_internal_error", "[운영] 신원 인증 내부 오류",
         `enroll-pet-identity: 프레임 업로드 실패 — ${String(upErr.message ?? upErr).slice(0, 140)}`);
       return json({ error: "internal_error" }, 500);
@@ -373,9 +404,10 @@ Deno.serve(async (req: Request) => {
   });
   if (rpcErr) {
     console.error("enroll_pet_identity rpc failed", rpcErr);
-    // RPC 가 실패하면 DB 에는 이 프레임을 가리키는 행이 없다 — 파일만 남으면
-    // 아무도 참조하지 않는 반려동물 사진이 무기한 보관된다.
-    await removeFrames(admin, paths);
+    // 최초 등록이면 이 프레임을 가리키는 행이 없다 — 파일만 남으면 아무도
+    // 참조하지 않는 반려동물 사진이 무기한 보관된다. 재등록이면 옛 행이 같은
+    // 경로를 가리키고 있으므로 지우지 않는다(removeFramesOnFailure 가 가른다).
+    await removeFramesOnFailure(admin, petId, paths);
     await alertAdmins(admin, "enroll_internal_error", "[운영] 신원 인증 내부 오류",
       `enroll-pet-identity: enroll_pet_identity RPC 실패 — ${String(rpcErr.message ?? rpcErr).slice(0, 140)}`);
     return json({ error: "internal_error" }, 500);
