@@ -3609,10 +3609,24 @@ CREATE INDEX chat_messages_room_order_idx ON public.chat_messages USING btree (r
 
 
 --
+-- Name: chat_room_members_last_read_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX chat_room_members_last_read_message_id_idx ON public.chat_room_members USING btree (last_read_message_id);
+
+
+--
 -- Name: chat_room_members_user_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX chat_room_members_user_idx ON public.chat_room_members USING btree (user_id);
+
+
+--
+-- Name: chat_rooms_last_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX chat_rooms_last_message_id_idx ON public.chat_rooms USING btree (last_message_id);
 
 
 --

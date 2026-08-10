@@ -9397,10 +9397,24 @@ CREATE INDEX chat_messages_sender_idx ON public.chat_messages USING btree (sende
 
 
 --
+-- Name: chat_room_members_last_read_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX chat_room_members_last_read_message_id_idx ON public.chat_room_members USING btree (last_read_message_id);
+
+
+--
 -- Name: chat_room_members_user_idx; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX chat_room_members_user_idx ON public.chat_room_members USING btree (user_id);
+
+
+--
+-- Name: chat_rooms_last_message_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX chat_rooms_last_message_id_idx ON public.chat_rooms USING btree (last_message_id);
 
 
 --
@@ -9660,6 +9674,13 @@ CREATE INDEX phone_verifications_expires_idx ON public.phone_verifications USING
 --
 
 CREATE INDEX phone_verifications_lookup_idx ON public.phone_verifications USING btree (phone, purpose, created_at DESC);
+
+
+--
+-- Name: photo_verifications_pet_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX photo_verifications_pet_id_idx ON public.photo_verifications USING btree (pet_id);
 
 
 --
