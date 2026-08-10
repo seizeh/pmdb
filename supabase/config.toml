@@ -44,6 +44,10 @@ verify_jwt = false
 [functions.sync-dong-centroids]
 verify_jwt = false
 
+# 시크릿 헤더(x-sync-secret)로 보호한다 — 사용자 JWT 가 아니라 운영 배치용.
+[functions.sync-facilities]
+verify_jwt = false
+
 [functions.resolve-region]
 verify_jwt = false
 
