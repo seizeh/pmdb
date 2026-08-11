@@ -2977,11 +2977,11 @@ CREATE TABLE public.reports (
     reviewed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
-    CONSTRAINT reports_categories_allowed CHECK ((categories <@ ARRAY['욕설비방'::text, '허위정보'::text, '사기의심'::text, '부적절한내용'::text, '약속불이행'::text, '기타'::text, '카테고리와 무관해요'::text, '실제 반려동물이 아니에요'::text, '기타(직접작성)'::text])),
+    CONSTRAINT reports_categories_allowed CHECK ((categories <@ ARRAY['욕설비방'::text, '허위정보'::text, '사기의심'::text, '부적절한내용'::text, '약속불이행'::text, '기타'::text, '카테고리와 무관해요'::text, '실제 반려동물이 아니에요'::text, '기타(직접작성)'::text, '폐업했어요'::text, '이사갔어요'::text, '정보가 달라요'::text])),
     CONSTRAINT reports_categories_len CHECK ((array_length(categories, 1) >= 1)),
     CONSTRAINT reports_extra_required CHECK (((NOT (('기타'::text = ANY (categories)) OR ('기타(직접작성)'::text = ANY (categories)))) OR ((extra_description IS NOT NULL) AND (length(btrim(extra_description)) > 0)))),
     CONSTRAINT reports_status_check CHECK (((status)::text = ANY ((ARRAY['submitted'::character varying, 'reviewing'::character varying, 'resolved'::character varying, 'dismissed'::character varying])::text[]))),
-    CONSTRAINT reports_target_type_check CHECK (((target_type)::text = ANY ((ARRAY['post'::character varying, 'comment'::character varying, 'chat_message'::character varying, 'user'::character varying])::text[])))
+    CONSTRAINT reports_target_type_check CHECK (((target_type)::text = ANY (ARRAY['post'::text, 'comment'::text, 'chat_message'::text, 'user'::text, 'facility'::text])))
 );
 
 

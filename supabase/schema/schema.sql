@@ -3086,6 +3086,14 @@ begin
       'sender_nickname',coalesce(u.nickname,'알 수 없음'),'created_at',m.created_at)
     into v_out
     from public.chat_messages m left join public.users u on u.id=m.sender_id where m.id=v_target;
+  elsif v_type = 'facility' then
+    select json_build_object('kind','facility','exists',true,
+      'id',f.id,'name',f.name,'address',f.address,'category',f.category,
+      'biz_status',f.biz_status,'is_open',f.is_open,
+      'reported_closed_at',f.reported_closed_at,
+      'review_count',f.review_count,'created_at',f.created_at)
+    into v_out
+    from public.facilities f where f.id=v_target;
   end if;
 
   if v_out is null then
@@ -3358,6 +3366,38 @@ begin
    offset greatest(0, coalesce(p_offset,0));
 end;
 $$;
+
+
+--
+-- Name: admin_mark_facility_closed(uuid, boolean); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed boolean DEFAULT true) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if not app.is_admin() then
+    raise exception 'forbidden' using errcode = '42501';
+  end if;
+  update public.facilities
+     set reported_closed_at = case when p_closed then now() else null end,
+         -- 해제 시에는 원천 상태(biz_status)로 되돌린다 — 임의로 true 를 넣지 않는다.
+         is_open = case when p_closed then false
+                        else (coalesce(biz_status, '') ~ '영업|정상') end,
+         updated_at = now()
+   where id = p_facility;
+  if not found then
+    raise exception 'facility_not_found' using errcode = 'P0001';
+  end if;
+end $$;
+
+
+--
+-- Name: FUNCTION admin_mark_facility_closed(p_facility uuid, p_closed boolean); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed boolean) IS '관리자 폐업 판정. reported_closed_at 을 세워 재적재가 is_open 을 되올리지 못하게 한다.';
 
 
 --
@@ -6826,7 +6866,6 @@ begin
       nullif(btrim(coalesce(e->>'address','')), '')  as address,
       nullif(regexp_replace(coalesce(e->>'phone',''), '\D', '', 'g'), '') as phone,
       nullif(btrim(coalesce(e->>'biz_status','')), '') as biz_status,
-      -- 영업상태명 원문에서 파생. '폐업'·'휴업'·'취소/말소/만료/정지/중지' 는 false.
       (coalesce(e->>'biz_status','') ~ '영업|정상')  as is_open,
       nullif(btrim(coalesce(e->>'license_date','')), '')::date as license_date,
       nullif(btrim(coalesce(e->>'x','')), '')::double precision as x,
@@ -6842,14 +6881,12 @@ begin
       from rows r
      where r.ext_id is not null and r.ext_id <> '' and r.category is not null
   ),
-  -- 신규인데 좌표가 없으면 제외(지도에 찍을 수 없다).
   eligible as (
     select p.* from prepared p
      where p.geom is not null
         or exists (select 1 from public.facilities f
                     where f.source = 'localdata' and f.ext_id = p.ext_id)
   ),
-  -- 같은 배치에 같은 ext_id 가 두 번 오면 마지막 것만(ON CONFLICT 는 중복을 못 견딘다).
   deduped as (
     select distinct on (ext_id) * from eligible order by ext_id, is_open desc
   ),
@@ -6860,12 +6897,15 @@ begin
            d.phone, d.biz_status, d.is_open, d.license_date, d.geom
       from deduped d
     on conflict (source, ext_id) do update set
-      -- 업주 수정본은 간판명·전화를 보존한다.
       name        = case when f.owner_updated_at is null then coalesce(excluded.name, f.name) else f.name end,
       phone       = case when f.owner_updated_at is null then excluded.phone else f.phone end,
       address     = excluded.address,
       biz_status  = excluded.biz_status,
-      is_open     = excluded.is_open,
+      -- 제보로 내려간 행은 원천이 아직 '영업중'이어도 다시 올리지 않는다.
+      is_open     = case when f.reported_closed_at is not null and excluded.is_open
+                         then false else excluded.is_open end,
+      -- 원천이 따라잡으면(폐업 확인) 수동 표시를 지운다 — 근거가 공공데이터로 넘어간다.
+      reported_closed_at = case when excluded.is_open then f.reported_closed_at else null end,
       license_date = coalesce(excluded.license_date, f.license_date),
       geom        = coalesce(excluded.geom, f.geom),
       updated_at  = now()
@@ -7669,7 +7709,8 @@ CREATE TABLE public.facilities (
     owner_photo_url text,
     owner_photo_align_y real DEFAULT 0 NOT NULL,
     business_hours character varying(100),
-    legacy_ext_id character varying(64)
+    legacy_ext_id character varying(64),
+    reported_closed_at timestamp with time zone
 );
 
 
@@ -7685,6 +7726,13 @@ COMMENT ON TABLE public.facilities IS '공공데이터 반려동물 시설(병�
 --
 
 COMMENT ON COLUMN public.facilities.legacy_ext_id IS '2026-08-10 ext_id 를 LOCALDATA 관리번호로 교체하기 전의 옛 생성 해시(되돌림용).';
+
+
+--
+-- Name: COLUMN facilities.reported_closed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.facilities.reported_closed_at IS '관리자가 제보를 확인해 폐업/이전으로 판정한 시각. 설정돼 있으면 재적재가 is_open 을 올리지 않는다.';
 
 
 --
@@ -8432,11 +8480,11 @@ CREATE TABLE public.reports (
     reviewed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone,
-    CONSTRAINT reports_categories_allowed CHECK ((categories <@ ARRAY['욕설비방'::text, '허위정보'::text, '사기의심'::text, '부적절한내용'::text, '약속불이행'::text, '기타'::text, '카테고리와 무관해요'::text, '실제 반려동물이 아니에요'::text, '기타(직접작성)'::text])),
+    CONSTRAINT reports_categories_allowed CHECK ((categories <@ ARRAY['욕설비방'::text, '허위정보'::text, '사기의심'::text, '부적절한내용'::text, '약속불이행'::text, '기타'::text, '카테고리와 무관해요'::text, '실제 반려동물이 아니에요'::text, '기타(직접작성)'::text, '폐업했어요'::text, '이사갔어요'::text, '정보가 달라요'::text])),
     CONSTRAINT reports_categories_len CHECK ((array_length(categories, 1) >= 1)),
     CONSTRAINT reports_extra_required CHECK (((NOT (('기타'::text = ANY (categories)) OR ('기타(직접작성)'::text = ANY (categories)))) OR ((extra_description IS NOT NULL) AND (length(btrim(extra_description)) > 0)))),
     CONSTRAINT reports_status_check CHECK (((status)::text = ANY ((ARRAY['submitted'::character varying, 'reviewing'::character varying, 'resolved'::character varying, 'dismissed'::character varying])::text[]))),
-    CONSTRAINT reports_target_type_check CHECK (((target_type)::text = ANY ((ARRAY['post'::character varying, 'comment'::character varying, 'chat_message'::character varying, 'user'::character varying])::text[])))
+    CONSTRAINT reports_target_type_check CHECK (((target_type)::text = ANY (ARRAY['post'::text, 'comment'::text, 'chat_message'::text, 'user'::text, 'facility'::text])))
 );
 
 
@@ -12265,6 +12313,15 @@ GRANT ALL ON FUNCTION public.admin_list_users(p_search text, p_limit integer, p_
 REVOKE ALL ON FUNCTION public.admin_location_usage_logs(p_user uuid, p_limit integer, p_offset integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.admin_location_usage_logs(p_user uuid, p_limit integer, p_offset integer) TO authenticated;
 GRANT ALL ON FUNCTION public.admin_location_usage_logs(p_user uuid, p_limit integer, p_offset integer) TO service_role;
+
+
+--
+-- Name: FUNCTION admin_mark_facility_closed(p_facility uuid, p_closed boolean); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed boolean) TO authenticated;
+GRANT ALL ON FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed boolean) TO service_role;
 
 
 --
