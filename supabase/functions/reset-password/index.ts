@@ -9,7 +9,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { hashPassword } from "../_shared/passwords.ts";
-import { clientIp, rateLimited } from "../_shared/auth.ts";
+import { clientIpKey, rateLimited } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
@@ -61,10 +61,10 @@ Deno.serve(async (req: Request) => {
   // 있었다. 인증 소진(20260803181000)이 창을 수 초로 줄였고, 여기서는 그 수 초를
   // 노린 폴링에 값을 매긴다 — 정상 사용자는 이 엔드포인트를 한 번만 부른다.
   // 값은 signup-lite·verify-phone-code 와 같은 축(번호 10/10분 + IP 30/10분).
-  const ip = clientIp(req);
+  const ipKey = await clientIpKey(req);
   if (
     await rateLimited(supabase, `pwreset:phone:${phone}`, 10, 600) ||
-    (ip !== null && await rateLimited(supabase, `pwreset:ip:${ip}`, 30, 600))
+    (ipKey !== null && await rateLimited(supabase, `pwreset:ip:${ipKey}`, 30, 600))
   ) {
     return json({ error: "rate_limited" }, 429);
   }

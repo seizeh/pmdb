@@ -25,7 +25,7 @@
 //     ② IP 시간당 20통           한 출처가 번호를 갈아타며 쏟아내는 것.
 //     ③ 전역 시간당 200통        ②를 우회한 분산 시도까지 포함한 **비용 상한**.
 //   ②는 우회 가능한 보조선이 **아니다.** `cf-connecting-ip` 는 위조하면 Cloudflare
-//   엣지가 요청 자체를 거부하고 이 배포에서는 그 헤더가 항상 붙는다(clientIp 주석의
+//   엣지가 요청 자체를 거부하고 이 배포에서는 그 헤더가 항상 붙는다(clientIpKey 주석의
 //   실측). 즉 한 출처의 발송량은 ②만으로도 실제로 묶이고, ③은 그 위에 얹는 총량
 //   보험이지 ②의 대체물이 아니다. ③에 걸리면 정상 가입도 함께 막히므로 **관리자에게
 //   즉시 알린다** — 조용히 막고 있으면 "가입이 안 돼요" 문의만 쌓이고 원인은 로그
@@ -39,7 +39,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { clientIp, rateLimited } from "../_shared/auth.ts";
+import { clientIpKey, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 import { loadSolapiConfig, normalizePhone, sendSms } from "../_shared/solapi.ts";
 
@@ -107,8 +107,8 @@ Deno.serve(async (req: Request) => {
   // ②) 출처별 상한 — 계정 존재 검증보다 **앞에** 둔다. 뒤에 두면 phone_taken /
   //     user_not_found 응답으로 번호 가입 여부를 훑는 호출이 아무 대가 없이
   //     지나간다(그 열거 자체가 문자 발송의 앞단이다).
-  const ip = isDemo ? null : clientIp(req);
-  if (ip !== null && await rateLimited(supabase, `sms:ip:${ip}`, IP_MAX, IP_WINDOW_SEC)) {
+  const ipKey = isDemo ? null : await clientIpKey(req);
+  if (ipKey !== null && await rateLimited(supabase, `sms:ip:${ipKey}`, IP_MAX, IP_WINDOW_SEC)) {
     // 창이 1시간인 버킷이므로 60 을 돌려주면 안 된다 — 앱이 그 값을 그대로
     // "N초 후 재발송 가능" 으로 띄우기 때문에, 최대 1시간 막힌 사용자가 60초 뒤
     // 다시 눌러 또 막힌다. 재시도가 아무것도 해결하지 못하는 구간에서 재시도를
@@ -167,7 +167,8 @@ Deno.serve(async (req: Request) => {
   //     30분 스로틀이 걸려 있어(edge_alert) 폭주해도 알림이 폭주하지 않는다.
   if (!isDemo) {
     if (await rateLimited(supabase, "sms:global", GLOBAL_MAX, GLOBAL_WINDOW_SEC)) {
-      console.error("global SMS cap reached", { purpose, ip });
+      // 해시 앞 12자만 — 로그도 저장이다. 같은 출처인지 대조하기엔 충분하다.
+      console.error("global SMS cap reached", { purpose, ipKey: ipKey?.slice(0, 12) ?? null });
       await alertAdmins(
         supabase,
         "sms-global-cap",

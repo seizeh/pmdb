@@ -21,7 +21,7 @@
 //
 //   버킷은 signup-lite 와 같은 모양으로 둔다(전화번호 + IP). 둘 다 스푸핑할 수 없다 —
 //   전화번호는 대입 대상 그 자체이고, `cf-connecting-ip` 는 위조하면 Cloudflare
-//   엣지가 요청 자체를 거부한다(clientIp 주석의 실측). 실패한 대입만 세는 게 아니라
+//   엣지가 요청 자체를 거부한다(clientIpKey 주석의 실측). 실패한 대입만 세는 게 아니라
 //   호출 자체를 세는데, 성공하면 어차피 코드가 소진돼 재호출할 이유가 없으므로
 //   정상 사용자에게는 차이가 없다.
 //
@@ -32,7 +32,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { clientIp, rateLimited } from "../_shared/auth.ts";
+import { clientIpKey, rateLimited } from "../_shared/auth.ts";
 import { normalizePhone } from "../_shared/solapi.ts";
 
 const PURPOSES = new Set(["signup", "password_reset", "review"]);
@@ -84,7 +84,7 @@ Deno.serve(async (req: Request) => {
     /^\d{6}$/.test(Deno.env.get("DEMO_OTP") ?? "");
 
   // 대입 제한 — 코드 조회 **전에** 소모한다(제한에 걸린 요청이 DB 를 읽지 않게).
-  const ip = isDemo ? null : clientIp(req);
+  const ipKey = isDemo ? null : await clientIpKey(req);
   if (
     !isDemo &&
     (await rateLimited(
@@ -93,10 +93,10 @@ Deno.serve(async (req: Request) => {
       ATTEMPT_MAX_PHONE,
       ATTEMPT_WINDOW_SEC,
     ) ||
-      (ip !== null &&
+      (ipKey !== null &&
         await rateLimited(
           supabase,
-          `otpverify:ip:${ip}`,
+          `otpverify:ip:${ipKey}`,
           ATTEMPT_MAX_IP,
           ATTEMPT_WINDOW_SEC,
         )))
