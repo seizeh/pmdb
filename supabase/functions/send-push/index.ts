@@ -10,6 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { classifyFcmError } from "../_shared/fcm.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
+import { secretEq } from "../_shared/auth.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
@@ -66,7 +67,9 @@ Deno.serve(async (req: Request) => {
 
   const triggerSecret = Deno.env.get("PUSH_TRIGGER_SECRET");
   if (!triggerSecret) return json({ error: "not_configured" }, 503);
-  if (req.headers.get("x-push-secret") !== triggerSecret) return json({ error: "unauthorized" }, 401);
+  if (!secretEq(req.headers.get("x-push-secret") ?? "", triggerSecret)) {
+    return json({ error: "unauthorized" }, 401);
+  }
 
   const saRaw = Deno.env.get("FCM_SERVICE_ACCOUNT");
   if (!saRaw) return json({ ok: true, skipped: "fcm_not_configured" }); // pending 유지(설정 후 발송)

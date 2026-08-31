@@ -12,6 +12,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
+import { secretEq } from "../_shared/auth.ts";
 
 const PURGE_SECRET = Deno.env.get("BUSINESS_PURGE_SECRET");
 
@@ -19,7 +20,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!PURGE_SECRET) return json({ error: "server_misconfigured" }, 500);
-  if (req.headers.get("x-purge-secret") !== PURGE_SECRET) {
+  if (!secretEq(req.headers.get("x-purge-secret") ?? "", PURGE_SECRET)) {
     return json({ error: "unauthorized" }, 401);
   }
 

@@ -2471,6 +2471,34 @@ $$;
 
 
 --
+-- Name: tg_reports_alert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_reports_alert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  perform app.ops_alarm_fire(
+    'report:new',
+    30,
+    '신고 접수',
+    format('%s 신고가 접수됐습니다 — 관리자 콘솔에서 확인하세요.', new.target_type),
+    jsonb_build_object(
+      'report_id', new.id,
+      'target_type', new.target_type,
+      'categories', new.categories
+    )
+  );
+  return new;
+exception when others then
+  -- 알림 실패가 신고 접수 자체를 막으면 안 된다.
+  raise warning 'tg_reports_alert failed: %', sqlerrm;
+  return new;
+end $$;
+
+
+--
 -- Name: tg_reviews_aggregate(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -10527,6 +10555,13 @@ CREATE TRIGGER trg_posts_updated BEFORE UPDATE ON public.posts FOR EACH ROW EXEC
 --
 
 CREATE TRIGGER trg_posts_validate_transition BEFORE UPDATE ON public.posts FOR EACH ROW EXECUTE FUNCTION app.tg_posts_validate_transition();
+
+
+--
+-- Name: reports trg_reports_alert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_reports_alert AFTER INSERT ON public.reports FOR EACH ROW EXECUTE FUNCTION app.tg_reports_alert();
 
 
 --

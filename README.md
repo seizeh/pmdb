@@ -136,19 +136,16 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 ## 배포
 
 ```bash
-# 마이그레이션
-# ⚠️ db push 는 쓰지 말 것 — 이력 테이블이 실제 적용 상태와 어긋나 있어 이미 적용된
-#    마이그레이션을 재실행하려 든다. psql 로 파일을 직접 적용하는 것이 현재 절차다.
-#      psql "$SUPABASE_DB_URL" -X -q -v ON_ERROR_STOP=1 -f supabase/migrations/<파일>.sql
-#    적용 전 검증은 같은 파일의 commit; 을 rollback; 으로 바꿔 한 번 돌려본다.
-supabase db push
+# 마이그레이션 — psql 로 파일을 직접 적용한다.
+# ⚠️ `supabase db push` 는 쓰지 말 것 — 이력 테이블이 실제 적용 상태와 어긋나 있어
+#    이미 적용된 마이그레이션을 재실행하려 든다. (예전 README 가 경고 아래 그 명령을
+#    그대로 보여주고 있었다 — 지웠다. 경고와 예시가 싸우면 예시가 이긴다.)
+# 적용 전 검증: 같은 파일의 commit; 을 rollback; 으로 바꿔 한 번 돌려본다.
+psql "$SUPABASE_DB_URL" -X -q -v ON_ERROR_STOP=1 -f supabase/migrations/<파일>.sql
 
-# 함수
-supabase functions deploy send-phone-code --no-verify-jwt
-supabase functions deploy verify-phone-code --no-verify-jwt
-supabase functions deploy signup --no-verify-jwt
-supabase functions deploy signup-lite --no-verify-jwt
-supabase functions deploy login --no-verify-jwt
+# 함수 — main 머지가 곧 배포다(deploy-functions.yml, DB Tests 통과 뒤 workflow_run).
+# 수동 배포는 CI 장애 등 예외 상황에만:
+#   supabase functions deploy <이름> --no-verify-jwt   # verify_jwt 는 config.toml 이 정본
 ```
 
 
@@ -191,10 +188,16 @@ Supabase PostgreSQL 스키마 마이그레이션(0001~0016)을 각각 Markdown�
 | [0015](./0015_push_pipeline.md) | 푸시 알림 파이프라인 | 인프라 |
 | [0016](./0016_rename_likes_to_hearts.md) | post_likes → post_hearts | 리네임 |
 
-## 기존 스키마 규모
+## 스키마 규모
 
-- 테이블 29개 (전 테이블 RLS on)
-- 함수 53개 (헬퍼·트리거·RPC)
-- 트리거 43개
-- 인덱스 58개
-- 정책 77개
+베이스 문서(0001~0016) 시점과 현재를 구분해 적는다 — 한 숫자만 있으면 어느 시점인지
+모르게 되고, 실제로 오래 어긋난 채 방치됐었다.
+
+| | 0016 시점 | 현재 (2026-08-31 실측) |
+|---|---|---|
+| 테이블 | 29 | 54 (전 테이블 RLS on) |
+| 함수 | 53 | 199 |
+| 트리거 | 43 | 78 |
+| 정책 | 77 | 76 |
+| 마이그레이션 | — | 213 |
+| Edge Functions | — | 23 |
