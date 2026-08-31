@@ -32,7 +32,7 @@
 | `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `send-push` | pending 알림 FCM(HTTP v1) 발송. **죽은 토큰 판정은 토큰 원인이 확실할 때만**(2026-08-04) — `INVALID_ARGUMENT` 는 페이로드 오류로도 나와서, 종전에는 우리 버그 하나로 수신자의 모든 기기가 꺼졌다. 분류는 `_shared/fcm.ts` | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
-위 표는 17개. **원격 배포는 21개**로, 아래 4개는 이 문서에 아직 항목이 없다(0028 업체 인증·공유 뷰어 계열, 2026-07-27 확인).
+**원격 배포는 23개**(2026-08-31 확인). 아래는 위 표에 아직 항목이 없는 함수들이다 — 개수를 적어 두면 표가 바뀔 때마다 어긋나므로 슬러그만 기록한다.
 
 | 슬러그 | 용도 | verify_jwt | 배포 상태 | 설계 문서 |
 |---|---|---|---|---|
@@ -40,6 +40,7 @@
 | `check-business-no` | 사업자등록번호 국세청 조회 | false | ACTIVE v6 | 0025 |
 | `purge-business-docs` | 업체 증빙 서류 파기 배치 (pg_cron, `x-purge-secret`) | false | ACTIVE v6 | 0025 |
 | `share-view` | 공유 링크 뷰어 (QR·카톡 — 사람은 302, 크롤러는 서버 렌더링) | false | ACTIVE v18 | 0028 · 0029 |
+| `sync-facilities` | LOCALDATA 시설 주기 적재 (`x-sync-secret`, 운영 배치 — 수동 실행) | false | ACTIVE | 0033 |
 
 참고: `supabase/functions/supabase/` 디렉터리는 **함수가 아니라** Supabase CLI가 남긴 `.temp/linked-project.json`(프로젝트 링크 캐시) 아티팩트다. `verify-phone-code/supabase/.temp/`에도 동일 아티팩트가 하나 더 있다(함수 폴더 안에서 CLI를 실행한 흔적).
 
