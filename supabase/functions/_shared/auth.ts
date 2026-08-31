@@ -1,6 +1,18 @@
 // 공용 인증 유틸 — 커스텀 HS256 JWT 서명/검증, sha256, 랜덤 refresh 토큰.
 // 서명키는 각 함수 시크릿 JWT_SECRET(Supabase JWT Secret). access 는 PostgREST 네이티브 검증.
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { alertAdmins } from "./edge_alert.ts";
+
+/// 타이밍 노출 없는 문자열 비교 — 헤더 시크릿 대조용(x-push-secret 등).
+/// `!==` 는 첫 불일치 바이트에서 끝나 응답 시간이 일치 길이를 누설한다.
+/// sync-facilities 에 있던 것을 공용으로 승격 — 시크릿 대조 3곳이 각자 비교하면
+/// 한 곳만 안전한 "부분 적용"(0032 §1)이 된다.
+export function secretEq(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
 
 function bytesToB64url(bytes: Uint8Array): string {
   let bin = "";
@@ -162,9 +174,31 @@ export async function rateLimited(
   });
   if (error) {
     console.error("rate_limit_hit failed", error);
+    alertLimiterDown(supabase, key, error);
     return false;
   }
   return data === false;
+}
+
+// 리미터 오류 fail-open 은 가용성 선택이지만, 그 순간부터 모든 상한(OTP 대입·
+// SMS 총량·유료 API)이 조용히 풀린 상태가 지속된다 — 0031 §3.5 의 "무알림
+// fail-open". 관리자에게 알리되, alertAdmins 의 30분 스로틀도 같은
+// rate_limit_hit RPC 라 리미터가 죽은 동안엔 스로틀 자신도 fail-open 으로
+// 발송된다 → 아이솔레이트 내 시계로 10분 1회로 한 번 더 조인다.
+let _limiterAlertAt = 0;
+// deno-lint-ignore no-explicit-any
+function alertLimiterDown(supabase: any, key: string, error: unknown) {
+  const now = Date.now();
+  if (now - _limiterAlertAt < 10 * 60 * 1000) return;
+  _limiterAlertAt = now;
+  const detail = error instanceof Error ? error.message : JSON.stringify(error).slice(0, 200);
+  // fire-and-forget: 알림 실패가 본 흐름(로그인/갱신)을 막으면 안 된다.
+  alertAdmins(
+    supabase,
+    "rate_limiter_down",
+    "레이트리밋 리미터 오류 — fail-open 진행 중",
+    `rate_limit_hit 호출이 실패해 상한 없이 통과되고 있습니다. key=${key} — ${detail}`,
+  ).catch((e) => console.error("limiter-down alert failed", e));
 }
 
 /// refresh 토큰의 저장용 해시(원문은 저장 금지).
