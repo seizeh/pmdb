@@ -30,7 +30,11 @@ set -euo pipefail
 # --- 설정 ---------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/../backups}"
-RETENTION_DAYS="${RETENTION_DAYS:-7}"
+# 보존 28일 = 주 1회 실행 기준 4세대. 종전 7일은 주 1회 주기와 결합하면 항상
+# 1~2세대만 남아 "손상된 백업 1개 = 무백업"이었다(2026-08-31 실제로 1세대뿐이었음).
+# 삭제된 개인·위치정보가 백업본에 최대 28일 잔존하는 트레이드오프는
+# pmlegal 06운영점검주기.md 의 백업·파기 절에 함께 기재한다.
+RETENTION_DAYS="${RETENTION_DAYS:-28}"
 STAMP="$(date +%Y%m%d_%H%M%S)"   # 초까지 — 같은 분 재실행 시 덮어쓰기 방지
 
 log() { printf '[backup %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
@@ -83,6 +87,20 @@ if [ -n "${BACKUP_RCLONE_REMOTE:-}" ]; then
   log "Storage 동기화 완료"
 else
   log "Storage 백업 건너뜀 (BACKUP_RCLONE_REMOTE 미설정 — 이미지 파일은 별도 백업 필요)"
+fi
+
+# --- 2.5) (선택) 오프사이트 사본 ----------------------------------------
+# 백업이 원본(운영 DB)과 별개여도 이 Mac 한 대에만 있으면 재해 복구가 아니다 —
+# 노트북 분실·디스크 고장이 곧 무백업. 덤프는 gpg 암호화본이므로 iCloud Drive 등
+# 클라우드 보관 가능. BACKUP_OFFSITE_DIR 는 backup.env 에서 설정.
+if [ -n "${BACKUP_OFFSITE_DIR:-}" ]; then
+  mkdir -p "$BACKUP_OFFSITE_DIR"
+  cp "$DB_FINAL" "$BACKUP_OFFSITE_DIR/"
+  log "오프사이트 사본 → $BACKUP_OFFSITE_DIR/$(basename "$DB_FINAL")"
+  # 사본 쪽도 같은 보존주기로 회전(파기 정책이 두 위치에 동일하게 적용되어야 한다)
+  find "$BACKUP_OFFSITE_DIR" -maxdepth 1 -name 'db_*.dump*' -type f -mtime "+$RETENTION_DAYS" -print -delete || true
+else
+  log "⚠ 오프사이트 사본 건너뜀 (BACKUP_OFFSITE_DIR 미설정 — 백업이 이 기기 한 대에만 있음)"
 fi
 
 # --- 3) 보존주기 폐기 ---------------------------------------------------
