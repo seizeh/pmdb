@@ -1617,6 +1617,42 @@ $$;
 
 
 --
+-- Name: tg_facilities_frozen_addr_alert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_facilities_frozen_addr_alert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  perform app.ops_alarm_fire(
+    'facility_frozen_addr:' || new.id,
+    1440,  -- 행별 하루 쿨다운 — 같은 배치를 다시 돌려도 하루 한 번만.
+    '이름 동결 시설의 주소가 바뀜',
+    format('%s — 재적재가 주소를 덮었습니다. 새 가게 분리 등록/이전 처리가 필요한지 확인하세요(0033 §8).', new.name),
+    jsonb_build_object(
+      'facility_id', new.id,
+      'name', new.name,
+      'old_address', old.address,
+      'new_address', new.address
+    )
+  );
+  return new;
+exception when others then
+  -- 알림 실패가 적재 배치 자체를 막으면 안 된다.
+  raise warning 'tg_facilities_frozen_addr_alert failed: %', sqlerrm;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION tg_facilities_frozen_addr_alert(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.tg_facilities_frozen_addr_alert() IS '이름 동결(owner_updated_at) 시설의 주소가 재적재로 덮이는 순간 관리자에게 알린다(0033 §8 임시 개명 행).';
+
+
+--
 -- Name: tg_facility_review_aggs(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -10303,6 +10339,20 @@ CREATE TRIGGER trg_comments_soft_delete_ts BEFORE UPDATE ON public.comments FOR 
 --
 
 CREATE TRIGGER trg_device_tokens_updated BEFORE UPDATE ON public.device_tokens FOR EACH ROW EXECUTE FUNCTION app.tg_set_updated_at();
+
+
+--
+-- Name: facilities trg_facilities_frozen_addr_alert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_facilities_frozen_addr_alert AFTER UPDATE ON public.facilities FOR EACH ROW WHEN (((new.owner_updated_at IS NOT NULL) AND (new.address IS DISTINCT FROM old.address))) EXECUTE FUNCTION app.tg_facilities_frozen_addr_alert();
+
+
+--
+-- Name: TRIGGER trg_facilities_frozen_addr_alert ON facilities; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TRIGGER trg_facilities_frozen_addr_alert ON public.facilities IS '동결 행 주소 변경 감지 — 재적재 때마다 사람이 확인하던 것을 UPDATE 시점 알림으로 대체.';
 
 
 --
