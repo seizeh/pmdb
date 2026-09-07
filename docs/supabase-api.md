@@ -424,7 +424,7 @@
 | `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER` | send-phone-code | Solapi SMS (SENDER는 콘솔 사전등록 발신번호) |
 | `NAVER_MAP_KEY_ID` / `NAVER_MAP_KEY` | verify-location, verify-post-photo, search-petcafe, resolve-region, sync-dong-centroids | NCP Maps Reverse/Forward Geocoding (Client ID/Secret) |
 | `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | search-petcafe | 네이버 오픈API 지역검색 |
-| `GEMINI_API_KEY` | verify-post-photo, enroll-pet-identity | Google Gemini 2.5 Pro (유료 등급/billing) |
+| `GEMINI_API_KEY` | verify-post-photo, enroll-pet-identity | Google Gemini 2.5 Pro (유료 등급/billing — **2026-09-07 소유자가 결제 설정에서 유료 등급 확인**. 유료 서비스는 Gemini API 약관상 입력 데이터가 모델 학습에 사용되지 않는다 — 처리방침 §6·§7의 "판별 목적으로만 처리·별도 보관 없음" 기술이 성립하는 전제이므로, 무료 등급 강등은 개인정보 고지 위반이 된다. 결제 해지·프로젝트 변경 시 이 항목을 다시 확인할 것) |
 | `PUSH_TRIGGER_SECRET` | send-push | DB 트리거/pg_cron과 공유하는 호출 인증 시크릿 |
 | `FCM_SERVICE_ACCOUNT` | send-push | Google 서비스계정 JSON (FCM HTTP v1 OAuth) |
 
