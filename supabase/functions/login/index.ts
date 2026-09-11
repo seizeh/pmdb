@@ -13,7 +13,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import {
-  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientIp, clientUa, randomToken,
+  ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientIpKey, clientUa, randomToken,
   rateLimited, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
 import { dummyVerify, hashPassword, isLegacyHash, verifyPassword } from "../_shared/passwords.ts";
@@ -44,10 +44,10 @@ Deno.serve(async (req: Request) => {
   );
 
   // 기본 레이트리밋: 계정 10/5분(스푸핑 불가, 1차) + IP 20/분(보조, IP 식별 시만).
-  const ip = clientIp(req);
+  const ipKey = await clientIpKey(req);
   if (
     await rateLimited(supabase, `login:user:${username.toLowerCase()}`, 10, 300) ||
-    (ip !== null && await rateLimited(supabase, `login:ip:${ip}`, 20, 60))
+    (ipKey !== null && await rateLimited(supabase, `login:ip:${ipKey}`, 20, 60))
   ) {
     return json({ error: "rate_limited" }, 429);
   }
@@ -116,7 +116,7 @@ Deno.serve(async (req: Request) => {
   try {
     await supabase.rpc("record_auth_log", {
       p_user: user.id,
-      p_ip_hash: ip !== null ? await sha256Hex(ip) : null,
+      p_ip_hash: ipKey, // clientIpKey 가 이미 sha256 이다(같은 값·같은 알고리즘)
     });
   } catch (e) {
     console.error("record_auth_log failed (non-fatal)", e);

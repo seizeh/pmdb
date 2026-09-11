@@ -10,7 +10,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
 import {
-  ACCESS_TTL_CAPABLE, clientIp, clientUa, randomToken, rateLimited,
+  ACCESS_TTL_CAPABLE, clientIpKey, clientUa, randomToken, rateLimited,
   REFRESH_GRACE_SECONDS, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
 
@@ -37,10 +37,10 @@ Deno.serve(async (req: Request) => {
 
   const oldHash = await sha256Hex(raw);
   // 기본 레이트리밋: 토큰 해시 20/분(스푸핑 불가, grace 증폭 캡) + IP 120/분(보조, IP 식별 시만).
-  const ip = clientIp(req);
+  const ipKey = await clientIpKey(req);
   if (
     await rateLimited(supabase, `refresh:tok:${oldHash}`, 20, 60) ||
-    (ip !== null && await rateLimited(supabase, `refresh:ip:${ip}`, 120, 60))
+    (ipKey !== null && await rateLimited(supabase, `refresh:ip:${ipKey}`, 120, 60))
   ) {
     return json({ error: "rate_limited" }, 429);
   }

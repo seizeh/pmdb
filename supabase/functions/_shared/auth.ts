@@ -22,7 +22,12 @@ function bytesToB64url(bytes: Uint8Array): string {
 function strToB64url(s: string): string {
   return bytesToB64url(new TextEncoder().encode(s));
 }
-function b64urlToBytes(s: string): Uint8Array {
+/// 반환 타입에 `<ArrayBuffer>` 를 명시한다 — 그냥 `Uint8Array` 로 두면 Deno 2.9 의
+/// 타입은 버퍼를 `ArrayBufferLike`(SharedArrayBuffer 포함)로 넓게 잡고, WebCrypto 의
+/// `BufferSource` 는 그걸 안 받는다. `new Uint8Array(n)` 은 실제로 항상
+/// `ArrayBuffer` 라 좁히는 게 맞고, 런타임 동작은 그대로다.
+/// (deno check 래칫이 오래 1건으로 잡고 있던 유일한 오류가 이것이었다.)
+function b64urlToBytes(s: string): Uint8Array<ArrayBuffer> {
   const pad = s.length % 4 === 0 ? "" : "=".repeat(4 - (s.length % 4));
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
   const bin = atob(b64);
@@ -158,9 +163,37 @@ export function clientUa(req: Request): string | null {
 /// x-forwarded-for 로 폴백하면 그 폴백이 곧 우회로가 된다(헤더 하나 붙이면 매
 /// 요청 다른 IP 가 되어 버킷이 무한히 갈린다). DB 경로가 같은 이유로 이미 폴백을
 /// 지웠다 — `20260801140000_ratelimit_trusted_client_ip.sql`. 두 경로를 맞춘다.
-export function clientIp(req: Request): string | null {
+///
+/// ── 왜 원본이 아니라 해시를 돌려주나 (2026-08-22)
+///
+/// 종전에는 원본 IP 를 돌려줬고 호출부가 그대로 버킷 키에 박았다:
+///
+///   login:ip:139.178.129.10:29787996      ← app.rate_limits.bucket 에 **평문**
+///
+/// 그런데 개인정보처리방침 §"이용 과정에서 자동 생성" 은 단서 없이 이렇게 적고 있다:
+///
+///   IP 주소(SHA-256 해시 후 저장)
+///
+/// app.auth_logs 는 그 약속을 지켰는데(record_auth_log 가 sha256Hex 로 넣는다)
+/// 레이트리밋 버킷만 평문이었다. **한쪽에서 가리는 값을 다른 쪽에서 그대로 쓰면
+/// 가린 의미가 없다** — 실제로 이 키를 같은 시각의 `login:user:<아이디>` 버킷과
+/// 맞춰 특정인의 접속 IP 를 복원할 수 있었다(2026-08-22 조사에서 그렇게 찾았다).
+///
+/// 레이트리밋은 **같은 출처를 같은 키로 묶기만** 하면 되고 원본이 필요 없다.
+/// 그래서 여기서 해싱해 내보낸다 — 호출부가 원본을 만질 일 자체를 없앤다.
+/// (원본을 돌려주고 "호출부가 알아서 해싱" 으로 두면 다음에 추가되는 호출부가
+///  같은 실수를 반복한다. 이 파일이 고쳐 온 오류들이 전부 그 모양이었다.)
+///
+/// auth_logs 와 **같은 sha256Hex 를 쓴다.** 값이 같아야 두 곳을 맞대 볼 수 있고,
+/// record_auth_log 도 이 값을 그대로 넘기면 되므로 해싱이 한 번으로 준다.
+///
+/// ⚠ 이건 익명화가 아니라 **가명화**다. IPv4 는 43억 개뿐이라 무염 해시는 전수
+/// 대입으로 되돌릴 수 있다. 방침이 약속한 수준(SHA-256)에 맞추는 것이 목적이고,
+/// 더 센 보장이 필요하면 방침과 함께 바꿔야 한다(솔트·절단 등).
+export async function clientIpKey(req: Request): Promise<string | null> {
   const ip = req.headers.get("cf-connecting-ip");
-  return ip ? (ip.trim() || null) : null;
+  const trimmed = ip ? ip.trim() : "";
+  return trimmed ? await sha256Hex(trimmed) : null;
 }
 
 /// 레이트리밋 1회 소모. true=제한 초과(차단해야 함), false=허용.

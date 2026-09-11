@@ -26,7 +26,7 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { corsHeaders, json } from "../_shared/cors.ts";
-import { clientIp, rateLimited, signAccess } from "../_shared/auth.ts";
+import { clientIpKey, rateLimited, signAccess } from "../_shared/auth.ts";
 import { normalizePhone } from "../_shared/solapi.ts";
 
 const LITE_TTL = 60 * 15; // 15분 — DB 의 reverify 창(add_facility_review)과 동일
@@ -70,10 +70,10 @@ Deno.serve(async (req: Request) => {
   );
 
   // 코드 대입 방어: 번호당 10회/10분(스푸핑 불가) + IP 30회/10분(보조).
-  const ip = clientIp(req);
+  const ipKey = await clientIpKey(req);
   if (
     await rateLimited(supabase, `lite:phone:${phone}`, 10, 600) ||
-    (ip !== null && await rateLimited(supabase, `lite:ip:${ip}`, 30, 600))
+    (ipKey !== null && await rateLimited(supabase, `lite:ip:${ipKey}`, 30, 600))
   ) {
     return json({ error: "rate_limited" }, 429);
   }
