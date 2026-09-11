@@ -8,7 +8,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { classifyFcmError } from "../_shared/fcm.ts";
+import { classifyFcmError, summarizeFcmError } from "../_shared/fcm.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 import { secretEq } from "../_shared/auth.ts";
 
@@ -100,6 +100,8 @@ Deno.serve(async (req: Request) => {
   // 사람이 봐야 하는 실패(우리 페이로드 버그·APNs 설정)를 배치 전체에서 모았다가
   // 마지막에 한 번만 알린다. 토큰마다 알리면 알림이 알림을 덮는다.
   let attention: string | null = null;
+  // 같은 배치에서 몇 건이었는지 — 첫 건만 보여주면 "한 대만 그런가" 로 읽힌다.
+  let attentionCount = 0;
   for (const it of list) {
     let anyOk = false; let lastErr: string | null = null; const dead: string[] = [];
     for (const t of (it.tokens ?? [])) {
@@ -130,7 +132,11 @@ Deno.serve(async (req: Request) => {
         lastErr = v.code;
         if (v.tokenDead) dead.push(t.token);
         if (v.needsAttention) {
-          attention ??= `${v.code} — ${JSON.stringify(err?.error?.details ?? err).slice(0, 160)}`;
+          attentionCount++;
+          // summarizeFcmError 가 신호(APNs 사유·필드 위반)를 앞에 놓는다 — 종전의
+          // `JSON.stringify(details).slice(0,160)` 은 상용구로 예산을 다 쓰고
+          // 정작 ApnsError.reason 직전에서 잘렸다(_shared/fcm.ts 주석).
+          attention ??= `${v.code} — ${summarizeFcmError(err)}`;
         }
       }
     }
@@ -140,8 +146,11 @@ Deno.serve(async (req: Request) => {
   if (attention) {
     // 재시도해도 낫지 않는 종류다. 저볼륨에서는 "실패 건수" 임계(운영 알람)에도
     // 안 걸리므로 여기서 직접 알린다. 30분 중복 억제는 alertAdmins 가 한다.
-    console.error("push needs attention", attention);
-    await alertAdmins(supabase, "push_needs_attention", "[운영] 푸시 발송 오류 — 설정/페이로드 확인 필요", attention);
+    console.error("push needs attention", attention, "count=", attentionCount);
+    const detail = attentionCount > 1
+      ? `${attention}\n(이번 배치에서 ${attentionCount}건)`
+      : attention;
+    await alertAdmins(supabase, "push_needs_attention", "[운영] 푸시 발송 오류 — 설정/페이로드 확인 필요", detail);
   }
   return json({ ok: true, processed: list.length });
 });

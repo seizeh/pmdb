@@ -20,12 +20,43 @@
 // ── 무엇으로 가르는가
 //   FCM v1 은 잘못된 필드를 details[].fieldViolations[].field 로 알려 준다.
 //   토큰 문제면 그 field 가 `message.token` 이다. 그게 아니면 우리 페이로드 문제다.
+//
+// ── 그런데 그 규칙만으로는 iOS 를 못 가른다 (2026-08-22)
+//
+//   운영에서 INVALID_ARGUMENT 알람이 두 번 울렸다(08-17 접종알림, 08-20 로그인알림).
+//   서로 **다른 알림**인데 같은 오류였다. 페이로드는 모든 푸시가 같은 틀을 쓰므로
+//   페이로드 버그라면 매번 터져야 한다 — 한 달에 두 번은 그 설명과 맞지 않는다.
+//   그리고 오류 본문에 있던 건 `ApnsError` 였다. 안드로이드·웹 토큰은 멀쩡했다.
+//
+//   원인은 **APNs 는 fieldViolations 를 쓰지 않는다**는 것이다. APNs 는 자기 사유를
+//   details[] 안의 `ApnsError.reason` 으로 준다:
+//
+//     {"@type":"…FcmError",  "errorCode":"INVALID_ARGUMENT"}
+//     {"@type":"…ApnsError", "statusCode":400, "reason":"BadDeviceToken"}
+//
+//   그래서 violatesTokenField() 는 항상 false 였고, 결과가 두 방향으로 틀렸다:
+//     · tokenDead=false      → **죽은 토큰을 영원히 안 지운다.** 다음 푸시가 또
+//                              그 토큰을 때리고 또 알람이 온다(자기강화).
+//     · needsAttention=true  → "우리 페이로드 버그" 라고 **틀린 곳을 지목한다.**
+//
+//   증거: 계정 하나에 활성 iOS 토큰이 17개 쌓여 있었다(전체 43). 실기기는 한두 대다.
+//   다른 계정은 UNREGISTERED 경로로 정상 정리돼 1개씩만 남아 있었다.
+//
+//   #170 이 고친 것의 **반대편 오류**다. 그때는 INVALID_ARGUMENT 를 무조건 토큰
+//   사망으로 봐서 멀쩡한 기기를 껐고, 지금은 APNs 계열을 전부 페이로드 버그로 봐서
+//   죽은 토큰을 못 지웠다. 어느 쪽이든 원인은 하나 — **근거 없이 단정한 것**이다.
+//   그래서 아래도 허용목록(allowlist)으로 간다: APNs 가 토큰을 명시적으로 지목한
+//   사유만 죽었다고 보고, 모르는 사유는 살려 두고 사람에게 넘긴다.
 
 export interface FcmErrorBody {
   error?: {
     status?: string;
+    message?: string;
     details?: Array<{
+      "@type"?: string;
       errorCode?: string;
+      /// APNs 전용 — FCM 은 fieldViolations 를 쓰는데 APNs 는 이 필드를 쓴다.
+      reason?: string;
       fieldViolations?: Array<{ field?: string; description?: string }>;
     }>;
   };
@@ -50,6 +81,56 @@ const TOKEN_DEAD_CODES = new Set([
   "SENDER_ID_MISMATCH",
 ]);
 
+/// APNs 가 **기기 토큰을 명시적으로 지목한** 사유들. 이것만 죽었다고 본다.
+///   BadDeviceToken         — 토큰이 잘못됐거나 **환경이 다르다**(개발↔프로덕션).
+///                            TestFlight 빌드와 Xcode 실행 빌드가 섞이면 나온다.
+///   DeviceTokenNotForTopic — 다른 번들 ID 로 발급된 토큰.
+///   Unregistered           — 앱 삭제. 보통 FCM 이 UNREGISTERED 로 접어서 위쪽에서
+///                            먼저 걸리지만, 접히지 않고 올 때를 위해 둔다.
+///
+/// ⚠️ 여기에 없는 사유는 **넣지 않는다.** 특히 헷갈리는 둘:
+///   ExpiredProviderToken / InvalidProviderToken — 우리 APNs 인증키 문제다. 토큰을
+///     끄면 **모든 사용자의 기기가 우리 키 만료 한 번에 전부 꺼진다.**
+///   BadTopic · PayloadTooLarge · BadPriority · InvalidPushType — 우리 요청 문제다.
+const APNS_TOKEN_DEAD_REASONS = new Set([
+  "BadDeviceToken",
+  "DeviceTokenNotForTopic",
+  "Unregistered",
+]);
+
+/// details[] 에서 ApnsError 의 reason 을 꺼낸다. 없으면 null.
+function apnsReason(err: FcmErrorBody): string | null {
+  for (const d of err.error?.details ?? []) {
+    // `@type` 은 `type.googleapis.com/google.firebase.fcm.v1.ApnsError` 형태다.
+    // 전체 문자열을 비교하면 FCM 이 경로를 바꿀 때 조용히 안 걸리므로 끝만 본다.
+    if ((d["@type"] ?? "").endsWith("ApnsError")) {
+      const r = (d.reason ?? "").trim();
+      if (r) return r;
+    }
+  }
+  return null;
+}
+
+/// 사람이 읽을 요약 — **잘려도 정보가 남는 순서**로 만든다.
+///
+/// 종전에는 `JSON.stringify(details).slice(0, 160)` 이었다. details[0] 은 언제나
+/// `{"@type":"…FcmError","errorCode":"…"}` 라는 상용구라, 160자가 그 상용구와
+/// `{"@type":"…ApnsError",` 까지만 채우고 **정작 reason 직전에서 잘렸다.** 알람을
+/// 받아도 원인을 알 수 없었던 이유다. 그래서 신호를 앞에 놓고 상용구는 버린다.
+export function summarizeFcmError(err: FcmErrorBody, max = 600): string {
+  const parts: string[] = [];
+  const reason = apnsReason(err);
+  if (reason) parts.push(`APNs:${reason}`);
+  for (const d of err.error?.details ?? []) {
+    for (const v of d.fieldViolations ?? []) {
+      parts.push(`${v.field ?? "?"} — ${v.description ?? ""}`.trim());
+    }
+  }
+  if (err.error?.message) parts.push(err.error.message);
+  const s = parts.length > 0 ? parts.join(" | ") : JSON.stringify(err.error ?? err);
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
 function violatesTokenField(err: FcmErrorBody): boolean {
   for (const d of err.error?.details ?? []) {
     for (const v of d.fieldViolations ?? []) {
@@ -71,9 +152,21 @@ export function classifyFcmError(err: FcmErrorBody, httpStatus: number): FcmVerd
   }
 
   if (code === "INVALID_ARGUMENT") {
-    // 토큰 필드를 지목했으면 죽은 토큰, 아니면 **우리 페이로드 버그**다.
-    const tokenDead = violatesTokenField(err);
-    return { code, tokenDead, needsAttention: !tokenDead };
+    // ① FCM 이 토큰 필드를 지목했으면 죽은 토큰이 확실하다.
+    if (violatesTokenField(err)) return { code, tokenDead: true, needsAttention: false };
+
+    // ② APNs 가 사유를 말했으면 그 사유로 가른다(위 주석 참고 — APNs 는
+    //    fieldViolations 를 쓰지 않으므로 ①로는 영원히 안 걸린다).
+    //    사유를 code 에 붙여 둔다 — push_error·알람에 그대로 실려 "무엇이었나" 가
+    //    한 번에 보인다(push_error 는 자유 텍스트라 파싱하는 곳이 없다).
+    const reason = apnsReason(err);
+    if (reason !== null) {
+      const tokenDead = APNS_TOKEN_DEAD_REASONS.has(reason);
+      return { code: `${code}/${reason}`, tokenDead, needsAttention: !tokenDead };
+    }
+
+    // ③ 근거가 없으면 끄지 않는다(오탐 비용이 크다). 사람에게 넘긴다.
+    return { code, tokenDead: false, needsAttention: true };
   }
 
   // APNs 키·인증서 문제. 토큰과 무관하고 재시도로 낫지 않으며, iOS 전체가 조용히
