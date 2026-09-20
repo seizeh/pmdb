@@ -485,6 +485,24 @@ COMMENT ON FUNCTION app.revoke_device_tokens_on_session_revoke() IS '세션 회�
 
 
 --
+-- Name: spatial_ref_sys_guard(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.spatial_ref_sys_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO ''
+    AS $$
+begin
+  if current_user in ('anon', 'authenticated') then
+    raise exception 'spatial_ref_sys is read-only for API roles'
+      using errcode = '42501';  -- insufficient_privilege — 클라이언트에는 권한 오류로 보인다
+  end if;
+  return null;  -- 문장 트리거의 반환값은 무시된다
+end
+$$;
+
+
+--
 -- Name: tg_applications_block_insert(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -4870,6 +4888,30 @@ ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.location_usage_logs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ops_alarm_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarm_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ops_alarms; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarms ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: push_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.push_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: rate_limit_trips; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.rate_limit_trips ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: rate_limits; Type: ROW SECURITY; Schema: app; Owner: -
