@@ -1,22 +1,19 @@
 // ============================================================================
-// edge_alert — 엣지 함수 실패를 관리자에게 인앱+푸시로 알림 (pmdart#157 베타 관측성)
+// edge_alert — 엣지 함수 실패를 관리자에게 알림 (pmdart#157 베타 관측성)
 //
-// 기존 파이프라인 재사용: notifications INSERT → trg_notifications_push(pg_net)
-// → send-push → FCM. notification_type 은 기존 'system_notice'(앱 표기 '공지')를
-// 재사용한다 — 새 타입은 CHECK 제약·클라 매핑 동시 수정이 필요해 실수 여지가
-// 크다(새 타입 추가 시 CHECK 미수정이면 트리거가 조용히 삼킨 전례).
+// 2026-09-21 원장 통합: 종전에는 스로틀(rate_limit_hit 30분 1회)과 notifications
+// insert 를 여기서 직접 했고, ops_alarms 원장에는 **발송 시에도 남지 않았다** —
+// DB 경로(app.ops_alarm_fire)와 이중 구현이었고, 2026-08-08 의 스로틀 판정 반전
+// 사고(각 창의 첫 알림 삼킴 + 2회째부터 무제한)가 정확히 이 별도 구현에서 났다.
 //
-// 같은 key 는 30분 1회로 스로틀(rate_limit_hit RPC 재사용) — Gemini 장애 등
-// 폭주가 알림 폭주로 번지지 않게. 알림 실패가 본 흐름을 깨면 안 되므로
-// 절대 throw 하지 않는다(전부 console.error 후 무시).
+// 이제 public.edge_alert_fire(service_role 전용 definer 래퍼) 한 줄로 위임한다 —
+// 쿨다운(30분)·관리자 알림(priority high·그룹키)·억제 기록(fire_count /
+// last_seen_at) 전부 원장이 담당하고, 엣지발 알람도 'edge:<key>' 로 이력이 남는다.
+// 억제도 발생이다 — 관측 손실이 되지 않게 원장에 횟수·시각이 쌓인다.
+//
+// 알림 실패가 본 흐름을 깨면 안 되므로 절대 throw 하지 않는다.
 // ============================================================================
-const ALERT_WINDOW_SECONDS = 1800; // 같은 key 30분 1회
 
-// `ReturnType<typeof createClient>` 이었는데, 타입 인자를 안 준 createClient 의
-// 스키마 제네릭이 never 로 굳어 **rpc/from 호출이 전부 타입 오류**가 났다(3건).
-// 호출부마다 캐스팅을 뿌리는 대신 _shared/auth.ts 의 rateLimited·activeUid 와
-// 같은 방식으로 맞춘다 — 이 저장소는 생성 타입을 쓰지 않으므로 여기서 얻을
-// 타입 안전성이 애초에 없었다.
 // deno-lint-ignore no-explicit-any
 export async function alertAdmins(
   admin: any,
@@ -25,43 +22,12 @@ export async function alertAdmins(
   body: string,
 ): Promise<void> {
   try {
-    // rate_limit_hit 반환 규약: true = 허용(이번 소모가 창의 1회), false = 초과.
-    // rateLimited()(auth.ts)가 `data === false` 를 차단으로 읽는 것과 같은 방향이다.
-    // 종전에는 이 판정이 반대로 붙어 있어 각 30분 창의 **첫** 알림이 삼켜지고
-    // 2회째부터 무제한 발송됐다(2026-08-08 교차 검토에서 발견).
-    const { data: allowed, error: rlErr } = await admin.rpc("rate_limit_hit", {
-      p_key: `edgealert:${key}`,
-      p_max: 1,
-      p_window_seconds: ALERT_WINDOW_SECONDS,
+    const { error } = await admin.rpc("edge_alert_fire", {
+      p_key: key,
+      p_title: title,
+      p_body: body,
     });
-    if (rlErr) {
-      console.error("edge_alert rate_limit failed", rlErr); // fail-open — 알림은 보낸다
-    } else if (allowed === false) {
-      return; // 30분 내 같은 key 이미 발송됨
-    }
-
-    const { data: admins, error: selErr } = await admin
-      .from("users")
-      .select("id")
-      .eq("user_type", "admin")
-      .eq("status", "active");
-    if (selErr) {
-      console.error("edge_alert admin select failed", selErr);
-      return;
-    }
-    if (!admins?.length) return;
-
-    const rows = admins.map((a: { id: string }) => ({
-      user_id: a.id,
-      notification_type: "system_notice",
-      is_system: true,
-      priority: "high",
-      notification_group_key: `edge_alert:${key}`,
-      title,
-      body,
-    }));
-    const { error: insErr } = await admin.from("notifications").insert(rows);
-    if (insErr) console.error("edge_alert insert failed", insErr);
+    if (error) console.error("edge_alert fire failed", error);
   } catch (e) {
     console.error("edge_alert failed", e);
   }

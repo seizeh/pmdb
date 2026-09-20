@@ -25,6 +25,7 @@
 #   ⑩ 테스트 프로젝트 일시정지 여부(무료 티어 1주 미사용 pause)
 #   ⑪ 수동 확인 리마인더(Solapi 잔액 등 API 로 못 보는 것)
 #   ⑫ 권한 드리프트 — anon/authenticated 의 TRUNCATE/TRIGGER/REFERENCES 잔여
+#   ⑬ 알람 억제 재발 — 쿨다운에 접힌 fire_count>1 알람(지속 장애 후보)
 # ============================================================================
 set -uo pipefail
 
@@ -183,6 +184,21 @@ if [ "${n:-0}" -gt 0 ]; then
       order by table_name limit 10"
 else
   echo "✅ ⑫ 권한: DDL성 권한(TRUNCATE/TRIGGER/REFERENCES) 잔여 없음"
+fi
+
+# ⑬ 알람 억제 재발 — 쿨다운(30분 등)이 접은 발생은 알림으로는 안 보인다.
+# fire_count>1 은 같은 창에서 여러 번 발생했다는 뜻 — 지속/폭주 장애 후보라
+# 주간 단위로는 반드시 눈에 띄어야 한다(20260920 ops_alarm_suppression_ledger).
+n=$(q1 "select count(*) from app.ops_alarms
+  where fired_at > now() - interval '7 days' and fire_count > 1")
+if [ "${n:-0}" -gt 0 ]; then
+  warn "⚠ ⑬ 쿨다운에 접힌 재발 알람 ${n}건 (최근 7일) — 지속 장애 후보:"
+  q "select '   · '||alarm_key||' ×'||fire_count||' (마지막 '||to_char(last_seen_at,'MM-DD HH24:MI')||')'
+       from app.ops_alarms
+      where fired_at > now() - interval '7 days' and fire_count > 1
+      order by fire_count desc limit 5"
+else
+  echo "✅ ⑬ 알람: 쿨다운 내 재발 없음"
 fi
 
 hr

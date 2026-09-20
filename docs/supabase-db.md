@@ -1294,12 +1294,15 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 
 | 컬럼 | 뜻 |
 |---|---|
-| alarm_key | 쿨다운 단위(`client_error:<지점>`, `ratelimit:<계열>`, `push_failed`, `cron_failed`, `purge_overdue`) |
+| alarm_key | 쿨다운 단위(`client_error:<지점>`, `ratelimit:<계열>`, `push_failed`, `cron_failed`, `purge_overdue`, **`edge:<key>`** — 엣지 alertAdmins 발, 2026-09-21 통합) |
 | title / body | 알림에 그대로 나가는 문구 |
 | detail | jsonb — 건수·창 길이 등 근거 |
-| fired_at | 발사 시각 |
+| fired_at | 발사(알림이 나간) 시각 |
+| last_seen_at | 같은 key 의 **마지막 발생** 시각 — 억제 포함 (2026-09-21) |
+| fire_count | 이 쿨다운 창의 총 발생 횟수(발송 1 + 억제 n) — suppressed = fire_count − 1 |
 
 - 이력을 따로 남기는 이유: 알람은 푸시로 나가는데 **푸시 파이프라인이 죽으면 그 알람도 못 온다.** 이력·앱 내 알림·푸시 세 군데에 남겨 한 경로가 죽어도 되짚을 수 있게 한다. 조회는 `admin_ops_alarms`(§7.9).
+- **억제도 기록된다(2026-09-21)**: 쿨다운은 알림 폭주만 접고, 접힌 발생은 `fire_count`·`last_seen_at` 에 남는다 — 30분 내 1회 재발과 폭주가 구분되게(알림 억제 ≠ 관측 손실). 주간 점검 ⑬이 fire_count>1 을 노출한다. 회귀 가드는 t21 §7.
 - 보존 30일(`retention-purge`). `client_errors` 와 같은 기간으로 맞췄다 — 같이 보게 되는 자료라 기간이 다르면 "왜 이때는 알람이 없지" 가 보존 차이인지 실제인지 구분이 안 된다.
 
 ### app.rate_limit_trips
@@ -1767,7 +1770,7 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - `admin_ops_metrics() → json` — 운영 원가·활동 지표. SMS 9원/AI 20원 단가를 넣어 사진 검증·전화 인증 건수로 비용을 추정하고, 리프레시 토큰·메시지·댓글·글·하트를 합쳐 활성 사용자를 KST 기준 일자로 집계한다.
 - `admin_photo_verification_failures(p_limit=50, p_offset=0)` — 사진 검증 **실패분**만 최신순(최대 200). fail_reason·ai_reason·지역일치·매칭점수·purpose 를 함께 준다 — AI 게이트 오탐률을 눈으로 재는 창구(펫 신원 섀도 운영).
 - `admin_location_usage_logs(p_user, ...)` — 특정 사용자의 위치 이용·제공 기록 열람(위치정보법 §16 대응, §8.10 이 쌓는 것).
-- `admin_ops_alarms(p_limit=50, p_offset=0)` — 발사된 운영 알람 이력(§3.8 `app.ops_alarms`). 푸시를 못 받았거나 지웠을 때 되짚는 창구다 — 알람의 1차 경로가 푸시라서 이 조회가 없으면 파이프라인이 죽었을 때 알람 자체가 사라진다.
+- `admin_ops_alarms(p_limit=50, p_offset=0)` — 발사된 운영 알람 이력(§3.8 `app.ops_alarms`). 푸시를 못 받았거나 지웠을 때 되짚는 창구다 — 알람의 1차 경로가 푸시라서 이 조회가 없으면 파이프라인이 죽었을 때 알람 자체가 사라진다. **2026-09-21 반환에 `last_seen_at`·`fire_count` 추가**(반환형 변경이라 drop 후 재생성 + 재그랜트 + pgrst 리로드 — RPC 섀도잉 규율).
 - `admin_client_errors(p_where?, ...)` / `admin_client_error_summary(p_hours=24)` — 클라이언트 오류 원본 조회와 지점(`where_key`)별 집계(건수·영향 사용자 수·마지막 발생). 수집은 `record_client_error`(§7.12).
 - `admin_list_business_applications(p_status?, p_track?, p_auto_only?, ...)` / `admin_set_business_status(p_user, p_status, p_reason?)` — 업체 신청 심사 큐와 승인/거절. 거절에는 **사유가 필수**(`reason_required`), 같은 상태로의 재설정은 `no_change` 로 막는다(감사 로그 오염 방지).
 - `admin_list_business_licenses(p_status?, ...)` / `admin_review_business_license(p_license, p_status, p_reason?)` — 영업 허가증 심사. 승인은 **업체 프로필이 이미 approved 여야** 가능하다 — 허가만 먼저 통과해 자격이 앞서 나가는 걸 막는다.

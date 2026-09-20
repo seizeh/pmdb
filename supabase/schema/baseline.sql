@@ -2210,8 +2210,7 @@ CREATE TABLE app.ops_alarms (
     title text NOT NULL,
     body text NOT NULL,
     detail jsonb,
-    fired_at timestamp with time zone DEFAULT now() NOT NULL
-);
+    fired_at timestamp with time zone DEFAULT now() NOT NULL);
 
 
 --
