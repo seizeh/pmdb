@@ -1839,11 +1839,11 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - 크론 조건은 `to_regclass('cron.job_run_details')` 로 존재를 먼저 확인한다 — **pg_cron 은 운영에만 있다.** pgTAP CI 는 `prelude + schema.sql`(= `-n public -n app` 덤프)만 복원하므로 cron 스키마가 없고, 그냥 참조하면 알람을 검증하려고 부르는 순간 함수가 통째로 터진다.
 - ~~한계: **pg_cron 자체가 멈추면 이 스윕도 안 돈다.** 자기 자신의 부재는 감지할 수 없다.~~
   → **2026-09-20 dead man's switch 로 해소**(`20260920062032`): pg_cron `ops-heartbeat`(5분)가
-  healthchecks.io 로 박동(`net.http_get`, 대상은 `app.heartbeat_config` 싱글턴 — ping URL 은
-  capability 라 저장소 밖 주입)을 보내고, 박동이 끊기면 **외부**가 운영자에게 알린다.
+  healthchecks.io 로 하트비트(`net.http_get`, 대상은 `app.heartbeat_config` 싱글턴 — ping URL 은
+  capability 라 저장소 밖 주입)을 보내고, 하트비트가 끊기면 **외부**가 운영자에게 알린다.
   같은 장애 영역 안에서는 자기 부재를 감지할 수 없으므로 방향을 뒤집은 것 — DB 다운·
-  프로젝트 일시정지·pg_cron/pg_net 사망 전부가 "박동 없음"으로 드러난다. 남는 사각:
-  엣지 함수만 죽는 경우(DB 생존)는 박동이 못 본다 — 외부 프로브 층은 선택 과제.
+  프로젝트 일시정지·pg_cron/pg_net 사망 전부가 "하트비트 유실"으로 드러난다. 남는 사각:
+  엣지 함수만 죽는 경우(DB 생존)는 하트비트이 못 본다 — 외부 프로브 층은 선택 과제.
 - pgTAP: t21(12건).
 
 #### `rls_auto_enable() → event_trigger` [SD]

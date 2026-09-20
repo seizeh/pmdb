@@ -7379,7 +7379,7 @@ CREATE TABLE app.heartbeat_config (
 -- Name: TABLE heartbeat_config; Type: COMMENT; Schema: app; Owner: -
 --
 
-COMMENT ON TABLE app.heartbeat_config IS 'dead man''s switch 박동 대상(healthchecks.io) 싱글턴 — 값은 out-of-band 주입';
+COMMENT ON TABLE app.heartbeat_config IS 'dead man''s switch 하트비트 대상(healthchecks.io) 싱글턴 — 값은 out-of-band 주입';
 
 
 --
