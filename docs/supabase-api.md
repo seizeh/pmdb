@@ -29,7 +29,7 @@
 | `search-petcafe` | 애견카페 실시간 검색 (네이버 지역검색 프록시) | 커스텀 JWT Bearer | false | ACTIVE v9 |
 | `resolve-region` | 좌표 → 행정동 역지오코딩 (부수효과 없음) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS). **응답은 가입 여부와 무관하게 `{ok:true}` 로 통일**(2026-08-04) — 예전 `registered` 필드는 회원 여부 오라클이었다. 상한: 모든 시도 20/일·초대자, SMS 10/일·초대자 + 1/일·번호. 직접 INSERT 는 DB 에서 REVOKE | 커스텀 JWT Bearer | false | ACTIVE v1 |
-| `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
+| `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) — 호출: pg_cron `dong-centroid-sweep`(매시, `app.dong_sync_config`). **2026-09-20 로그인 JWT → 시크릿 게이트 전환**(사용자 신원이 판정에 무역할인 유지보수 작업, 앱 lazy backfill 호출 제거) | `x-sync-secret` 공유 시크릿 (`DONG_SYNC_SECRET`) | false | ACTIVE |
 | `send-push` | pending 알림 FCM(HTTP v1) 발송. **죽은 토큰 판정은 토큰 원인이 확실할 때만**(2026-08-04) — `INVALID_ARGUMENT` 는 페이로드 오류로도 나와서, 종전에는 우리 버그 하나로 수신자의 모든 기기가 꺼졌다. 분류는 `_shared/fcm.ts` | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
 **원격 배포는 23개**(2026-08-31 확인). 아래는 위 표에 아직 항목이 없는 함수들이다 — 개수를 적어 두면 표가 바뀔 때마다 어긋나므로 슬러그만 기록한다.
@@ -426,6 +426,7 @@
 | `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | search-petcafe | 네이버 오픈API 지역검색 |
 | `GEMINI_API_KEY` | verify-post-photo, enroll-pet-identity | Google Gemini 2.5 Pro (유료 등급/billing — **2026-09-07 소유자가 결제 설정에서 유료 등급 확인**. 유료 서비스는 Gemini API 약관상 입력 데이터가 모델 학습에 사용되지 않는다 — 처리방침 §6·§7의 "판별 목적으로만 처리·별도 보관 없음" 기술이 성립하는 전제이므로, 무료 등급 강등은 개인정보 고지 위반이 된다. 결제 해지·프로젝트 변경 시 이 항목을 다시 확인할 것) |
 | `PUSH_TRIGGER_SECRET` | send-push | DB 트리거/pg_cron과 공유하는 호출 인증 시크릿 |
+| `DONG_SYNC_SECRET` | sync-dong-centroids | pg_cron `dong-centroid-sweep` 과 공유(`app.dong_sync_config`) — 2026-09-20 JWT 게이트에서 전환 |
 | `FCM_SERVICE_ACCOUNT` | send-push | Google 서비스계정 JSON (FCM HTTP v1 OAuth) |
 
 `.env.example`(`supabase/functions/.env.example`)에는 `GEMINI_API_KEY_ID`도 있으나 코드에서 미사용. 시크릿 등록은 `supabase secrets set --env-file supabase/functions/.env --project-ref vyatppuxmpulqtxevfpk`.

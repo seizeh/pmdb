@@ -7287,6 +7287,23 @@ ALTER TABLE app.client_errors ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
+-- Name: dong_sync_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.dong_sync_config (
+    function_url text NOT NULL,
+    trigger_secret text NOT NULL
+);
+
+
+--
+-- Name: TABLE dong_sync_config; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.dong_sync_config IS 'sync-dong-centroids 크론 호출 설정 싱글턴 — push_config 패턴. 값은 out-of-band 주입';
+
+
+--
 -- Name: funnel_events; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -11341,6 +11358,12 @@ ALTER TABLE app.care_threads ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: dong_sync_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.dong_sync_config ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: funnel_events; Type: ROW SECURITY; Schema: app; Owner: -
