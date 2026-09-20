@@ -7367,6 +7367,22 @@ ALTER TABLE app.funnel_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
+-- Name: heartbeat_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.heartbeat_config (
+    ping_url text NOT NULL
+);
+
+
+--
+-- Name: TABLE heartbeat_config; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.heartbeat_config IS 'dead man''s switch 박동 대상(healthchecks.io) 싱글턴 — 값은 out-of-band 주입';
+
+
+--
 -- Name: location_usage_logs; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -11414,6 +11430,12 @@ ALTER TABLE app.dong_sync_config ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.funnel_events ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: heartbeat_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.heartbeat_config ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: location_usage_logs; Type: ROW SECURITY; Schema: app; Owner: -
