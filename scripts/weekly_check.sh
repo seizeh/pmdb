@@ -24,6 +24,7 @@
 #   ⑨ 백업 최신성(7일 초과 시 경고 — 로컬 전용, CI 는 리마인더만)
 #   ⑩ 테스트 프로젝트 일시정지 여부(무료 티어 1주 미사용 pause)
 #   ⑪ 수동 확인 리마인더(Solapi 잔액 등 API 로 못 보는 것)
+#   ⑫ 권한 드리프트 — anon/authenticated 의 TRUNCATE/TRIGGER/REFERENCES 잔여
 # ============================================================================
 set -uo pipefail
 
@@ -162,6 +163,27 @@ case "$st" in
   "")             echo "ℹ ⑩ 테스트 프로젝트: 상태 확인 실패(토큰/CLI 확인)" ;;
   *)              warn "⚠ ⑩ 테스트 프로젝트: $st — 대시보드에서 재개(restore) 필요" ;;
 esac
+
+# ⑫ 권한 드리프트 — anon/authenticated 의 TRUNCATE/TRIGGER/REFERENCES (20260920 회수).
+# PostgREST 가 결코 쓰지 않는 세 권한 — 특히 TRUNCATE 는 RLS 의 적용을 받지 않는다.
+# pgTAP 스냅샷은 이미지 기본권한이 회수를 되살려 이 단언을 못 잰다(0032 §6.4) —
+# 운영 실측인 이 점검이 정본 가드다. supabase_admin 소유 PostGIS 3종은 우리 롤로
+# 회수 불가라 제외(spatial_ref_sys 는 쓰기 가드 트리거로 별도 대응).
+n=$(q1 "select count(*) from information_schema.role_table_grants
+  where table_schema='public' and grantee in ('anon','authenticated')
+    and privilege_type in ('TRUNCATE','TRIGGER','REFERENCES')
+    and table_name not in ('spatial_ref_sys','geometry_columns','geography_columns')")
+if [ "${n:-0}" -gt 0 ]; then
+  warn "⚠ ⑫ 권한 드리프트: anon/authenticated 에 TRUNCATE/TRIGGER/REFERENCES ${n}건 재부여됨 — revoke 필요(20260920_revoke_ddlish_table_privs 참고):"
+  q "select '   · '||grantee||' '||privilege_type||' on '||table_name
+       from information_schema.role_table_grants
+      where table_schema='public' and grantee in ('anon','authenticated')
+        and privilege_type in ('TRUNCATE','TRIGGER','REFERENCES')
+        and table_name not in ('spatial_ref_sys','geometry_columns','geography_columns')
+      order by table_name limit 10"
+else
+  echo "✅ ⑫ 권한: DDL성 권한(TRUNCATE/TRIGGER/REFERENCES) 잔여 없음"
+fi
 
 hr
 echo "수동 확인 리마인더:"

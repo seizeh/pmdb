@@ -5690,7 +5690,7 @@ GRANT ALL ON FUNCTION public.rls_auto_enable() TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.admin_logs TO anon;
-GRANT ALL ON TABLE public.admin_logs TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.admin_logs TO authenticated;
 GRANT ALL ON TABLE public.admin_logs TO service_role;
 
 
@@ -5699,7 +5699,7 @@ GRANT ALL ON TABLE public.admin_logs TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.applications TO anon;
-GRANT ALL ON TABLE public.applications TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.applications TO authenticated;
 GRANT ALL ON TABLE public.applications TO service_role;
 
 
@@ -5708,7 +5708,7 @@ GRANT ALL ON TABLE public.applications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.appointments TO anon;
-GRANT ALL ON TABLE public.appointments TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.appointments TO authenticated;
 GRANT ALL ON TABLE public.appointments TO service_role;
 
 
@@ -5716,8 +5716,8 @@ GRANT ALL ON TABLE public.appointments TO service_role;
 -- Name: TABLE business_profiles; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.business_profiles TO anon;
-GRANT ALL ON TABLE public.business_profiles TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.business_profiles TO anon;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.business_profiles TO authenticated;
 GRANT ALL ON TABLE public.business_profiles TO service_role;
 
 
@@ -5726,7 +5726,7 @@ GRANT ALL ON TABLE public.business_profiles TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_message_deletions TO anon;
-GRANT ALL ON TABLE public.chat_message_deletions TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_message_deletions TO authenticated;
 GRANT ALL ON TABLE public.chat_message_deletions TO service_role;
 
 
@@ -5735,7 +5735,7 @@ GRANT ALL ON TABLE public.chat_message_deletions TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_messages TO anon;
-GRANT ALL ON TABLE public.chat_messages TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_messages TO authenticated;
 GRANT ALL ON TABLE public.chat_messages TO service_role;
 
 
@@ -5744,7 +5744,7 @@ GRANT ALL ON TABLE public.chat_messages TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_room_members TO anon;
-GRANT ALL ON TABLE public.chat_room_members TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_room_members TO authenticated;
 GRANT ALL ON TABLE public.chat_room_members TO service_role;
 
 
@@ -5753,7 +5753,7 @@ GRANT ALL ON TABLE public.chat_room_members TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_rooms TO anon;
-GRANT ALL ON TABLE public.chat_rooms TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_rooms TO authenticated;
 GRANT ALL ON TABLE public.chat_rooms TO service_role;
 
 
@@ -5762,7 +5762,7 @@ GRANT ALL ON TABLE public.chat_rooms TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.comments TO anon;
-GRANT ALL ON TABLE public.comments TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.comments TO authenticated;
 GRANT ALL ON TABLE public.comments TO service_role;
 
 
@@ -5771,7 +5771,7 @@ GRANT ALL ON TABLE public.comments TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.device_tokens TO anon;
-GRANT ALL ON TABLE public.device_tokens TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.device_tokens TO authenticated;
 GRANT ALL ON TABLE public.device_tokens TO service_role;
 
 
@@ -5780,7 +5780,7 @@ GRANT ALL ON TABLE public.device_tokens TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.facility_cache TO anon;
-GRANT ALL ON TABLE public.facility_cache TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.facility_cache TO authenticated;
 GRANT ALL ON TABLE public.facility_cache TO service_role;
 
 
@@ -5789,7 +5789,7 @@ GRANT ALL ON TABLE public.facility_cache TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.location_verifications TO anon;
-GRANT ALL ON TABLE public.location_verifications TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.location_verifications TO authenticated;
 GRANT ALL ON TABLE public.location_verifications TO service_role;
 
 
@@ -5798,7 +5798,7 @@ GRANT ALL ON TABLE public.location_verifications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.notification_preferences TO anon;
-GRANT ALL ON TABLE public.notification_preferences TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.notification_preferences TO authenticated;
 GRANT ALL ON TABLE public.notification_preferences TO service_role;
 
 
@@ -5807,7 +5807,7 @@ GRANT ALL ON TABLE public.notification_preferences TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.notifications TO anon;
-GRANT ALL ON TABLE public.notifications TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.notifications TO authenticated;
 GRANT ALL ON TABLE public.notifications TO service_role;
 
 
@@ -5816,7 +5816,7 @@ GRANT ALL ON TABLE public.notifications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pawings TO anon;
-GRANT ALL ON TABLE public.pawings TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.pawings TO authenticated;
 GRANT ALL ON TABLE public.pawings TO service_role;
 
 
@@ -5825,7 +5825,7 @@ GRANT ALL ON TABLE public.pawings TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pet_guardian_invites TO anon;
-GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.pet_guardian_invites TO authenticated;
+GRANT SELECT,DELETE,MAINTAIN,UPDATE ON TABLE public.pet_guardian_invites TO authenticated;
 GRANT ALL ON TABLE public.pet_guardian_invites TO service_role;
 
 
@@ -5834,7 +5834,7 @@ GRANT ALL ON TABLE public.pet_guardian_invites TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pet_guardians TO anon;
-GRANT ALL ON TABLE public.pet_guardians TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.pet_guardians TO authenticated;
 GRANT ALL ON TABLE public.pet_guardians TO service_role;
 
 
@@ -5843,7 +5843,7 @@ GRANT ALL ON TABLE public.pet_guardians TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pets TO anon;
-GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN ON TABLE public.pets TO authenticated;
+GRANT SELECT,DELETE,MAINTAIN ON TABLE public.pets TO authenticated;
 GRANT ALL ON TABLE public.pets TO service_role;
 
 
@@ -5950,7 +5950,7 @@ GRANT UPDATE(pet_status) ON TABLE public.pets TO authenticated;
 --
 
 GRANT MAINTAIN ON TABLE public.phone_verifications TO anon;
-GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.phone_verifications TO authenticated;
+GRANT INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.phone_verifications TO authenticated;
 GRANT ALL ON TABLE public.phone_verifications TO service_role;
 
 
@@ -5959,7 +5959,7 @@ GRANT ALL ON TABLE public.phone_verifications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_hearts TO anon;
-GRANT ALL ON TABLE public.post_hearts TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.post_hearts TO authenticated;
 GRANT ALL ON TABLE public.post_hearts TO service_role;
 
 
@@ -5968,7 +5968,7 @@ GRANT ALL ON TABLE public.post_hearts TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_pets TO anon;
-GRANT SELECT,REFERENCES,TRIGGER,MAINTAIN ON TABLE public.post_pets TO authenticated;
+GRANT SELECT,MAINTAIN ON TABLE public.post_pets TO authenticated;
 GRANT ALL ON TABLE public.post_pets TO service_role;
 
 
@@ -5977,7 +5977,7 @@ GRANT ALL ON TABLE public.post_pets TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_views TO anon;
-GRANT ALL ON TABLE public.post_views TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.post_views TO authenticated;
 GRANT ALL ON TABLE public.post_views TO service_role;
 
 
@@ -5986,7 +5986,7 @@ GRANT ALL ON TABLE public.post_views TO service_role;
 --
 
 GRANT MAINTAIN ON TABLE public.posts TO anon;
-GRANT REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN ON TABLE public.posts TO authenticated;
+GRANT DELETE,MAINTAIN ON TABLE public.posts TO authenticated;
 GRANT ALL ON TABLE public.posts TO service_role;
 
 
@@ -6203,7 +6203,7 @@ GRANT SELECT(updated_at),UPDATE(updated_at) ON TABLE public.posts TO authenticat
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.reviews TO anon;
-GRANT ALL ON TABLE public.reviews TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.reviews TO authenticated;
 GRANT ALL ON TABLE public.reviews TO service_role;
 
 
@@ -6212,7 +6212,7 @@ GRANT ALL ON TABLE public.reviews TO service_role;
 --
 
 GRANT MAINTAIN ON TABLE public.users TO anon;
-GRANT REFERENCES,TRIGGER,TRUNCATE,MAINTAIN ON TABLE public.users TO authenticated;
+GRANT MAINTAIN ON TABLE public.users TO authenticated;
 GRANT ALL ON TABLE public.users TO service_role;
 
 
@@ -6313,7 +6313,7 @@ GRANT SELECT(created_at) ON TABLE public.users TO authenticated;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.reports TO anon;
-GRANT ALL ON TABLE public.reports TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.reports TO authenticated;
 GRANT ALL ON TABLE public.reports TO service_role;
 
 
@@ -6322,7 +6322,7 @@ GRANT ALL ON TABLE public.reports TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.review_category_counts TO anon;
-GRANT ALL ON TABLE public.review_category_counts TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.review_category_counts TO authenticated;
 GRANT ALL ON TABLE public.review_category_counts TO service_role;
 
 
@@ -6331,7 +6331,7 @@ GRANT ALL ON TABLE public.review_category_counts TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.user_blocks TO anon;
-GRANT ALL ON TABLE public.user_blocks TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.user_blocks TO authenticated;
 GRANT ALL ON TABLE public.user_blocks TO service_role;
 
 
