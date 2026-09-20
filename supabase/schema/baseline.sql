@@ -485,6 +485,24 @@ COMMENT ON FUNCTION app.revoke_device_tokens_on_session_revoke() IS '세션 회�
 
 
 --
+-- Name: spatial_ref_sys_guard(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.spatial_ref_sys_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO ''
+    AS $$
+begin
+  if current_user in ('anon', 'authenticated') then
+    raise exception 'spatial_ref_sys is read-only for API roles'
+      using errcode = '42501';  -- insufficient_privilege — 클라이언트에는 권한 오류로 보인다
+  end if;
+  return null;  -- 문장 트리거의 반환값은 무시된다
+end
+$$;
+
+
+--
 -- Name: tg_applications_block_insert(); Type: FUNCTION; Schema: app; Owner: -
 --
 
