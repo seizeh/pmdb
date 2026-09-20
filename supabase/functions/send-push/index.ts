@@ -7,18 +7,12 @@
 //   notification 페이로드 포함 → 앱이 꺼져있어도 OS 가 표시(백그라운드/종료), data 로 탭 라우팅.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { classifyFcmError } from "../_shared/fcm.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
 import { secretEq } from "../_shared/auth.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-push-secret",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-const json = (b: unknown, s = 200) =>
-  new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
 function b64urlStr(s: string): string {
   return btoa(String.fromCharCode(...new TextEncoder().encode(s)))
@@ -61,8 +55,7 @@ async function getAccessToken(sa: any): Promise<string> {
   return cachedToken!;
 }
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const triggerSecret = Deno.env.get("PUSH_TRIGGER_SECRET");
@@ -144,4 +137,4 @@ Deno.serve(async (req: Request) => {
     await alertAdmins(supabase, "push_needs_attention", "[운영] 푸시 발송 오류 — 설정/페이로드 확인 필요", attention);
   }
   return json({ ok: true, processed: list.length });
-});
+}));

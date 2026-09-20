@@ -13,7 +13,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { imageMime } from "../_shared/upload.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
@@ -171,8 +171,7 @@ async function matchIdentity(
 
 type MatchResult = Awaited<ReturnType<typeof matchIdentity>>;
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   if (!JWT_SECRET) return json({ error: "server_misconfigured" }, 500);
@@ -397,4 +396,4 @@ Deno.serve(async (req: Request) => {
     matchScore: m.identity_score,
     expiresAt: new Date(Date.now() + TOKEN_TTL_MIN * 60_000).toISOString(),
   });
-});
+}));

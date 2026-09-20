@@ -15,7 +15,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { secretEq } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -69,8 +69,7 @@ async function forwardGeocode(query: string): Promise<{ lng: number; lat: number
   }
 }
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!DONG_SYNC_SECRET) return json({ error: "server_misconfigured" }, 500);
   if (!NAVER_KEY_ID || !NAVER_KEY) return json({ error: "server_misconfigured" }, 500);
@@ -103,4 +102,4 @@ Deno.serve(async (req: Request) => {
     if (!upErr) added++;
   }
   return json({ added });
-});
+}));

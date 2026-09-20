@@ -15,7 +15,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { secretEq } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -33,8 +33,7 @@ const CATEGORIES = new Set([
   "pet_sales",
 ]);
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!SYNC_SECRET) return json({ error: "server_misconfigured" }, 500);
 
@@ -70,4 +69,4 @@ Deno.serve(async (req: Request) => {
     return json({ error: "upsert_failed", detail: String(error.message ?? error).slice(0, 200) }, 500);
   }
   return json(data ?? {});
-});
+}));

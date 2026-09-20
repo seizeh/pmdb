@@ -79,8 +79,11 @@
 
 ### 2.2 `_shared/cors.ts` — CORS + JSON 응답 헬퍼
 
-- `corsHeaders`: `Access-Control-Allow-Origin: $ALLOW_ORIGIN`(미설정 시 `*`), 허용 헤더 `authorization, x-client-info, apikey, content-type, x-client-refresh`, 허용 메서드 `POST, OPTIONS`.
-- `json(body, status=200)`: CORS 헤더 + `Content-Type: application/json` Response 생성.
+**2026-09-21 허용 목록 에코 방식으로 전환** — 종전에는 정적 `Access-Control-Allow-Origin: $ALLOW_ORIGIN`(미설정 시 `*`)이었고 **운영도 미설정 = `*`** 이었다. `*` 는 임의 사이트가 방문자 브라우저로 무인증 엔드포인트를 두드려 IP 레이트리밋 버킷을 방문자 IP 로 분산시키는 것을 허용한다 — 이 시스템에서 CORS 는 인증 방어가 아니라(Bearer 헤더·무쿠키) 레이트리밋 보조선이다. 향후 쿠키(credentials) 전환 시에도 `*` 는 브라우저가 거부하므로 에코 방식이 선행 조건.
+
+- `ALLOW_ORIGIN`: 콤마 구분 오리진 목록. **운영 = `https://app.pawmate.kr`** (2026-09-21 설정). 요청 Origin 이 목록에 있으면 에코 + `Vary: Origin`, 목록 밖이면 ACAO 미포함. 미설정(테스트 서버)이면 종전처럼 `*`.
+- `withCors(handler, {enforceOrigin?})`: `Deno.serve` 래퍼 — OPTIONS 응답 + 모든 응답에 CORS 헤더 주입(주입 지점을 하나로 모아 부분 적용 방지. 종전의 signup·send-push·reset-password 로컬 복제 3벌도 이리로 통합). `enforceOrigin`: Origin 헤더가 있는데 목록 밖이면 **403** — preflight 없는 simple request(text/plain POST)의 발사까지 서버측에서 차단. 전화 OTP·가입·로그인 계열 7개(send-phone-code, verify-phone-code, signup, signup-lite, login, reset-password, refresh)에 적용. Origin 없는 요청(네이티브 앱·pg_net·curl)은 통과.
+- `json(body, status=200)`: `Content-Type: application/json` Response 생성 — CORS 헤더는 래퍼가 주입.
 
 ### 2.3 `_shared/solapi.ts` — Solapi(구 CoolSMS) SMS 클라이언트
 
@@ -231,7 +234,7 @@
   - 409 `username_taken` / `nickname_taken` / `phone_taken`
   - 500 `internal_error`
 - **내부 로직**: 입력 검증 → **argon2id 해싱(_shared/passwords, hash-wasm)** → `signup_user` RPC(SECURITY DEFINER) 호출 — 전화 인증 완료 확인, `users` INSERT(terms_agreed_at·마케팅 동의 기록). RPC가 raise한 커스텀 에러코드를 HTTP 코드로 매핑.
-- **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS/json 헬퍼를 파일 내 자체 정의(_shared 미사용).
+- **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). ~~CORS/json 헬퍼를 파일 내 자체 정의(_shared 미사용)~~ → 2026-09-21 `_shared/cors.ts` 로 통합.
 - **정책**: `verify-phone-code(purpose='signup')` 완료된 번호만 가입 가능.
 - **간이 회원 승격(0029)**: 같은 번호가 이미 있고 `status='lite'`면 `phone_taken` 대신 그 행을 **UPDATE로 승격**한다(username/password_hash/nickname/user_type 채우고 `status='active'`). 이게 없으면 간이로 후기를 쓴 사람이 **정식 가입을 아예 못 한다**(`users_phone_uq` 때문). 승격이므로 기존 후기·방문 회차가 그대로 이어진다. `lite`가 아닌 기존 계정은 종전대로 409 `phone_taken`.
 
@@ -410,7 +413,7 @@
   - 200 `{ ok: true, processed: n }` / `{ ok: true, sent: 0 }`(대상 없음) / `{ ok: true, skipped: "fcm_not_configured" }`(FCM 미설정 — pending 유지)
   - 401 `unauthorized`, 405, 500 `bad_service_account` / `dispatch_failed`, 502 `oauth_failed` (이때 이미 claim한 알림들은 `push_report`로 전부 `ok:false, error:"oauth_failed"` 실패 보고됨 — pending으로 남지 않음), 503 `not_configured`
 - **내부 로직**: ① `push_dispatch_batch(p_only_id, p_limit=100)` RPC로 pending 알림+대상 디바이스 토큰 클레임 ② `FCM_SERVICE_ACCOUNT`(Google 서비스계정 JSON)의 private_key로 RS256 JWT 서명 → Google OAuth2 토큰 교환(`firebase.messaging` scope, 함수 인스턴스 내 캐시) ③ 각 알림×토큰마다 **FCM HTTP v1** `projects/<id>/messages:send` 호출 — `notification`(제목/본문; 앱 종료 상태에서도 OS 표시) + `data`(type/notification_id/resource_type/resource_id — 탭 라우팅), android priority high / apns-priority 10 ④ `UNREGISTERED`/`INVALID_ARGUMENT`/404 응답 토큰은 dead 처리 ⑤ `push_report(p_results)` RPC로 sent/failed 반영 + 죽은 토큰 비활성화.
-- **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS 헤더에 `x-push-secret` 추가 허용(자체 정의).
+- **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). ~~CORS 헤더에 `x-push-secret` 추가 허용(자체 정의)~~ → 2026-09-21 `_shared/cors.ts` 통합으로 소거 — Allow-Headers 는 브라우저 preflight 에만 영향이 있고 호출 주체(pg_net 크론)는 브라우저가 아니다.
 - **정책**: 배치 100건 제한. OAuth 토큰 캐시(만료 60초 전 갱신). FCM 미설정 시 pending 유지 후 skip.
 
 ## 5. 시크릿/환경변수 목록

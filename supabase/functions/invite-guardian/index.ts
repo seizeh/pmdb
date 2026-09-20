@@ -14,7 +14,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { loadSolapiConfig, normalizePhone, sendSms } from "../_shared/solapi.ts";
 
@@ -28,8 +28,7 @@ const INVITES_PER_INVITER_PER_DAY = 20;
 const SMS_PER_INVITER_PER_DAY = 10;
 const SMS_PER_PHONE_PER_DAY = 1;
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const secret = Deno.env.get("JWT_SECRET");
@@ -140,4 +139,4 @@ Deno.serve(async (req: Request) => {
     console.error("invite sms error", e);
     return json({ ok: true });
   }
-});
+}));

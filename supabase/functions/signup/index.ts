@@ -10,22 +10,11 @@
 //   유니크 제약. (종전 주석은 false 라고 적고 있어 설정과 반대였다.)
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { hashPassword } from "../_shared/passwords.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 // 국내 휴대폰 번호 정규화: 숫자만 남기고 +82/82 → 0
 function normalizePhone(raw: string): string {
@@ -40,8 +29,7 @@ function normalizePhone(raw: string): string {
 // 펫 등록 시 트리거 승격).
 const USER_TYPES = new Set(["pet_owner", "no_pet", "business"]);
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   let p: {
@@ -118,4 +106,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ ok: true, user_id: data });
-});
+}, { enforceOrigin: true }));

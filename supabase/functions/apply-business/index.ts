@@ -12,7 +12,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { isValidBizNo, ntsStatus } from "../_shared/nts.ts";
 
@@ -41,8 +41,7 @@ const RPC_ERRORS: Record<string, number> = {
   missing_fields: 400,
 };
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!JWT_SECRET || !NTS_API_KEY) return json({ error: "server_misconfigured" }, 500);
 
@@ -127,4 +126,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ ok: true, ...data });
-});
+}));

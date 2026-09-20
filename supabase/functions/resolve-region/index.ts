@@ -8,7 +8,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 
 const JWT_SECRET = Deno.env.get("JWT_SECRET");
@@ -47,8 +47,7 @@ async function reverseGeocode(lng: number, lat: number) {
   }
 }
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!JWT_SECRET) return json({ error: "server_misconfigured" }, 500);
   if (!NAVER_KEY_ID || !NAVER_KEY) return json({ error: "server_misconfigured" }, 500);
@@ -76,4 +75,4 @@ Deno.serve(async (req: Request) => {
   }
   const geo = await reverseGeocode(lng, lat);
   return json(geo ?? { regionCode: null, regionName: null, address: null });
-});
+}));

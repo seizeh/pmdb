@@ -31,7 +31,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { clientIp, rateLimited } from "../_shared/auth.ts";
 import { normalizePhone } from "../_shared/solapi.ts";
 
@@ -44,8 +44,7 @@ const ATTEMPT_MAX_PHONE = 10;
 const ATTEMPT_MAX_IP = 30;
 const ATTEMPT_WINDOW_SEC = 600;
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   let payload: { phone?: string; code?: string; purpose?: string };
@@ -135,4 +134,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ verified: true });
-});
+}, { enforceOrigin: true }));

@@ -25,7 +25,7 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { clientIp, rateLimited, signAccess } from "../_shared/auth.ts";
 import { normalizePhone } from "../_shared/solapi.ts";
 
@@ -40,8 +40,7 @@ function maskPhone(phone: string): string {
   return `***-****-**${d.slice(-2)}`;
 }
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const secret = Deno.env.get("JWT_SECRET");
@@ -145,4 +144,4 @@ Deno.serve(async (req: Request) => {
     expires_in: LITE_TTL,
     user: { id: uid, display_name: maskPhone(phone) },
   });
-});
+}, { enforceOrigin: true }));
