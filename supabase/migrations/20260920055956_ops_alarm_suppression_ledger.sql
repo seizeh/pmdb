@@ -49,6 +49,7 @@ begin
   -- ON CONFLICT: notifications_group_uq(미읽음 부분 유니크)와의 충돌 — 같은 알람의
   -- 직전 알림이 아직 미읽음이면 행·푸시를 중복하지 않는다(관측은 원장 fire_count 가
   -- 담당). 종전 엣지 경로는 이 충돌이 조용한 insert 실패였다 — 의도로 승격.
+  -- 술어는 인덱스 술어를 그대로 함의해야 중재자 추론이 된다(is_read + group_key not null).
   insert into public.notifications
     (user_id, notification_type, is_system, priority, notification_group_key, title, body)
   select u.id, 'system_notice', true, 'high', 'ops_alarm:' || p_key, p_title, p_body
