@@ -95,7 +95,7 @@
 
 ### 2.4 `_shared/edge_alert.ts` — 엣지 실패 관리자 알림 (pmdart#157 베타 관측성)
 
-- **`alertAdmins(admin, key, title, body)`** — 활성 관리자(`user_type='admin'`) 전원에게 `notifications` INSERT(→ 기존 트리거로 인앱+FCM 푸시). 타입은 기존 `system_notice` 재사용(새 타입은 CHECK·클라 매핑 동시 수정 필요 — 실수 여지 회피). 같은 `key` 는 **30분 1회** 스로틀(`rate_limit_hit('edgealert:<key>')`) — 장애 폭주가 알림 폭주로 번지지 않게. 절대 throw 하지 않음(알림 실패는 본 흐름에 무영향). 사용처: `enroll-pet-identity`(`ai_unavailable`/`video_too_large`/`internal_error`), `verify-post-photo`(`ai_unavailable`/`internal_error`).
+- **`alertAdmins(admin, key, title, body)`** — **2026-09-21 원장 통합**: `public.edge_alert_fire(key, …)`(service_role 전용 definer 래퍼 → `app.ops_alarm_fire('edge:'+key, 30분, …)`) 한 줄로 위임한다. 쿨다운(30분 1회)·관리자 알림(`system_notice`, priority high, 그룹키 `ops_alarm:edge:<key>`)·**억제 기록(fire_count/last_seen_at)** 전부 원장이 담당 — 종전에는 스로틀(`rate_limit_hit`)과 notifications INSERT 를 여기서 직접 했고 ops_alarms 에는 발송 시에도 안 남았다(이중 구현 — 2026-08-08 스로틀 판정 반전 사고가 난 곳). 절대 throw 하지 않음(알림 실패는 본 흐름에 무영향). 사용처: `enroll-pet-identity`(`ai_unavailable`/`video_too_large`/`internal_error`), `verify-post-photo`(`ai_unavailable`/`internal_error`), `rateLimited()` fail-open(`rate_limiter_down`).
 
 ### 2.5 레이트리밋 버킷 전체 목록 (2026-08-05 실측)
 

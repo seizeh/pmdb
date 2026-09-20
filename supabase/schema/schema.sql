@@ -698,6 +698,15 @@ begin
      where a.alarm_key = p_key
        and a.fired_at > now() - make_interval(mins => p_cooldown_min)
   ) then
+    -- 억제도 발생이다 — 최신 행에 횟수·시각을 남긴다. 이게 없으면 30분 내
+    -- 1회 재발과 29분간 초당 재발이 구분되지 않는다(알림 억제 = 관측 손실).
+    -- clock_timestamp(): now() 는 트랜잭션 시각이라 같은 트랜잭션 안의 연속
+    -- 발화(pgTAP 포함)에서 fired_at 과 구분이 안 된다 — 실제 경과 시각을 쓴다.
+    update app.ops_alarms a
+       set fire_count = a.fire_count + 1, last_seen_at = clock_timestamp()
+     where a.id = (
+       select id from app.ops_alarms
+        where alarm_key = p_key order by fired_at desc limit 1);
     return 0;
   end if;
 
@@ -705,11 +714,18 @@ begin
   values (p_key, p_title, p_body, p_detail);
 
   -- 활성 관리자 전원에게. actor_user_id 가 없으므로 차단 필터(§8.9)에 걸리지 않는다.
+  -- priority·그룹키는 엣지 alertAdmins 가 갖고 있던 것을 통합하며 승계(2026-09-21).
+  -- ON CONFLICT: notifications_group_uq(미읽음 부분 유니크)와의 충돌 — 같은 알람의
+  -- 직전 알림이 아직 미읽음이면 행·푸시를 중복하지 않는다(관측은 원장 fire_count 가
+  -- 담당). 종전 엣지 경로는 이 충돌이 조용한 insert 실패였다 — 의도로 승격.
+  -- 술어는 인덱스 술어를 그대로 함의해야 중재자 추론이 된다(is_read + group_key not null).
   insert into public.notifications
-    (user_id, notification_type, is_system, title, body)
-  select u.id, 'system_notice', true, p_title, p_body
+    (user_id, notification_type, is_system, priority, notification_group_key, title, body)
+  select u.id, 'system_notice', true, 'high', 'ops_alarm:' || p_key, p_title, p_body
     from public.users u
-   where u.user_type = 'admin' and u.status = 'active';
+   where u.user_type = 'admin' and u.status = 'active'
+  on conflict (user_id, notification_group_key)
+    where (is_read = false and notification_group_key is not null) do nothing;
 
   return 1;
 end $$;
@@ -3486,7 +3502,7 @@ COMMENT ON FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed 
 -- Name: admin_ops_alarms(integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.admin_ops_alarms(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, alarm_key text, title text, body text, detail jsonb, fired_at timestamp with time zone)
+CREATE FUNCTION public.admin_ops_alarms(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, alarm_key text, title text, body text, detail jsonb, fired_at timestamp with time zone, last_seen_at timestamp with time zone, fire_count integer)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -3495,7 +3511,7 @@ begin
     raise exception 'forbidden' using errcode = '42501';
   end if;
   return query
-  select a.id, a.alarm_key, a.title, a.body, a.detail, a.fired_at
+  select a.id, a.alarm_key, a.title, a.body, a.detail, a.fired_at, a.last_seen_at, a.fire_count
     from app.ops_alarms a
    order by a.fired_at desc
    limit greatest(1, least(coalesce(p_limit, 50), 200))
@@ -5020,6 +5036,18 @@ CREATE FUNCTION public.dong_centroid_seeds() RETURNS TABLE(region_code character
      and not exists (select 1 from public.dong_centroids d where d.region_code = u.region_code)
    group by u.region_code
    limit 100;
+$$;
+
+
+--
+-- Name: edge_alert_fire(text, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb DEFAULT '{}'::jsonb) RETURNS integer
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select app.ops_alarm_fire('edge:' || p_key, 30, p_title, p_body, p_detail)
 $$;
 
 
@@ -7395,8 +7423,24 @@ CREATE TABLE app.ops_alarms (
     title text NOT NULL,
     body text NOT NULL,
     detail jsonb,
-    fired_at timestamp with time zone DEFAULT now() NOT NULL
+    fired_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    fire_count integer DEFAULT 1 NOT NULL
 );
+
+
+--
+-- Name: COLUMN ops_alarms.last_seen_at; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON COLUMN app.ops_alarms.last_seen_at IS '같은 key 의 마지막 발생 시각(억제 포함) — fired_at 은 알림이 나간 시각';
+
+
+--
+-- Name: COLUMN ops_alarms.fire_count; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON COLUMN app.ops_alarms.fire_count IS '이 쿨다운 창의 총 발생 횟수(발송 1 + 억제 n). suppressed = fire_count - 1';
 
 
 --
@@ -12809,6 +12853,15 @@ GRANT ALL ON FUNCTION public.delete_my_post(p_post uuid) TO service_role;
 
 REVOKE ALL ON FUNCTION public.dong_centroid_seeds() FROM PUBLIC;
 GRANT ALL ON FUNCTION public.dong_centroid_seeds() TO service_role;
+
+
+--
+-- Name: FUNCTION edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) TO authenticated;
+GRANT ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) TO service_role;
 
 
 --

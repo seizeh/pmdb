@@ -1,51 +1,40 @@
-// alertAdmins 스로틀 — rate_limit_hit 규약(true=허용/false=초과)을 올바로 읽는가.
-// 반전 회귀(첫 알림 삼킴 + 2회째부터 무제한) 방지.
+// alertAdmins — 원장 위임(2026-09-21 통합) 이후의 계약.
+//
+// 종전 테스트는 로컬 스로틀(rate_limit_hit 판정 방향)을 재는 것이었다 — 그 로직은
+// public.edge_alert_fire → app.ops_alarm_fire 로 이관되어 pgTAP(t21 §7)이 잰다.
+// 여기 남는 계약은 둘: ① 올바른 인자로 정확히 한 번 위임한다 ② 어떤 실패에도
+// throw 하지 않는다(알림 실패가 본 흐름을 깨면 안 된다).
 //
 // 실행: deno test supabase/functions/_shared/edge_alert_test.ts
 import { assertEquals } from "jsr:@std/assert@1";
 import { alertAdmins } from "./edge_alert.ts";
 
-// admin 클라이언트 페이크 — rpc 결과를 주입하고 notifications insert 를 기록한다.
 function fakeAdmin(rpcResult: { data?: unknown; error?: unknown }) {
-  const inserted: unknown[] = [];
+  const calls: { fn: string; args: unknown }[] = [];
   return {
-    inserted,
-    rpc: () => Promise.resolve(rpcResult),
-    from(table: string) {
-      if (table === "users") {
-        return {
-          select: () => ({
-            eq: () => ({
-              eq: () => Promise.resolve({ data: [{ id: "admin-1" }], error: null }),
-            }),
-          }),
-        };
-      }
-      // notifications
-      return {
-        insert(rows: unknown[]) {
-          inserted.push(...rows);
-          return Promise.resolve({ error: null });
-        },
-      };
+    calls,
+    rpc(fn: string, args: unknown) {
+      calls.push({ fn, args });
+      return Promise.resolve(rpcResult);
     },
   };
 }
 
-Deno.test("허용(true) — 창의 첫 호출은 발송된다", async () => {
-  const admin = fakeAdmin({ data: true, error: null });
+Deno.test("edge_alert_fire 에 키·제목·본문으로 정확히 한 번 위임한다", async () => {
+  const admin = fakeAdmin({ data: 1, error: null });
   await alertAdmins(admin, "k", "t", "b");
-  assertEquals(admin.inserted.length, 1);
+  assertEquals(admin.calls.length, 1);
+  assertEquals(admin.calls[0].fn, "edge_alert_fire");
+  assertEquals(admin.calls[0].args, { p_key: "k", p_title: "t", p_body: "b" });
 });
 
-Deno.test("초과(false) — 30분 내 재호출은 스킵된다", async () => {
-  const admin = fakeAdmin({ data: false, error: null });
-  await alertAdmins(admin, "k", "t", "b");
-  assertEquals(admin.inserted.length, 0);
-});
-
-Deno.test("리미터 오류 — fail-open 으로 발송된다", async () => {
+Deno.test("rpc 오류 응답에도 던지지 않는다", async () => {
   const admin = fakeAdmin({ data: null, error: { message: "boom" } });
-  await alertAdmins(admin, "k", "t", "b");
-  assertEquals(admin.inserted.length, 1);
+  await alertAdmins(admin, "k", "t", "b"); // throw 시 테스트 실패
+  assertEquals(admin.calls.length, 1);
+});
+
+Deno.test("rpc reject 에도 던지지 않는다", async () => {
+  const admin = { rpc: () => Promise.reject(new Error("net")) };
+  await alertAdmins(admin, "k", "t", "b"); // throw 시 테스트 실패
 });

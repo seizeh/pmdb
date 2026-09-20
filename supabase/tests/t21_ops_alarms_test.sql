@@ -6,7 +6,7 @@
 begin;
 set local search_path = public, app, extensions;
 \ir helpers/seed.sql
-select plan(12);
+select plan(17);
 
 -- 관리자 한 명 — 알람 수신자. 시드에는 admin 이 없다.
 with u as (
@@ -83,6 +83,22 @@ select app.ops_alarm_sweep();
 select is(
   (select count(*)::int from app.ops_alarms where alarm_key = 'purge_overdue'),
   1, '파기 지연은 1건이어도 울린다');
+
+-- ── 7. 억제도 기록된다 (2026-09-21 — 알림 억제가 관측 손실이 되지 않게) ────
+-- 쿨다운은 알림 폭주를 접지만, 접힌 발생까지 지우면 30분 내 1회 재발과
+-- 29분간 초당 재발이 구분되지 않는다. 억제분은 fire_count·last_seen_at 에 남는다.
+select is(app.ops_alarm_fire('t21s', 30, 't', 'b', '{}'::jsonb), 1,
+  '창의 첫 발화는 울린다');
+select is(app.ops_alarm_fire('t21s', 30, 't', 'b', '{}'::jsonb), 0,
+  '쿨다운 내 재발화는 억제된다(알림 없음)');
+select is(
+  (select fire_count from app.ops_alarms where alarm_key = 't21s'), 2,
+  '억제도 발생이다 — fire_count 에 남는다(suppressed = fire_count - 1)');
+select ok(
+  (select last_seen_at > fired_at from app.ops_alarms where alarm_key = 't21s'),
+  'last_seen_at 은 실제 경과 시각으로 전진한다(clock_timestamp — 같은 트랜잭션 안에서도)');
+select is(public.edge_alert_fire('t21e', 't', 'b'), 1,
+  '엣지 래퍼는 같은 원장에 edge: 접두로 쓴다 — 엣지발 알람도 이력이 남는다');
 
 select * from finish();
 rollback;
