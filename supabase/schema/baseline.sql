@@ -4872,6 +4872,30 @@ ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.location_usage_logs ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: ops_alarm_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarm_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ops_alarms; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarms ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: push_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.push_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: rate_limit_trips; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.rate_limit_trips ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: rate_limits; Type: ROW SECURITY; Schema: app; Owner: -
 --
 

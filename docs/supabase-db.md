@@ -999,11 +999,15 @@ AI 반려동물 사진 검증 기록. 실사/생성 이미지 판별 점수, 개
 
 ### public.spatial_ref_sys
 
-PostGIS 확장이 설치하는 좌표계(SRID) 참조 시스템 테이블. 애플리케이션 데이터가 아니므로 상세 생략 (PK: srid).
+PostGIS 확장이 설치하는 좌표계(SRID) 참조 시스템 테이블. 애플리케이션 데이터가 아니므로 상세 생략 (PK: srid). 이 DB 에서 쓰는 곳은 `facilities.geom`(SRID 4326) 의 거리 연산뿐이다.
+
+- **소유자 supabase_admin · RLS off · anon/authenticated 에 INSERT/UPDATE/DELETE/TRUNCATE 그랜트** — Supabase 기본권한 상속. 우리 롤로는 revoke 도 RLS 도 불가(20260630160000 의 revoke 는 no-op 였다). 2026-09-15 실측: anon 롤로 DELETE 가 권한 오류 없이 통과했다 → 4326 행이 지워지면 시설 검색이 깨지는 가용성 구멍.
+- **가드 트리거 `spatial_ref_sys_guard`**(`20260915100000`, BEFORE INSERT/UPDATE/DELETE/TRUNCATE, 문장 단위 → `app.spatial_ref_sys_guard()`): `current_user` 가 anon/authenticated 면 42501 로 거부. postgres·supabase_admin·service_role·SECURITY DEFINER 내부·복원(replica)은 통과. ⚠️ DROP/DISABLE TRIGGER 는 소유자만 가능해 우리 롤로는 못 뗀다 — 끄려면 함수 본문을 `return null` 로 교체. pg_dump 가 확장 테이블의 트리거를 안 담으므로 `schema.sql` 에는 함수만 있고 트리거는 `outofband.txt` 가 잡는다. 테스트 `t27`.
+- advisor `rls_disabled_in_public` 경고는 그대로 남는다(relrowsecurity 만 본다). 지우려면 PostGIS 를 `extensions` 로 옮겨야 하는데 geom 컬럼 드롭·재생성이 필요해 하지 않는다.
 
 ## 3.8 `app` 스키마 테이블
 
-인증 인프라·운영 전용 내부 테이블 19개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. RLS 없이 스키마 격리로 보호.
+인증 인프라·운영 전용 내부 테이블 19개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. 1차 방벽은 스키마 미노출 + 테이블 무그랜트(anon/authenticated 는 스키마 USAGE 만 — 정책·RPC 가 app.* **함수**를 부르기 위한 것). 여기에 더해 **2026-09-20 부터 19개 전 테이블 RLS on(정책 없음)** — 종전에는 민감 9개에만 감겨 있고 0028 계열 신생 10개는 빠져 있었다(부분 적용). 정책 없는 RLS 는 실수 그랜트·노출 스키마 설정 변경·신규 INVOKER 함수에 대한 보험이며, 정상 경로(definer=소유자·service_role=BYPASSRLS·pg_cron=postgres)에는 무영향. t28 이 전수 유지를 강제한다.
 
 ### app.refresh_tokens
 
@@ -1230,7 +1234,7 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 | created_at | timestamptz | NO | `now()` | |
 
 - **인덱스**: `vaccination_events_pet_idx`(pet_id, due_date), `vaccination_events_due_idx`(due_date) **부분**(`done_at is null and notified_at is null`)
-- **이 테이블만 RLS off** — 접근이 전부 SD RPC 경유라 정책을 두지 않았다
+- **RLS on, 정책 없음** — 접근이 전부 SD RPC 경유(2026-09-20 벨트 통일 전에는 off, "이 테이블만 off" 라던 종전 서술도 실측과 달랐다 — 당시 10개가 off)
 - pg_cron `vaccine-reminder-sweep`(매일 00:00 UTC)가 D-1 이내 미완료분을 보호자에게 1회 알림
 - ⚠️ 날짜 판정은 **KST 기준**(`now() at time zone 'Asia/Seoul'`). 테스트가 `current_date`(UTC)로 준비해 **매일 아침 9시간만 실패**하던 사고가 있었다(0032 §6.6)
 
