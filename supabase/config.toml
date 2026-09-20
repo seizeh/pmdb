@@ -41,6 +41,7 @@ verify_jwt = false
 [functions.search-petcafe]
 verify_jwt = false
 
+# 시크릿 헤더(x-sync-secret)로 보호한다 — pg_cron 배치 전용(2026-09-20, 종전 로그인 JWT).
 [functions.sync-dong-centroids]
 verify_jwt = false
 
