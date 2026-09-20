@@ -2064,9 +2064,19 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 컬럼 단위 GRANT 가 정하고, `users`·`posts`·`pets` 세 테이블이 그걸 쓴다. 아래는
 2026-08-04 `information_schema.column_privileges` 실측이다.
 
+> **TRUNCATE/TRIGGER/REFERENCES 전면 회수 (2026-09-20, `20260920..._revoke_ddlish_table_privs`)**
+> Supabase 기본권한이 새 테이블마다 anon/authenticated 에 ALL 을 부여해, PostgREST 가
+> 결코 쓰지 않는 세 권한이 잔재로 쌓여 있었다(authenticated 33개·anon 6개 — business
+> 계열 2개는 7종 풀셋). 전부 회수했고 default privileges 에서 기본 부여 자체를 껐다.
+> TRUNCATE 는 **RLS 의 적용을 받지 않아** SQL 경로가 생기는 순간 정책과 무관하게 전체
+> 소거가 되는 권한이고, TRIGGER 는 PUBLIC EXECUTE 기본 부여된 기존 함수를 남의
+> 테이블에 붙일 수 있게 한다. 예외: supabase_admin 소유 PostGIS 3종은 우리 롤로 회수
+> 불가(§ spatial_ref_sys 참조). 재발 가드는 주간 점검 ⑫(운영 실측 — pgTAP 스냅샷은
+> 이미지 기본권한이 회수를 되살려 못 잰다, 0032 §6.4).
+
 ### 10.1. users — 컬럼 단위 SELECT/UPDATE (핵심 프라이버시 장치)
 
-`users` 는 **테이블 수준 SELECT/UPDATE/INSERT 권한이 회수**되어 있고(authenticated 에는 REFERENCES/TRIGGER/TRUNCATE 만 잔존), 필요한 컬럼에만 컬럼 단위 GRANT 가 있다.
+`users` 는 **테이블 수준 SELECT/UPDATE/INSERT 권한이 회수**되어 있고(2026-09-20 부터는 REFERENCES/TRIGGER/TRUNCATE 잔존분도 회수 — 테이블 수준 권한 0), 필요한 컬럼에만 컬럼 단위 GRANT 가 있다.
 
 | 권한 | anon | authenticated |
 |---|---|---|
