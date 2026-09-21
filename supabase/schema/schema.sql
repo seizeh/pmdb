@@ -3051,6 +3051,7 @@ begin
     and l.revoked_at is null and l.expires_at > now()
   order by l.created_at desc limit 1;
   if v_token is not null then
+    -- 재사용 반환 — 상태 변경 없음, 감사 기록 없음
     return query select v_token, v_exp;
     return;
   end if;
@@ -3059,6 +3060,11 @@ begin
   v_exp   := now() + make_interval(days => p_days);
   insert into app.share_links (token, kind, ref_id, created_by, expires_at)
   values (v_token, 'facility_preview', p_facility, app.uid(), v_exp);
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'share_link_create', 'facility', p_facility,
+          jsonb_build_object('kind', 'facility_preview',
+                             'token_prefix', left(v_token, 8),
+                             'expires_at', v_exp));
   return query select v_token, v_exp;
 end;
 $$;
@@ -3101,6 +3107,7 @@ begin
     and l.revoked_at is null and l.expires_at > now()
   order by l.created_at desc limit 1;
   if v_token is not null then
+    -- 재사용 반환 — 상태 변경 없음, 감사 기록 없음
     return query select v_token, v_exp;
     return;
   end if;
@@ -3109,6 +3116,11 @@ begin
   v_exp   := now() + make_interval(days => p_days);
   insert into app.share_links (token, kind, ref_id, created_by, expires_at)
   values (v_token, 'starter', p_business, app.uid(), v_exp);
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'share_link_create', 'user', p_business,
+          jsonb_build_object('kind', 'starter',
+                             'token_prefix', left(v_token, 8),
+                             'expires_at', v_exp));
   return query select v_token, v_exp;
 end;
 $$;
@@ -3218,6 +3230,11 @@ begin
   insert into public.chat_room_members(room_id, user_id)
   values (p_room, app.uid())
   on conflict (room_id, user_id) do nothing;
+  if found then
+    -- 실제로 새로 참여한 경우에만 — 중복 재진입은 상태 변경이 없다
+    insert into public.admin_logs (admin_id, action_type, target_type, target_id)
+    values (app.uid(), 'inquiry_join', 'chat_room', p_room);
+  end if;
 end;
 $$;
 
@@ -3488,6 +3505,9 @@ begin
   if not found then
     raise exception 'facility_not_found' using errcode = 'P0001';
   end if;
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'facility_mark_closed', 'facility', p_facility,
+          jsonb_build_object('closed', p_closed));
 end $$;
 
 
@@ -3710,13 +3730,26 @@ CREATE FUNCTION public.admin_revoke_share_link(p_token character varying) RETURN
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
+declare
+  v_kind   varchar(30);
+  v_ref_id uuid;
 begin
   if not app.is_admin() then
     raise exception 'forbidden' using errcode = '42501';
   end if;
-  update app.share_links set revoked_at = now()
-  where token = p_token and revoked_at is null;
-  return found;
+  update app.share_links
+     set revoked_at = now(),
+         revoked_by = app.uid()
+   where token = p_token and revoked_at is null
+  returning kind, ref_id into v_kind, v_ref_id;
+  if not found then
+    return false;
+  end if;
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'share_link_revoke',
+          case when v_kind = 'starter' then 'user' else 'facility' end, v_ref_id,
+          jsonb_build_object('kind', v_kind, 'token_prefix', left(p_token, 8)));
+  return true;
 end;
 $$;
 
@@ -7538,6 +7571,7 @@ CREATE TABLE app.share_links (
     view_count integer DEFAULT 0 NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_by uuid,
     CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying, 'starter'::character varying, 'post'::character varying])::text[])))
 );
 
@@ -7547,6 +7581,13 @@ CREATE TABLE app.share_links (
 --
 
 COMMENT ON TABLE app.share_links IS '설치 전 가치 전달용 공유 링크(0028 §3). share-view Edge Function 이 서빙.';
+
+
+--
+-- Name: COLUMN share_links.revoked_by; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON COLUMN app.share_links.revoked_by IS '회수한 관리자(app.uid()) — 2026-09-21 신설. 그 이전 회수 행은 NULL(행위자 미상)';
 
 
 --

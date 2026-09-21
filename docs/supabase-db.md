@@ -1084,6 +1084,7 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 | expires_at | timestamptz | NO | | 만료 — facility_preview 기본 365일 |
 | view_count | integer | NO | `0` | 열람 수(share_view_load 가 원자 증가) |
 | revoked_at | timestamptz | YES | | 회수 시각(admin_revoke_share_link) |
+| revoked_by | uuid | YES | | 회수한 관리자(app.uid()) — 2026-09-21 신설, 그 이전 회수 행은 NULL |
 | created_at | timestamptz | NO | `now()` | |
 
 - 인덱스: `share_links_ref_idx` (kind, ref_id) — 대상→링크 역조회.
@@ -1764,7 +1765,7 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - `admin_join_inquiry(p_room)` — admin_inquiry 방인지 검증(P0001 `not_inquiry_room`) 후 관리자를 멤버로 추가.
 - `admin_list_logs(p_limit=100, p_offset=0)` — 감사 로그 조회(최대 200).
 - `admin_create_facility_share_link(p_facility, p_days=365) → TABLE(token, expires_at)` — 매장 QR 미리보기 공유 링크 발급(0028 §3). 같은 시설의 유효 링크가 있으면 **그 토큰을 재사용**(재호출로 기존 인쇄 QR 이 무효화되지 않게). 시설 미존재 시 `facility not found`.
-- `admin_revoke_share_link(p_token) → boolean` — 링크 회수(오배포·유출 대응). 회수분은 share-view 가 404 로 응답.
+- `admin_revoke_share_link(p_token) → boolean` — 링크 회수(오배포·유출 대응). 회수분은 share-view 가 404 로 응답. **2026-09-21 부터 `admin_logs`(`share_link_revoke`, token_prefix 8자) + 행의 `revoked_by` 에 행위자 기록** — QR 발급 3종·폐업 판정·문의 개입까지 감사 미기록 admin RPC 5종이 같은 마이그레이션(`20260921072724`)에서 전부 원장에 합류(t29 가드). 방침: 상태 변경 시에만 기록, 토큰 원문은 원장에 싣지 않는다.
 - `admin_create_starter_share_link(p_business, p_days=365)` — 스타터 키트 QR 발급(0028 §1.3). **승인 업체 + `sales`/`production` 허가 승인** 둘 다 있어야 한다(`starter_license_required`). 유효 링크 재사용.
 - `admin_broadcast_system_notice(p_title, p_body)` — 전체 공지를 `system_notice` 알림으로 일괄 INSERT. **정지·휴면 회원도 받는다**(약관 개정 고지는 이용 중지와 무관하게 도달해야 한다) — 제외 대상은 `deleted` 뿐. 제목 80자·본문 1000자 상한.
 - `admin_ops_metrics() → json` — 운영 원가·활동 지표. SMS 9원/AI 20원 단가를 넣어 사진 검증·전화 인증 건수로 비용을 추정하고, 리프레시 토큰·메시지·댓글·글·하트를 합쳐 활성 사용자를 KST 기준 일자로 집계한다.
