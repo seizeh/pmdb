@@ -4353,6 +4353,106 @@ $_$;
 
 
 --
+-- Name: attest_challenge_put(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_challenge_put(p_user uuid, p_challenge_b64 text) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  insert into app.attest_challenges (user_id, challenge_b64)
+  values (p_user, p_challenge_b64)
+  on conflict (user_id) do update
+    set challenge_b64 = excluded.challenge_b64, created_at = now();
+$$;
+
+
+--
+-- Name: attest_challenge_take(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_challenge_take(p_user uuid, p_max_age_sec integer DEFAULT 300) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_challenge text; v_at timestamptz;
+begin
+  delete from app.attest_challenges
+   where user_id = p_user
+  returning challenge_b64, created_at into v_challenge, v_at;
+  if v_challenge is null or v_at < now() - make_interval(secs => p_max_age_sec) then
+    return null;
+  end if;
+  return v_challenge;
+end;
+$$;
+
+
+--
+-- Name: attest_check_log(uuid, text, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text DEFAULT NULL::text) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  insert into app.attest_checks (user_id, fn, platform, verdict, reason)
+  values (p_user, p_fn, p_platform, p_verdict, left(p_reason, 200));
+$$;
+
+
+--
+-- Name: attest_key_bump(uuid, text, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_key_bump(p_user uuid, p_key_id text, p_count bigint) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  update app.device_attest_keys
+     set sign_count = greatest(sign_count, p_count), last_used_at = now()
+   where user_id = p_user and key_id = p_key_id;
+$$;
+
+
+--
+-- Name: attest_key_get(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_key_get(p_user uuid, p_key_id text) RETURNS TABLE(spki_b64 text, sign_count bigint)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select k.spki_b64, k.sign_count
+    from app.device_attest_keys k
+   where k.user_id = p_user and k.key_id = p_key_id;
+$$;
+
+
+--
+-- Name: attest_key_register(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  insert into app.device_attest_keys (user_id, key_id, spki_b64)
+  values (p_user, p_key_id, p_spki_b64)
+  on conflict (user_id, key_id) do nothing;
+  delete from app.device_attest_keys k
+   where k.user_id = p_user
+     and k.key_id in (
+       select key_id from app.device_attest_keys
+        where user_id = p_user
+        order by coalesce(last_used_at, created_at) desc
+        offset 20);
+end;
+$$;
+
+
+--
 -- Name: block_user(uuid, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -7164,6 +7264,60 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- Name: attest_challenges; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.attest_challenges (
+    user_id uuid NOT NULL,
+    challenge_b64 text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE attest_challenges; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.attest_challenges IS 'iOS App Attest 등록(attestKey)용 1회성 챌린지 — attest-register 가 발급·소진. TTL 5분.';
+
+
+--
+-- Name: attest_checks; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.attest_checks (
+    id bigint NOT NULL,
+    user_id uuid,
+    fn text NOT NULL,
+    platform text NOT NULL,
+    verdict text NOT NULL,
+    reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE attest_checks; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.attest_checks IS '기기 증명 섀도 측정 원장 — 강제 전환 판단용. 분모=전 요청, 분자=verdict=fail. 헤더 미첨부(absent)는 구클라이언트 비율, skip 은 시크릿 미설정 등 판정 불가. 180일 파기(cron).';
+
+
+--
+-- Name: attest_checks_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.attest_checks ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.attest_checks_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: auth_logs; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -7345,6 +7499,27 @@ ALTER TABLE app.client_errors ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: device_attest_keys; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.device_attest_keys (
+    user_id uuid NOT NULL,
+    key_id text NOT NULL,
+    spki_b64 text NOT NULL,
+    sign_count bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_used_at timestamp with time zone
+);
+
+
+--
+-- Name: TABLE device_attest_keys; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.device_attest_keys IS 'iOS App Attest 키 등록부 — attest-register 가 Apple 루트 CA 체인 검증 후 기록. assertion 검증은 이 공개키 + sign_count 단조 증가로 한다. Android(Play Integrity)는 무상태라 없음.';
 
 
 --
@@ -8914,6 +9089,22 @@ CREATE VIEW public.v_post_feed AS
 
 
 --
+-- Name: attest_challenges attest_challenges_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.attest_challenges
+    ADD CONSTRAINT attest_challenges_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: attest_checks attest_checks_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.attest_checks
+    ADD CONSTRAINT attest_checks_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: auth_logs auth_logs_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -8983,6 +9174,14 @@ ALTER TABLE ONLY app.care_threads
 
 ALTER TABLE ONLY app.client_errors
     ADD CONSTRAINT client_errors_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: device_attest_keys device_attest_keys_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.device_attest_keys
+    ADD CONSTRAINT device_attest_keys_pkey PRIMARY KEY (user_id, key_id);
 
 
 --
@@ -9495,6 +9694,13 @@ ALTER TABLE ONLY public.user_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: attest_checks_created_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX attest_checks_created_idx ON app.attest_checks USING btree (created_at);
 
 
 --
@@ -10821,6 +11027,14 @@ CREATE TRIGGER users_revoke_device_tokens AFTER UPDATE ON public.users FOR EACH 
 
 
 --
+-- Name: attest_challenges attest_challenges_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.attest_challenges
+    ADD CONSTRAINT attest_challenges_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: auth_logs auth_logs_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -10890,6 +11104,14 @@ ALTER TABLE ONLY app.care_threads
 
 ALTER TABLE ONLY app.client_errors
     ADD CONSTRAINT client_errors_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: device_attest_keys device_attest_keys_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.device_attest_keys
+    ADD CONSTRAINT device_attest_keys_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -11413,6 +11635,18 @@ ALTER TABLE ONLY public.user_blocks
 
 
 --
+-- Name: attest_challenges; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.attest_challenges ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: attest_checks; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.attest_checks ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: auth_logs; Type: ROW SECURITY; Schema: app; Owner: -
 --
 
@@ -11459,6 +11693,12 @@ ALTER TABLE app.care_threads ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: device_attest_keys; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.device_attest_keys ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: dong_sync_config; Type: ROW SECURITY; Schema: app; Owner: -
@@ -12749,6 +12989,54 @@ GRANT ALL ON FUNCTION public.apply_business_license(p_type text, p_license_no te
 
 REVOKE ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_category text, p_business_name text, p_storefront_name text, p_prev_name text, p_address_road text, p_address_jibun text, p_region_code text, p_phone text, p_rep_name text, p_email text, p_license_path text, p_extra_doc_path text, p_nts_status_code text) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_category text, p_business_name text, p_storefront_name text, p_prev_name text, p_address_road text, p_address_jibun text, p_region_code text, p_phone text, p_rep_name text, p_email text, p_license_path text, p_extra_doc_path text, p_nts_status_code text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_challenge_put(p_user uuid, p_challenge_b64 text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_challenge_put(p_user uuid, p_challenge_b64 text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_challenge_put(p_user uuid, p_challenge_b64 text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_challenge_take(p_user uuid, p_max_age_sec integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_challenge_take(p_user uuid, p_max_age_sec integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_challenge_take(p_user uuid, p_max_age_sec integer) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_key_bump(p_user uuid, p_key_id text, p_count bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_key_bump(p_user uuid, p_key_id text, p_count bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_key_bump(p_user uuid, p_key_id text, p_count bigint) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_key_get(p_user uuid, p_key_id text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_key_get(p_user uuid, p_key_id text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_key_get(p_user uuid, p_key_id text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text) TO service_role;
 
 
 --

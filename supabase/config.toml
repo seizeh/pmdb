@@ -52,6 +52,10 @@ verify_jwt = false
 [functions.resolve-region]
 verify_jwt = false
 
+# 기기 증명 등록(보안설계 v9.2 §7.5): 커스텀 JWT 수동 검증(activeUid) → false.
+[functions.attest-register]
+verify_jwt = false
+
 [functions.invite-guardian]
 verify_jwt = false
 

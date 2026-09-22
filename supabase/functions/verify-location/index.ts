@@ -15,6 +15,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { json, withCors } from "../_shared/cors.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
+import { attestShadowBg } from "../_shared/attest.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -95,12 +96,21 @@ Deno.serve(withCors(async (req: Request) => {
     return json({ error: "rate_limited" }, 429);
   }
 
+  // 본문을 원문 그대로 읽는다 — 기기 증명이 본문 해시에 바인딩되므로(§7.5) 파싱
+  // 전 바이트가 판정 입력이다.
+  let bodyText: string;
   let p: { lat?: number; lng?: number; accuracy?: number; isMocked?: boolean };
   try {
-    p = await req.json();
+    bodyText = await req.text();
+    p = JSON.parse(bodyText);
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
+
+  // 기기 증명 섀도(보안설계 v9.2 §7.5) — 판정·기록만 하고 거절하지 않는다.
+  // 좌표는 자기신고 값이라(0017 §10) 이 측정이 강제 전환의 근거가 된다.
+  attestShadowBg(admin, req, "verify-location", uid, bodyText);
+
   const lat = Number(p.lat);
   const lng = Number(p.lng);
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) {

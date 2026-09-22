@@ -17,6 +17,7 @@ import { json, withCors } from "../_shared/cors.ts";
 import { imageMime } from "../_shared/upload.ts";
 import { activeUid, rateLimited } from "../_shared/auth.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
+import { attestShadowBg } from "../_shared/attest.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -198,11 +199,19 @@ Deno.serve(withCors(async (req: Request) => {
     isMocked?: boolean;
     petId?: string;
   };
+  // 본문을 원문 그대로 읽는다 — 기기 증명이 본문 해시에 바인딩되므로(§7.5) 파싱
+  // 전 바이트가 판정 입력이다(이미지 base64 포함 — 사진 바꿔치기도 함께 잡힌다).
+  let bodyText: string;
   try {
-    p = await req.json();
+    bodyText = await req.text();
+    p = JSON.parse(bodyText);
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
+
+  // 기기 증명 섀도(보안설계 v9.2 §7.5) — 판정·기록만 하고 거절하지 않는다.
+  attestShadowBg(admin, req, "verify-post-photo", uid, bodyText);
+
   const imageBase64 = typeof p.imageBase64 === "string" ? p.imageBase64 : "";
   // 클라이언트가 보낸 값이다 — 그대로 contentType 으로 쓰면 공개 CDN 에 임의
   // content-type 을 심는 통로가 된다. 버킷이 최종적으로 막지만(20260804200000)
@@ -220,7 +229,8 @@ Deno.serve(withCors(async (req: Request) => {
   const accuracy = Math.round(Number(p.accuracy ?? 0)) || 0;
   // ※ isMocked/lat/lng/accuracy 는 클라이언트 자기신고 값 — 정상 앱의 모의위치 앱만
   //   걸러진다(직접 POST 로 위조 가능). 서버 권위 방어는 Gemini 판정뿐이며,
-  //   위조 좌표 차단(App Attest/Play Integrity, 이동속도 타당성)은 출시 전 과제.
+  //   기기 증명(App Attest/Play Integrity)은 위 attestShadowBg 로 **섀도 측정 중**
+  //   (거절 안 함 — 강제 전환은 _shared/attest.ts ATTEST_ENFORCE, §7.5).
   const isMocked = p.isMocked === true;
 
   const logFail = (
