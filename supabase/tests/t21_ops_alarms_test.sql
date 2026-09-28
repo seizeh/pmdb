@@ -6,7 +6,7 @@
 begin;
 set local search_path = public, app, extensions;
 \ir helpers/seed.sql
-select plan(17);
+select plan(18);
 
 -- 관리자 한 명 — 알람 수신자. 시드에는 admin 이 없다.
 with u as (
@@ -99,6 +99,9 @@ select ok(
   'last_seen_at 은 실제 경과 시각으로 전진한다(clock_timestamp — 같은 트랜잭션 안에서도)');
 select is(public.edge_alert_fire('t21e', 't', 'b'), 1,
   '엣지 래퍼는 같은 원장에 edge: 접두로 쓴다 — 엣지발 알람도 이력이 남는다');
+select ok(
+  not has_function_privilege('authenticated', 'public.edge_alert_fire(text,text,text,jsonb)', 'execute'),
+  '엣지 래퍼는 service_role 전용 — 생성 기본권한 잔재로 로그인 사용자가 관리자 알림을 쏠 수 있었다(20260928 회수)');
 
 select * from finish();
 rollback;

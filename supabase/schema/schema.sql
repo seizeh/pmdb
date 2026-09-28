@@ -13211,7 +13211,6 @@ GRANT ALL ON FUNCTION public.dong_centroid_seeds() TO service_role;
 --
 
 REVOKE ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) FROM PUBLIC;
-GRANT ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) TO authenticated;
 GRANT ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) TO service_role;
 
 
