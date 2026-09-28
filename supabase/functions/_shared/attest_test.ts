@@ -14,6 +14,7 @@ import {
   verifyAppAttestAssertion,
   verifyAppAttestAttestation,
   verifyChainToAppleRoot,
+  verifyEcdsaViaNode,
 } from "./attest.ts";
 import {
   FX_APP_ID,
@@ -145,6 +146,23 @@ Deno.test("x509: 파싱 + 테스트 루트 체인 검증", async () => {
   assert(await verifyChainToAppleRoot(leaf, inter, FX_ROOT_PEM), "chain to test root");
   // 진짜 Apple 루트(기본값)로는 실패해야 한다 — 루트 고정이 동작한다는 증거.
   assert(!(await verifyChainToAppleRoot(leaf, inter)), "must fail against real Apple root");
+});
+
+Deno.test("x509: node 폴백도 P-384 키 + SHA-256 리프 서명을 검증한다", async () => {
+  // Supabase Edge 런타임 WebCrypto 미구현 조합(P-384 키·SHA-256 해시) — certSignedBy 의
+  // NotSupportedError 폴백이 타는 경로를 직접 잰다(플레인 Deno 에선 폴백이 안 타므로).
+  const leaf = parseCertificate(b64ToBytes(FX_LEAF_DER_B64));
+  const inter = parseCertificate(b64ToBytes(FX_INTER_DER_B64));
+  assert(
+    await verifyEcdsaViaNode(inter.spki, "SHA-256", leaf.tbs, leaf.signature),
+    "node path verifies leaf signed by P-384 CA with SHA-256",
+  );
+  const tampered = leaf.tbs.slice();
+  tampered[0] ^= 1;
+  assert(
+    !(await verifyEcdsaViaNode(inter.spki, "SHA-256", tampered, leaf.signature)),
+    "node path rejects tampered tbs",
+  );
 });
 
 Deno.test("attestation: 정상 경로", async () => {
