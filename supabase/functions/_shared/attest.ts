@@ -309,10 +309,29 @@ export async function certSignedBy(cert: ParsedCert, issuer: ParsedCert): Promis
   const hash = SIG_HASHES[cert.sigAlgOid];
   const curve = issuer.curveOid ? CURVES[issuer.curveOid] : undefined;
   if (!hash || !curve) return false;
-  const key = await importSpki(issuer.spki, issuer.curveOid);
-  const raw = derSigToRaw(cert.signature, curve.size);
-  return await crypto.subtle.verify(
-    { name: "ECDSA", hash }, key, raw as BufferSource, cert.tbs as BufferSource);
+  try {
+    const key = await importSpki(issuer.spki, issuer.curveOid);
+    const raw = derSigToRaw(cert.signature, curve.size);
+    return await crypto.subtle.verify(
+      { name: "ECDSA", hash }, key, raw as BufferSource, cert.tbs as BufferSource);
+  } catch (e) {
+    // Supabase Edge 런타임 WebCrypto 는 P-384 키 + SHA-256 검증을 NotSupportedError 로
+    // 던진다(2026-09-28 런타임 실측). Apple 리프가 정확히 이 조합이라(P-384 중간 CA 가
+    // ecdsa-with-SHA256 서명) node:crypto 로 폴백한다. CI 의 플레인 Deno 는 이 조합을
+    // 지원해 여기를 안 타므로, 폴백 경로는 테스트가 verifyEcdsaViaNode 직접 호출로 잰다.
+    if (!(e instanceof Error && e.name === "NotSupportedError")) throw e;
+    return await verifyEcdsaViaNode(issuer.spki, hash, cert.tbs, cert.signature);
+  }
+}
+
+/// WebCrypto 미구현 조합용 node:crypto ECDSA 검증 — 인증서 서명은 DER 그대로 받는다.
+export async function verifyEcdsaViaNode(
+  spki: Uint8Array, hash: string, tbs: Uint8Array, derSig: Uint8Array,
+): Promise<boolean> {
+  const { createPublicKey, verify } = await import("node:crypto");
+  const { Buffer } = await import("node:buffer");
+  const key = createPublicKey({ key: Buffer.from(spki), format: "der", type: "spki" });
+  return verify(hash.replace("SHA-", "sha"), Buffer.from(tbs), key, Buffer.from(derSig));
 }
 
 // leaf ← intermediate ← root(고정) 체인 + 유효기간. root 는 SPKI 동일성으로 고정.
