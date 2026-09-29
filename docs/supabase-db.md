@@ -1304,7 +1304,7 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 
 - 이력을 따로 남기는 이유: 알람은 푸시로 나가는데 **푸시 파이프라인이 죽으면 그 알람도 못 온다.** 이력·앱 내 알림·푸시 세 군데에 남겨 한 경로가 죽어도 되짚을 수 있게 한다. 조회는 `admin_ops_alarms`(§7.9).
 - **억제도 기록된다(2026-09-21)**: 쿨다운은 알림 폭주만 접고, 접힌 발생은 `fire_count`·`last_seen_at` 에 남는다 — 30분 내 1회 재발과 폭주가 구분되게(알림 억제 ≠ 관측 손실). 주간 점검 ⑬이 fire_count>1 을 노출한다. 회귀 가드는 t21 §7.
-- 엣지 진입구는 `public.edge_alert_fire`(definer 래퍼, `edge:` 접두) — **service_role 전용**이다. 생성 기본권한 잔재로 authenticated 실행이 열려 있던 것을 회수(`20260928031112`): 본문에 호출자 검사가 없어 로그인 사용자가 임의 문구의 high 알림을 전체 관리자에게 보낼 수 있었고, 알람 키가 호출자 입력이라 쿨다운으로는 못 막는다. 권한 단언도 t21 §7.
+- 엣지 진입구는 `public.edge_alert_fire`(definer 래퍼, `edge:` 접두) — **service_role 전용**이다. 생성 기본권한 잔재로 authenticated 실행이 열려 있던 것을 회수(`20260928031112`): 본문에 호출자 검사가 없어 로그인 사용자가 임의 문구의 high 알림을 전체 관리자에게 보낼 수 있었고, 알람 키가 호출자 입력이라 쿨다운으로는 못 막는다. 가드는 **주간 점검 ⑭**(운영 함수 EXECUTE 실측 ↔ 스냅샷 ACL 양방향 대조) — pgTAP 스냅샷 복원 DB 는 이미지 기본권한이 authenticated 를 재부여해 회수 단언이 거짓 실패한다(⑫의 T/T/R 과 같은 구조). 운영 함수 기본권한(`pg_default_acl`)에 authenticated 가 남아 있으므로 **새 service 전용 함수는 생성 마이그레이션에서 즉시 revoke** 해야 한다.
 - 보존 30일(`retention-purge`). `client_errors` 와 같은 기간으로 맞췄다 — 같이 보게 되는 자료라 기간이 다르면 "왜 이때는 알람이 없지" 가 보존 차이인지 실제인지 구분이 안 된다.
 
 ### app.rate_limit_trips

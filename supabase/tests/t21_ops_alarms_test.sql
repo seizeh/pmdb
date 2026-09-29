@@ -6,7 +6,7 @@
 begin;
 set local search_path = public, app, extensions;
 \ir helpers/seed.sql
-select plan(18);
+select plan(17);
 
 -- 관리자 한 명 — 알람 수신자. 시드에는 admin 이 없다.
 with u as (
@@ -99,9 +99,10 @@ select ok(
   'last_seen_at 은 실제 경과 시각으로 전진한다(clock_timestamp — 같은 트랜잭션 안에서도)');
 select is(public.edge_alert_fire('t21e', 't', 'b'), 1,
   '엣지 래퍼는 같은 원장에 edge: 접두로 쓴다 — 엣지발 알람도 이력이 남는다');
-select ok(
-  not has_function_privilege('authenticated', 'public.edge_alert_fire(text,text,text,jsonb)', 'execute'),
-  '엣지 래퍼는 service_role 전용 — 생성 기본권한 잔재로 로그인 사용자가 관리자 알림을 쏠 수 있었다(20260928 회수)');
+-- 권한(service_role 전용, 20260928 회수)은 여기서 단언하지 않는다: CI 복원 DB 는
+-- 이미지 기본권한이 CREATE 시점에 authenticated EXECUTE 를 재부여해 거짓 실패한다
+-- (덤프 ACL 은 내장 기본값 대비 차이만 적는다 — T/T/R 과 같은 구조, 0032 §6.4).
+-- 가드는 주간 점검 ⑭(운영 실측 ↔ 스냅샷 ACL 대조).
 
 select * from finish();
 rollback;
