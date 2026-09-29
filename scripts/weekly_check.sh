@@ -207,9 +207,9 @@ hr
 # 스냅샷(schema.sql ACL 절)과 양방향 대조한다. pgTAP 으로 못 하는 이유(#210):
 # CI 복원 DB 는 이미지 기본권한이 CREATE 시점에 authenticated EXECUTE 를 재부여하고,
 # 덤프 ACL 은 내장 기본값 대비 차이만 적어 이를 걷어내지 못한다 — 회수 단언이
-# 운영에서만 참이 된다(⑫의 T/T/R 과 같은 구조). 운영 기본권한에 authenticated 가
-# 남아 있는 한(2026-09-28 실측) 새 함수는 생성 즉시 실행권을 받으므로, service 전용
-# 함수의 revoke 누락(edge_alert_fire 사례)은 이 실측 대조만이 잡는다.
+# 운영에서만 참이 된다(⑫의 T/T/R 과 같은 구조). 기본권한은 20260929 두 건으로
+# deny-by-default 로 바뀌어(신설 함수 기본 {postgres,service_role} 뿐) 재발 구조는
+# 닫혔고, 이 항목은 수동 grant 드리프트와 스냅샷-운영 불일치를 계속 감시한다.
 for role in anon authenticated; do
   # 인자 타입의 'public.' 접두는 양쪽에서 벗긴다 — 덤프는 'public.facility_category[]',
   # 실측(identity arguments)은 search_path 에 따라 무접두라 표기만으로 어긋난다.
