@@ -26,6 +26,7 @@
 #   ⑪ 수동 확인 리마인더(Solapi 잔액 등 API 로 못 보는 것)
 #   ⑫ 권한 드리프트 — anon/authenticated 의 TRUNCATE/TRIGGER/REFERENCES 잔여
 #   ⑬ 알람 억제 재발 — 쿨다운에 접힌 fire_count>1 알람(지속 장애 후보)
+#   ⑭ 함수 권한 드리프트 — public 함수 EXECUTE 실측 ↔ 스냅샷 ACL 양방향 대조
 # ============================================================================
 set -uo pipefail
 
@@ -200,6 +201,41 @@ if [ "${n:-0}" -gt 0 ]; then
 else
   echo "✅ ⑬ 알람: 쿨다운 내 재발 없음"
 fi
+
+hr
+# ⑭ 함수 권한 드리프트 — public 함수의 anon/authenticated EXECUTE 를 운영 실측으로
+# 스냅샷(schema.sql ACL 절)과 양방향 대조한다. pgTAP 으로 못 하는 이유(#210):
+# CI 복원 DB 는 이미지 기본권한이 CREATE 시점에 authenticated EXECUTE 를 재부여하고,
+# 덤프 ACL 은 내장 기본값 대비 차이만 적어 이를 걷어내지 못한다 — 회수 단언이
+# 운영에서만 참이 된다(⑫의 T/T/R 과 같은 구조). 운영 기본권한에 authenticated 가
+# 남아 있는 한(2026-09-28 실측) 새 함수는 생성 즉시 실행권을 받으므로, service 전용
+# 함수의 revoke 누락(edge_alert_fire 사례)은 이 실측 대조만이 잡는다.
+for role in anon authenticated; do
+  # 인자 타입의 'public.' 접두는 양쪽에서 벗긴다 — 덤프는 'public.facility_category[]',
+  # 실측(identity arguments)은 search_path 에 따라 무접두라 표기만으로 어긋난다.
+  exp=$(grep -E "^GRANT (ALL|EXECUTE) ON FUNCTION public\." supabase/schema/schema.sql \
+        | grep -F " TO ${role};" \
+        | sed -E "s/^GRANT (ALL|EXECUTE) ON FUNCTION public\.//; s/ TO ${role};\$//; s/public\.//g" | sort)
+  act=$(q "select p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+             from pg_proc p
+             join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname = 'public' and p.prokind in ('f','p','w')
+              and not exists (select 1 from pg_depend d
+                               where d.objid = p.oid and d.deptype = 'e')
+              and has_function_privilege('${role}', p.oid, 'execute')" \
+        | sed 's/public\.//g' | sort)
+  extra=$(comm -13 <(printf '%s\n' "$exp") <(printf '%s\n' "$act") | grep -v '^$')
+  missing=$(comm -23 <(printf '%s\n' "$exp") <(printf '%s\n' "$act") | grep -v '^$')
+  if [ -n "$extra" ]; then
+    warn "⚠ ⑭ 함수 권한 드리프트: ${role} 이 스냅샷에 없는 EXECUTE 보유(재부여/회수 누락 — revoke 필요):"
+    printf '%s\n' "$extra" | sed 's/^/   · /' | head -10
+  fi
+  if [ -n "$missing" ]; then
+    warn "⚠ ⑭ 함수 권한 드리프트: 스냅샷은 ${role} EXECUTE 를 기대하는데 운영에 없음(기능 파손 후보):"
+    printf '%s\n' "$missing" | sed 's/^/   · /' | head -10
+  fi
+  [ -z "$extra" ] && [ -z "$missing" ] && echo "✅ ⑭ 함수 권한(${role}): 스냅샷과 일치"
+done
 
 hr
 echo "수동 확인 리마인더:"

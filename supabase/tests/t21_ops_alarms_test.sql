@@ -99,6 +99,10 @@ select ok(
   'last_seen_at 은 실제 경과 시각으로 전진한다(clock_timestamp — 같은 트랜잭션 안에서도)');
 select is(public.edge_alert_fire('t21e', 't', 'b'), 1,
   '엣지 래퍼는 같은 원장에 edge: 접두로 쓴다 — 엣지발 알람도 이력이 남는다');
+-- 권한(service_role 전용, 20260928 회수)은 여기서 단언하지 않는다: CI 복원 DB 는
+-- 이미지 기본권한이 CREATE 시점에 authenticated EXECUTE 를 재부여해 거짓 실패한다
+-- (덤프 ACL 은 내장 기본값 대비 차이만 적는다 — T/T/R 과 같은 구조, 0032 §6.4).
+-- 가드는 주간 점검 ⑭(운영 실측 ↔ 스냅샷 ACL 대조).
 
 select * from finish();
 rollback;
