@@ -12,16 +12,21 @@
 # 아무것도 변경하지 않는다 — 드리프트 보정 등은 안내만 하고 실행은 사람이 한다.
 # WEEKLY_STRICT=1 이면 ⚠ 가 하나라도 있을 때 exit 1 (CI 실패 → 메일 알림).
 #
+# ⚠ 는 "사람이 뭔가 해야 한다" 일 때만 띄운다. 매주 뜨는 ⚠ 는 실패 메일을 소음으로
+# 만들어 진짜 ⚠ 를 묻는다 — 첫 예약 실행(2026-08-10)부터 10주 연속 실패가 그랬다
+# (⑤가 만료된 계정을 계속 "임박" 으로, ②가 오류 1건을 무조건 ⚠ 로 띄웠다).
+# 반대로 조회 자체가 실패하면 ✅ 가 아니라 ⚠ 다 — "확인 못 함" 은 "문제 없음" 이 아니다.
+#
 # 점검 항목:
 #   ① 미처리 신고(App Store 1.2 — 24시간 내 조치 의무)
-#   ② 클라이언트 오류 최근 7일 상위 유형
+#   ② 클라이언트 오류 최근 7일 상위 유형(네트워크성 일시 오류는 임계치 이상일 때만 ⚠)
 #   ③ 크론 실패 이력 · 푸시 적체
 #   ④ 업체 승인 대기열
-#   ⑤ 지역 재인증 만료 임박 계정(30일 주기)
+#   ⑤ 지역 재인증 만료 임박 계정(30일 주기 — 남은 0~7일만 ⚠, 이미 만료는 ℹ)
 #   ⑥ 알림 unread 카운터 드리프트(하드삭제 트리거 공백 보정 대상)
 #   ⑦ 주간 지표(가입·게시글·댓글)
 #   ⑧ DB·스토리지 용량
-#   ⑨ 백업 최신성(7일 초과 시 경고 — 로컬 전용, CI 는 리마인더만)
+#   ⑨ 백업 최신성(7일 초과 시 경고 — 로컬 전용. CI 밖 감시는 backup.sh 하트비트)
 #   ⑩ 테스트 프로젝트 일시정지 여부(무료 티어 1주 미사용 pause)
 #   ⑪ 수동 확인 리마인더(Solapi 잔액 등 API 로 못 보는 것)
 #   ⑫ 권한 드리프트 — anon/authenticated 의 TRUNCATE/TRIGGER/REFERENCES 잔여
@@ -57,13 +62,29 @@ else
   q1() { psql "$SUPABASE_DB_URL" -X -t -A -c "$1"; }
 fi
 
+# 건수 조회 → 전역 n. 숫자가 아니면(쿼리 오류·스키마 변경·응답 이상) ⚠ 로 세고 실패를
+# 돌려준다. 종전에는 빈 값이 [ "" -gt 0 ] 에서 거짓으로 떨어져 else 의 ✅ 가 출력됐다 —
+# 토큰이 만료되면 전 항목이 "문제 없음" 으로 보였다.
+count() {  # count <항목 라벨> <쿼리>
+  n=$(q1 "$2" 2>/dev/null) || n=""
+  case "$n" in
+    ''|*[!0-9]*) warn "⚠ $1: 조회 실패 — 확인하지 못했습니다(쿼리·스키마 변경 여부 확인)"; return 1 ;;
+  esac
+}
+
 hr() { echo "────────────────────────────────────────────────"; }
 echo "PawMate 주간 점검 — $(date '+%Y-%m-%d %H:%M')"
 hr
 
+# 연결 확인 — 여기서 막히면 아래는 전부 조회 실패다. 항목마다 되풀이하지 않고 한 번에 끝낸다.
+if [ "$(q1 "select 1" 2>/dev/null)" != "1" ]; then
+  echo "⚠ DB 조회 불가 — 점검을 수행하지 못했습니다(토큰 만료·API 장애·연결문자열 확인)"
+  exit 1
+fi
+
 # ① 미처리 신고 — 24시간 의무가 있으므로 최우선.
-n=$(q1 "select count(*) from public.reports where reviewed_at is null")
-if [ "$n" -gt 0 ]; then
+if ! count "① 신고" "select count(*) from public.reports where reviewed_at is null"; then :
+elif [ "$n" -gt 0 ]; then
   warn "⚠ ① 미처리 신고 ${n}건 — 관리자 화면에서 즉시 처리"
   q "select '   · '||target_type||' / '||array_to_string(categories,',')||' / '||to_char(created_at,'MM-DD HH24:MI') from public.reports where reviewed_at is null order by created_at limit 10"
 else
@@ -71,33 +92,48 @@ else
 fi
 
 # ② 클라이언트 오류 — 최근 7일 상위 유형.
-n=$(q1 "select count(*) from app.client_errors where created_at > now() - interval '7 days'")
-if [ "$n" -gt 0 ]; then
-  warn "⚠ ② 클라이언트 오류 최근 7일 ${n}건 — 상위 유형:"
-  q "select '   · '||count(*)||'회  ['||coalesce(platform,'?')||'] '||where_key||' — '||left(message, 60) from app.client_errors where created_at > now() - interval '7 days' group by platform, where_key, left(message, 60) order by count(*) desc limit 5"
-else
-  echo "✅ ② 클라이언트 오류: 최근 7일 없음"
+#    종전 기준(1건이라도 ⚠)은 사용자가 있는 한 매주 실패였다 — 방문자 한 명의 네트워크
+#    끊김이 권한 회귀와 같은 무게였다. 네트워크·로딩성 일시 오류(TRANSIENT_RE)는 합쳐서
+#    TRANSIENT_WARN 건 이상일 때만 ⚠(자산 누락·서버 장애처럼 진짜면 반복된다), 그 미만은
+#    ℹ 로 목록만 보인다. 그 밖의 오류는 종전대로 1건부터 ⚠ — 사용자가 적을 땐 실제 회귀도
+#    1건으로 온다(09-07 의 permission denied 가 그랬다).
+TRANSIENT_RE='timeout|timed ?out|gateway|service unavailable|socketexception|clientexception|connection (closed|reset|refused)|failed host lookup|bad file descriptor|unable to load asset|failed to load font'
+TRANSIENT_WARN="${WEEKLY_TRANSIENT_WARN:-5}"
+ERRS="from app.client_errors where created_at > now() - interval '7 days'"
+if count "② 클라이언트 오류" "select count(*) $ERRS" && total=$n \
+   && count "② 클라이언트 오류" "select count(*) $ERRS and message ~* '$TRANSIENT_RE'"; then
+  transient=$n
+  if [ "$total" -eq 0 ]; then
+    echo "✅ ② 클라이언트 오류: 최근 7일 없음"
+  else
+    if [ $((total - transient)) -gt 0 ] || [ "$transient" -ge "$TRANSIENT_WARN" ]; then
+      warn "⚠ ② 클라이언트 오류 최근 7일 ${total}건(네트워크성 일시 오류 ${transient}건 포함) — 상위 유형:"
+    else
+      echo "ℹ ② 클라이언트 오류 최근 7일 ${total}건 — 전부 네트워크성 일시 오류(${TRANSIENT_WARN}건 미만, 참고만):"
+    fi
+    q "select '   · '||count(*)||'회  ['||coalesce(platform,'?')||'] '||where_key||' — '||left(message, 60) $ERRS group by platform, where_key, left(message, 60) order by count(*) desc limit 5"
+  fi
 fi
 
 # ③ 크론 실패 + 푸시 적체 — push-sweep 이 매분 도는데 pending 이 10분 넘게
 #    남아 있으면 스위프가 죽었거나 send-push 가 실패 중이라는 뜻.
-fails=$(q1 "select count(*) from cron.job_run_details where status = 'failed' and start_time > now() - interval '7 days'")
-if [ "$fails" -gt 0 ]; then
-  warn "⚠ ③ 크론 실패 최근 7일 ${fails}건:"
+if ! count "③ 크론" "select count(*) from cron.job_run_details where status = 'failed' and start_time > now() - interval '7 days'"; then :
+elif [ "$n" -gt 0 ]; then
+  warn "⚠ ③ 크론 실패 최근 7일 ${n}건:"
   q "select '   · '||coalesce(j.jobname, d.command)||' × '||count(*)||'회, 최근 '||to_char(max(d.start_time),'MM-DD HH24:MI')||' — '||left(max(d.return_message), 60) from cron.job_run_details d left join cron.job j on j.jobid = d.jobid where d.status = 'failed' and d.start_time > now() - interval '7 days' group by 1 order by 1"
 else
   echo "✅ ③ 크론: 최근 7일 실패 없음"
 fi
-stuck=$(q1 "select count(*) from public.notifications where push_status = 'pending' and created_at < now() - interval '10 minutes'")
-if [ "$stuck" -gt 0 ]; then
-  warn "⚠ ③-1 푸시 적체 ${stuck}건(10분 초과 pending) — send-push 로그 확인"
+if ! count "③-1 푸시 적체" "select count(*) from public.notifications where push_status = 'pending' and created_at < now() - interval '10 minutes'"; then :
+elif [ "$n" -gt 0 ]; then
+  warn "⚠ ③-1 푸시 적체 ${n}건(10분 초과 pending) — send-push 로그 확인"
 else
   echo "✅ ③-1 푸시 적체 없음"
 fi
 
 # ④ 업체 승인 대기.
-n=$(q1 "select count(*) from public.business_profiles where status not in ('approved','rejected')")
-if [ "$n" -gt 0 ]; then
+if ! count "④ 업체 승인" "select count(*) from public.business_profiles where status not in ('approved','rejected')"; then :
+elif [ "$n" -gt 0 ]; then
   warn "⚠ ④ 업체 승인 대기 ${n}건:"
   q "select '   · '||business_name||' ('||status||') 신청 '||to_char(created_at,'MM-DD') from public.business_profiles where status not in ('approved','rejected') order by created_at limit 10"
 else
@@ -106,18 +142,27 @@ fi
 
 # ⑤ 지역 재인증 만료 임박(7일 이내) — 30일 주기(REVERIFY_DAYS 와 동기).
 #    심사·시연 계정이 만료되면 해외 심사자는 재인증이 불가능하다.
-rows=$(q "select '   · '||username||' — D-'||(30 - floor(extract(epoch from now() - last_verified_at) / 86400))::int from public.users where status = 'active' and is_location_verified and last_verified_at is not null and (30 - floor(extract(epoch from now() - last_verified_at) / 86400)) <= 7 order by last_verified_at")
-if [ -n "$rows" ]; then
+#    ⚠ 는 남은 0~7일만. 종전 조건(<= 7)은 이미 만료된 계정까지 잡아, 그 계정이 다시
+#    인증할 때까지 매주 "임박" 으로 떴다(표기도 D--49) — 잡이 상시 실패한 주원인.
+#    만료는 사용자가 다시 인증하면 풀리는 정상 수명주기라 ℹ 로 수만 센다.
+LEFT="(30 - floor(extract(epoch from now() - last_verified_at) / 86400))::int"
+VERIFIED="from public.users where status = 'active' and is_location_verified and last_verified_at is not null"
+if ! rows=$(q "select '   · '||username||' — D-'||$LEFT $VERIFIED and $LEFT between 0 and 7 order by last_verified_at" 2>/dev/null); then
+  warn "⚠ ⑤ 지역 재인증: 조회 실패 — 확인하지 못했습니다(쿼리·스키마 변경 여부 확인)"
+elif [ -n "$rows" ]; then
   warn "⚠ ⑤ 지역 재인증 만료 임박(7일 이내):"
   echo "$rows"
 else
   echo "✅ ⑤ 지역 재인증: 임박 계정 없음"
 fi
+if count "⑤ 재인증 만료" "select count(*) $VERIFIED and $LEFT < 0" && [ "$n" -gt 0 ]; then
+  echo "ℹ ⑤ 재인증 만료 계정 ${n}개 — 사용자가 다시 인증하면 해소(조치 불필요)"
+fi
 
 # ⑥ unread 알림 카운터 드리프트 — 하드삭제 경로에 DELETE 트리거가 없어 생길 수
 #    있다. 발견 시 app.reconcile_unread_counts() 로 보정(스크립트는 실행 안 함).
-n=$(q1 "select count(*) from public.users u where u.status = 'active' and u.unread_notification_count <> (select count(*) from public.notifications n where n.user_id = u.id and not n.is_read)")
-if [ "$n" -gt 0 ]; then
+if ! count "⑥ unread 카운터" "select count(*) from public.users u where u.status = 'active' and u.unread_notification_count <> (select count(*) from public.notifications n where n.user_id = u.id and not n.is_read)"; then :
+elif [ "$n" -gt 0 ]; then
   warn "⚠ ⑥ unread 카운터 드리프트 ${n}명 — psql 에서 select app.reconcile_unread_counts(); 실행"
 else
   echo "✅ ⑥ unread 카운터: 드리프트 없음"
@@ -131,10 +176,13 @@ echo "ℹ ⑧ DB $(q1 "select pg_size_pretty(pg_database_size(current_database()
 
 # ⑨ 백업 최신성 — 백업은 로컬 머신 산출물이라 CI 에선 확인 불가(리마인더만).
 if [ "${WEEKLY_API:-}" = "1" ]; then
-  echo "ℹ ⑨ 백업 최신성은 로컬 전용 — 로컬 ./scripts/weekly_check.sh 또는 backup.command 로 확인"
+  echo "ℹ ⑨ 백업 최신성은 CI 에서 볼 수 없음 — 실패·미실행 알림은 backup.sh 하트비트(BACKUP_HEARTBEAT_URL) 담당"
 else
   BDIR="${BACKUP_DIR:-backups}"
-  latest=$(ls -t "$BDIR" 2>/dev/null | head -1)
+  # 덤프 파일만 본다. 종전에는 폴더의 최신 파일을 봤는데, 그게 backup.log 였다 — 실패한
+  # 실행도 로그에 오류 한 줄을 쓰므로 백업이 5주째 실패 중에도 "0일 전" ✅ 가 나왔다.
+  latest=$(ls -t "$BDIR"/db_*.dump* 2>/dev/null | head -1)
+  latest="${latest##*/}"
   if [ -z "$latest" ]; then
     warn "⚠ ⑨ 백업 없음 — ./scripts/backup.sh 실행"
   else
@@ -171,11 +219,11 @@ esac
 # pgTAP 스냅샷은 이미지 기본권한이 회수를 되살려 이 단언을 못 잰다(0032 §6.4) —
 # 운영 실측인 이 점검이 정본 가드다. supabase_admin 소유 PostGIS 3종은 우리 롤로
 # 회수 불가라 제외(spatial_ref_sys 는 쓰기 가드 트리거로 별도 대응).
-n=$(q1 "select count(*) from information_schema.role_table_grants
+if ! count "⑫ 권한" "select count(*) from information_schema.role_table_grants
   where table_schema='public' and grantee in ('anon','authenticated')
     and privilege_type in ('TRUNCATE','TRIGGER','REFERENCES')
-    and table_name not in ('spatial_ref_sys','geometry_columns','geography_columns')")
-if [ "${n:-0}" -gt 0 ]; then
+    and table_name not in ('spatial_ref_sys','geometry_columns','geography_columns')"; then :
+elif [ "$n" -gt 0 ]; then
   warn "⚠ ⑫ 권한 드리프트: anon/authenticated 에 TRUNCATE/TRIGGER/REFERENCES ${n}건 재부여됨 — revoke 필요(20260920_revoke_ddlish_table_privs 참고):"
   q "select '   · '||grantee||' '||privilege_type||' on '||table_name
        from information_schema.role_table_grants
@@ -190,9 +238,9 @@ fi
 # ⑬ 알람 억제 재발 — 쿨다운(30분 등)이 접은 발생은 알림으로는 안 보인다.
 # fire_count>1 은 같은 창에서 여러 번 발생했다는 뜻 — 지속/폭주 장애 후보라
 # 주간 단위로는 반드시 눈에 띄어야 한다(20260920 ops_alarm_suppression_ledger).
-n=$(q1 "select count(*) from app.ops_alarms
-  where fired_at > now() - interval '7 days' and fire_count > 1")
-if [ "${n:-0}" -gt 0 ]; then
+if ! count "⑬ 알람" "select count(*) from app.ops_alarms
+  where fired_at > now() - interval '7 days' and fire_count > 1"; then :
+elif [ "$n" -gt 0 ]; then
   warn "⚠ ⑬ 쿨다운에 접힌 재발 알람 ${n}건 (최근 7일) — 지속 장애 후보:"
   q "select '   · '||alarm_key||' ×'||fire_count||' (마지막 '||to_char(last_seen_at,'MM-DD HH24:MI')||')'
        from app.ops_alarms
@@ -216,14 +264,19 @@ for role in anon authenticated; do
   exp=$(grep -E "^GRANT (ALL|EXECUTE) ON FUNCTION public\." supabase/schema/schema.sql \
         | grep -F " TO ${role};" \
         | sed -E "s/^GRANT (ALL|EXECUTE) ON FUNCTION public\.//; s/ TO ${role};\$//; s/public\.//g" | sort)
-  act=$(q "select p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+  # 조회가 실패하면 act 가 비어 스냅샷 전부가 "운영에 없음" 으로 뜬다 — 드리프트가 아니라
+  # 조회 실패라고 말한다(pipefail 이 q 의 실패를 대입문 상태로 올려 준다).
+  if ! act=$(q "select p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
              from pg_proc p
              join pg_namespace n on n.oid = p.pronamespace
             where n.nspname = 'public' and p.prokind in ('f','p','w')
               and not exists (select 1 from pg_depend d
                                where d.objid = p.oid and d.deptype = 'e')
-              and has_function_privilege('${role}', p.oid, 'execute')" \
-        | sed 's/public\.//g' | sort)
+              and has_function_privilege('${role}', p.oid, 'execute')" 2>/dev/null \
+        | sed 's/public\.//g' | sort); then
+    warn "⚠ ⑭ 함수 권한(${role}): 조회 실패 — 확인하지 못했습니다"
+    continue
+  fi
   extra=$(comm -13 <(printf '%s\n' "$exp") <(printf '%s\n' "$act") | grep -v '^$')
   missing=$(comm -23 <(printf '%s\n' "$exp") <(printf '%s\n' "$act") | grep -v '^$')
   if [ -n "$extra" ]; then
