@@ -1846,6 +1846,10 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
   같은 장애 영역 안에서는 자기 부재를 감지할 수 없으므로 방향을 뒤집은 것 — DB 다운·
   프로젝트 일시정지·pg_cron/pg_net 사망 전부가 "하트비트 유실"으로 드러난다. 남는 사각:
   엣지 함수만 죽는 경우(DB 생존)는 하트비트이 못 본다 — 외부 프로브 층은 선택 과제.
+- **백업도 같은 방식으로 밖에서 본다(2026-10-06)**: 백업(`scripts/backup.sh`, launchd 주 1회)은
+  운영자 기기에서만 돌아 이 스윕도 주간 점검 CI 도 결과를 볼 수 없다 — launchd 등록 후 5주
+  연속 실패(PATH 에 gpg 없음)를 아무도 몰랐다. `BACKUP_HEARTBEAT_URL`(backup.env, 별도 체크)을
+  주면 성공 시 핑·실패 시 `/fail` 핑을 보내, 실패는 즉시·미실행은 grace 뒤에 드러난다.
 - pgTAP: t21(12건).
 
 #### `rls_auto_enable() → event_trigger` [SD]

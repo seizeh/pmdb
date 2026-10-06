@@ -11,7 +11,8 @@
 #      anon/authenticated/service_role 권한을 자급자족한다.
 #  · 덤프 직후 무결성 검증(pg_restore --list): "생성됨"과 "복원 가능"은 다르므로.
 #  · (선택) Storage 버킷을 rclone(S3 호환)으로 로컬에 동기화.
-#  · 보존주기(기본 7일) 지난 백업 자동 폐기 — 06운영점검주기.md 백업 정책과 연동.
+#  · 보존주기(기본 28일) 지난 백업 자동 폐기 — 06운영점검주기.md 백업 정책과 연동.
+#  · (선택) 하트비트 — 성공·실패를 healthchecks.io 로 알려 "조용한 실패" 를 없앤다.
 #
 # 사용법: scripts/backup.env 에 SUPABASE_DB_URL(세션 풀러 5432)·BACKUP_PASSPHRASE 설정 후 실행.
 #         (backup.command 더블클릭 또는 ./scripts/backup.sh)
@@ -27,6 +28,12 @@
 # ============================================================================
 set -euo pipefail
 
+# launchd·cron 의 PATH 는 /usr/bin:/bin:/usr/sbin:/sbin 뿐이다 — Homebrew 의 gpg·rclone 과
+# keg-only libpq 를 여기서 직접 잡는다. 호출자(plist·backup.command)가 챙겨 주길 기대했다가
+# launchd 등록 후 5주 연속 "gpg 없음" 으로 죽었다(2026-09-07~10-05, 그동안 백업 0건).
+# libpq 를 앞에 두는 이유: 서버보다 낮은 버전의 pg_dump 는 덤프를 거부한다.
+export PATH="/opt/homebrew/opt/libpq/bin:/usr/local/opt/libpq/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 # --- 설정 ---------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_DIR="${BACKUP_DIR:-$SCRIPT_DIR/../backups}"
@@ -39,6 +46,18 @@ STAMP="$(date +%Y%m%d_%H%M%S)"   # 초까지 — 같은 분 재실행 시 덮어
 
 log() { printf '[backup %s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 die() { printf '[backup] 오류: %s\n' "$*" >&2; exit 1; }
+
+# --- 하트비트(선택) -----------------------------------------------------
+# 백업은 이 기기에서만 돌아 CI(주간 점검)가 결과를 볼 수 없다 — 실패해도, 아예 안 돌아도
+# 조용하다. BACKUP_HEARTBEAT_URL(healthchecks.io 체크의 ping URL)을 주면 성공 시 핑,
+# 실패 시 /fail 핑을 보낸다: "실패" 는 즉시, "미실행(기기 꺼짐·작업 해제)" 은 grace 뒤에
+# 밖에서 알린다. URL 은 capability 라 backup.env 에만 둔다(ops-heartbeat 의 ping URL 과 같은 취급).
+ping_hb() {  # ping_hb [/fail]
+  [ -n "${BACKUP_HEARTBEAT_URL:-}" ] || return 0
+  curl -fsS -m 10 --retry 3 -o /dev/null "${BACKUP_HEARTBEAT_URL}${1:-}" \
+    || log "⚠ 하트비트 전송 실패(${1:-성공 핑})"
+}
+trap 'rc=$?; [ "$rc" -eq 0 ] || ping_hb /fail' EXIT
 
 # --- 사전 점검 ----------------------------------------------------------
 [ -n "${SUPABASE_DB_URL:-}" ] || die "SUPABASE_DB_URL 미설정 (세션 풀러 5432 연결문자열 필요)"
@@ -97,16 +116,37 @@ if [ -n "${BACKUP_OFFSITE_DIR:-}" ]; then
   mkdir -p "$BACKUP_OFFSITE_DIR"
   cp "$DB_FINAL" "$BACKUP_OFFSITE_DIR/"
   log "오프사이트 사본 → $BACKUP_OFFSITE_DIR/$(basename "$DB_FINAL")"
-  # 사본 쪽도 같은 보존주기로 회전(파기 정책이 두 위치에 동일하게 적용되어야 한다)
-  find "$BACKUP_OFFSITE_DIR" -maxdepth 1 -name 'db_*.dump*' -type f -mtime "+$RETENTION_DAYS" -print -delete || true
 else
   log "⚠ 오프사이트 사본 건너뜀 (BACKUP_OFFSITE_DIR 미설정 — 백업이 이 기기 한 대에만 있음)"
 fi
 
 # --- 3) 보존주기 폐기 ---------------------------------------------------
+# 사본 쪽도 같은 보존주기로 회전한다(파기 정책이 두 위치에 동일하게 적용되어야 한다).
+# 단 사본 폴더의 "목록을 읽어" 지우지 않고, 로컬에서 폐기되는 파일과 같은 이름을 지운다:
+# launchd 로 돌 때 macOS(TCC)가 iCloud Drive 폴더의 목록 읽기를 막는다 — 경로를 아는
+# 파일의 생성·삭제는 허용된다(2026-10-06 launchd 실측: ls·find 는 Operation not permitted,
+# stat·cp·rm 은 성공). 종전의 사본 쪽 find … -delete || true 는 그 실패를 삼켜, 로컬은
+# 폐기되는데 사본은 보존주기를 넘겨 남았다.
 log "보존 ${RETENTION_DAYS}일 초과 백업 폐기"
-find "$BACKUP_DIR" -maxdepth 1 -name 'db_*.dump*' -type f -mtime "+$RETENTION_DAYS" -print -delete || true
+while IFS= read -r old; do
+  [ -n "$old" ] || continue
+  rm -f "$old"
+  log "  폐기: $(basename "$old")"
+  if [ -n "${BACKUP_OFFSITE_DIR:-}" ]; then
+    rm -f "$BACKUP_OFFSITE_DIR/$(basename "$old")" || die "오프사이트 사본 폐기 실패: $(basename "$old")"
+  fi
+done < <(find "$BACKUP_DIR" -maxdepth 1 -name 'db_*.dump*' -type f -mtime "+$RETENTION_DAYS" -print)
 find "$BACKUP_DIR" -maxdepth 1 -name 'storage_*'  -type d -mtime "+$RETENTION_DAYS" -exec rm -rf {} + 2>/dev/null || true
+# 목록 읽기가 허용되는 실행(터미널·backup.command)에서는 로컬 짝을 잃은 사본도 쓸어낸다.
+# launchd 에서는 막히므로 보조 수단일 뿐이다 — 주 경로는 위의 이름 기준 폐기.
+if [ -n "${BACKUP_OFFSITE_DIR:-}" ]; then
+  find "$BACKUP_OFFSITE_DIR" -maxdepth 1 -name 'db_*.dump*' -type f -mtime "+$RETENTION_DAYS" -print -delete 2>/dev/null || true
+fi
 
 log "백업 완료. 보관 위치: $BACKUP_DIR"
 log "※ 이 폴더는 비공개로 유지하고, 폐기 사실을 06운영점검주기.md 점검 이력란에 기록하세요."
+if [ -n "${BACKUP_HEARTBEAT_URL:-}" ]; then
+  ping_hb
+else
+  log "⚠ 하트비트 건너뜀 (BACKUP_HEARTBEAT_URL 미설정 — 백업이 실패하거나 안 돌아도 알림이 없음)"
+fi
