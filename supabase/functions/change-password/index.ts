@@ -18,12 +18,27 @@
 //   발급되는 lite 토큰(계정의 실제 tv 로 서명됨) + 현재 비밀번호로 아이디 없이
 //   전 세션 무효화 + 완전 세션 발급이 가능했다(2026-09-21 봉합, #154·#181 계열).
 //   **새 인증 함수는 이 파일을 선례로 삼지 말 것 — activeUid 를 쓴다.**
+//
+// ⚠️ **레이트리밋 — 계정당 10분 5회 + 1일 20회** (`pwchange` 계열).
+//   종전엔 "유효 access 가 필요하니 게이트로 충분" 이라며 상한이 없었다. 그런데
+//   이 함수가 막아야 할 상대가 바로 **토큰을 가진 사람**이다. 탈취한 access(8h)나
+//   refresh(롤링 30일)로 현재 비밀번호를 무제한 대입할 수 있었고, 맞히는 순간
+//   비밀번호를 바꿔 피해자의 전 세션을 회수하고 계정을 영구히 가져간다.
+//   login 은 아이디를 알아야 하고 계정 10/5분 상한도 있지만, 토큰에서는 uid 만
+//   나오므로(username 은 컬럼 권한으로 비공개) 이 함수는 아이디 없이 쓰는 **상한 없는
+//   비밀번호 오라클**이었다. 매 시도 argon2id(19MiB) 검증이 돌아 엣지 자원도 탄다.
+//   - 계수 위치: 값싼 입력 검사(missing_fields·weak_password) **뒤**, 해시 조회·검증
+//     **앞**. 새 비번 규칙을 못 맞춰 다시 입력하는 정상 사용자는 소모하지 않는다.
+//   - IP 버킷은 두지 않는다 — 키가 서명 검증된 uid 라 스푸핑할 수 없고, 공격자가
+//     IP 를 바꿔도 같은 계정 버킷에 쌓인다. IP 를 더해도 막는 경우가 늘지 않는다.
+//   - 리미터 오류는 다른 함수처럼 fail-open(+ `rate_limiter_down` 알림).
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { json, withCors } from "../_shared/cors.ts";
 import {
-  ACCESS_TTL_CAPABLE, bearer, clientUa, randomToken, sha256Hex, signAccess, verifyAccess,
+  ACCESS_TTL_CAPABLE, bearer, clientUa, randomToken, rateLimited, sha256Hex, signAccess,
+  verifyAccess,
 } from "../_shared/auth.ts";
 import { hashPassword, verifyPassword } from "../_shared/passwords.ts";
 
@@ -63,6 +78,14 @@ Deno.serve(withCors(async (req: Request) => {
     Deno.env.get("SUPABASE_URL")!,
     Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
   );
+
+  // 현재 비번 대입 상한 — 헤더 주석 참조. 해시 조회·argon2 검증보다 먼저 센다.
+  if (
+    await rateLimited(supabase, `pwchange:user:${uid}`, 5, 600) ||
+    await rateLimited(supabase, `pwchange:day:${uid}`, 20, 86400)
+  ) {
+    return json({ error: "rate_limited" }, 429);
+  }
 
   // 현재 비번 검증 — 저장 해시를 가져와 여기서 확인(argon2id/bcrypt 겸용).
   const { data: curHash, error: hErr } = await supabase.rpc("get_password_hash", { p_user: uid });

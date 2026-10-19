@@ -113,6 +113,8 @@
 | | `sms:global` | 200 | 1시간 | send-phone-code — 전역 안전판(문자 비용) |
 | `pwreset` | `pwreset:phone:<번호>` | 10 | 10분 | reset-password |
 | | `pwreset:ip:<ip>` | 30 | 10분 | reset-password |
+| `pwchange` | `pwchange:user:<uid>` | 5 | 10분 | change-password — 현재 비번 대입 상한(해시 검증 **앞**에서 계수) |
+| | `pwchange:day:<uid>` | 20 | 1일 | change-password — 토큰 보유자의 장기 대입 상한 |
 | `lite` | `lite:phone:<번호>` | 10 | 10분 | signup-lite |
 | | `lite:ip:<ip>` | 30 | 10분 | signup-lite |
 | `ginv` | `ginv:any:<uid>` | 20 | 1일 | invite-guardian — **모든 초대 시도**(가입 여부 무관, 열거 방지) |
@@ -308,10 +310,11 @@
   - 200 `{ ok: true, token, refresh_token, expires_in: 28800 }` — 현재 기기용 새 쌍
   - 400 `invalid_json` / `missing_fields` / `weak_password`
   - 401 `unauthorized`(JWT 무효 또는 RPC `not_authenticated` = tv 불일치/정지) / `invalid_current`
+  - 429 `rate_limited` — `pwchange` 버킷 초과(§2.5). 앱은 이미 "요청이 많아요" 로 매핑돼 있다
   - 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ① JWT 검증 → uid, tv ② 새 refresh 원문 생성 ③ `get_password_hash` 조회 → 엣지에서 현재 비번 검증 → `change_password_and_rotate(p_user, p_current_hash, p_new_hash, p_tv, p_new_token_hash, p_user_agent)` RPC — **단일 트랜잭션**: 세션(status+tv) 검증 → 해시 CAS 갱신(불일치 = invalid_current 롤백) → `token_version` bump + refresh 전량 회수 → 현재 기기용 새 family 발급. 새 tv 반환 ④ 새 tv로 access 서명해 새 쌍 응답.
+- **내부 로직**: ① JWT 검증 → uid, tv ② 입력 검사 뒤 `pwchange:user`(5/10분)·`pwchange:day`(20/1일) 소모 ③ 새 refresh 원문 생성 ④ `get_password_hash` 조회 → 엣지에서 현재 비번 검증 → `change_password_and_rotate(p_user, p_current_hash, p_new_hash, p_tv, p_new_token_hash, p_user_agent)` RPC — **단일 트랜잭션**: 세션(status+tv) 검증 → 해시 CAS 갱신(불일치 = invalid_current 롤백) → `token_version` bump + refresh 전량 회수 → 현재 기기용 새 family 발급. 새 tv 반환 ⑤ 새 tv로 access 서명해 새 쌍 응답.
 - **시크릿**: `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
-- **정책**: 성공 시 다른 모든 기기 즉시 로그아웃(access는 tv 게이트로 즉사, refresh 회수), 현재 기기만 유지. 레이트리밋 없음(유효 access 필요가 게이트).
+- **정책**: 성공 시 다른 모든 기기 즉시 로그아웃(access는 tv 게이트로 즉사, refresh 회수), 현재 기기만 유지. **레이트리밋 계정당 5/10분 + 20/1일**(2026-10-19 신설 — 종전 "유효 access 필요가 게이트" 판단은 이 함수의 위협이 바로 토큰 탈취자라 성립하지 않았다. 탈취 토큰으로 현재 비번을 무제한 대입 → 비번 변경으로 영구 탈취가 가능했고, 토큰에는 아이디가 없어 login 의 계정 버킷도 안 걸렸다). IP 버킷 없음 — 키가 서명 검증된 uid 라 스푸핑 불가.
 
 ### reset-password
 
