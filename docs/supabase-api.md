@@ -38,6 +38,7 @@
 |---|---|---|---|---|
 | `apply-business` | 업체 인증 신청 | false | ACTIVE v6 | 0025 |
 | `check-business-no` | 사업자등록번호 국세청 조회 | false | ACTIVE v6 | 0025 |
+| `juso-search` | 사업장 주소 검색 (행안부 juso 프록시 — 승인키를 서버에만 둔다. 검색어 거절 422·키 오류는 관리자 알림, `_shared/juso.ts`) | false | 신규(2026-10-19) | 0025 §4.2 |
 | `purge-business-docs` | 업체 증빙 서류 파기 배치 (pg_cron, `x-purge-secret`) | false | ACTIVE v6 | 0025 |
 | `share-view` | 공유 링크 뷰어 (QR·카톡 — 사람은 302, 크롤러는 서버 렌더링) | false | ACTIVE v18 | 0028 · 0029 |
 | `sync-facilities` | LOCALDATA 시설 주기 적재 (`x-sync-secret`, 운영 배치 — 수동 실행) | false | ACTIVE | 0033 |
@@ -67,7 +68,7 @@
 - **`bearer(req)`** — `Authorization: Bearer <token>` 파싱.
 - **`clientUa(req)`** — `user-agent`를 300자로 절단(refresh_tokens.user_agent 저장용, 비대화 방지).
 - **`clientIp(req)`** — 레이트리밋 키용 IP. **`cf-connecting-ip` 하나만 쓰고 폴백하지 않는다.** 이 헤더는 위조하면 Cloudflare 엣지가 요청 자체를 거부하고(에러 1000), 이 배포에서는 항상 붙는다 — 2026-08-01 ADR-0011 증상 4 실측, 2026-08-03 Edge Function 경로 재확인. 따라서 **IP 버킷은 '보조선' 이 아니라 실제로 지켜지는 상한이다.** `x-real-ip`/`x-forwarded-for` 폴백은 제거했다 — 폴백이 곧 우회로가 되기 때문이고(헤더 하나로 매 요청 다른 IP), DB 경로가 같은 이유로 이미 지웠다(`20260801140000_ratelimit_trusted_client_ip.sql`). 헤더가 없으면 `null` → 호출부는 IP 버킷을 건너뛰고, 스푸핑 불가한 1차 버킷(계정·토큰해시·전화번호)과 전역 상한이 받는다.
-- **`activeUid(req, secret, supabase)`** — **service_role 로 진행하는 함수의 인증 관문.** DB 의 `app.uid()` 와 같은 판정을 Edge 쪽에서 재현한다: 서명·`exp` 검증 → `users.status = 'active'` → `token_version == tv` 클레임 → `lite` 클레임 없음. 통과하면 uid, 아니면 `null`(호출부는 401). 조회 실패는 **fail-closed**(`rateLimited` 의 fail-open 과 반대 — 이쪽은 인증이라 열어 둘 이유가 없다). 사용처: `verify-location` · `verify-post-photo` · `enroll-pet-identity` · `resolve-region` · `search-petcafe` · `sync-dong-centroids` · `apply-business` · `check-business-no`.
+- **`activeUid(req, secret, supabase)`** — **service_role 로 진행하는 함수의 인증 관문.** DB 의 `app.uid()` 와 같은 판정을 Edge 쪽에서 재현한다: 서명·`exp` 검증 → `users.status = 'active'` → `token_version == tv` 클레임 → `lite` 클레임 없음. 통과하면 uid, 아니면 `null`(호출부는 401). 조회 실패는 **fail-closed**(`rateLimited` 의 fail-open 과 반대 — 이쪽은 인증이라 열어 둘 이유가 없다). 사용처: `verify-location` · `verify-post-photo` · `enroll-pet-identity` · `resolve-region` · `search-petcafe` · `sync-dong-centroids` · `apply-business` · `check-business-no` · `juso-search`.
 - **`rateLimited(supabase, key, max, windowSeconds)`** — RPC `rate_limit_hit(p_key, p_max, p_window_seconds)` 1회 소모. `true`=제한 초과(차단). **리미터 자체 오류는 fail-open**(가용성 우선 — 로그인/갱신을 막지 않음). `rate_limit_hit`은 ~2% 확률로 만료행을 기회적으로 삭제(백스톱). 초과분은 `app.rate_limit_trips` 에 **계열·분 단위로 접혀** 기록되고(2026-08-04) 운영 알람이 그걸 본다 — 전체 버킷 목록은 아래 §2.5.
 - **`sha256Hex(input)`** — refresh 토큰 저장용 해시(원문 저장 금지).
 - **`randomToken(bytes=32)`** — 불투명 refresh 토큰 원문(256bit, `crypto.getRandomValues` → base64url).
@@ -125,6 +126,7 @@
 | `dongsync` | `dongsync:<uid>` | 5 | 1시간 | sync-dong-centroids (배치) |
 | `bizapply` | `bizapply:<uid>` | 10 | 1시간 | apply-business |
 | `ntscheck` | `ntscheck:<uid>` | 30 | 1시간 | check-business-no (국세청 조회) |
+| `juso` | `juso:<uid>` | 60 | 1시간 | juso-search (행안부 주소 검색) |
 | `edgealert` | `edgealert:<key>` | 1 | 30분 | `_shared/edge_alert.ts` — 알림 폭주 억제 |
 | `cerr` | `cerr:<uid>` / `cerr:ip:<md5>` / `cerr:anon` | 30 | 1분 | **DB 쪽** `record_client_error` |
 | | `cerr:anon:all` | 300 | 1분 | 익명 전역 안전판 |
@@ -431,6 +433,7 @@
 | `PUSH_TRIGGER_SECRET` | send-push | DB 트리거/pg_cron과 공유하는 호출 인증 시크릿 |
 | `DONG_SYNC_SECRET` | sync-dong-centroids | pg_cron `dong-centroid-sweep` 과 공유(`app.dong_sync_config`) — 2026-09-20 JWT 게이트에서 전환 |
 | `FCM_SERVICE_ACCOUNT` | send-push | Google 서비스계정 JSON (FCM HTTP v1 OAuth) |
+| `JUSO_API_KEY` | juso-search | 행안부 도로명주소 검색 승인키. 종전에는 앱 빌드에 넣었다(공개 번들 노출·빌드 누락 문제로 2026-10-19 서버로 이관) |
 
 `.env.example`(`supabase/functions/.env.example`)에는 `GEMINI_API_KEY_ID`도 있으나 코드에서 미사용. 시크릿 등록은 `supabase secrets set --env-file supabase/functions/.env --project-ref vyatppuxmpulqtxevfpk`.
 
