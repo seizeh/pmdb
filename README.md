@@ -200,4 +200,4 @@ Supabase PostgreSQL 스키마 마이그레이션(0001~0016)을 각각 Markdown�
 | 트리거 | 43 | 78 |
 | 정책 | 77 | 76 |
 | 마이그레이션 | — | 213 |
-| Edge Functions | — | 23 |
+| Edge Functions | — | 24 |

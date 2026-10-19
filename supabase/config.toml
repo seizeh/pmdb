@@ -66,6 +66,11 @@ verify_jwt = false
 [functions.apply-business]
 verify_jwt = false
 
+# 사업장 주소 검색(0025 §4.2): juso 승인키를 서버에만 두려고 앱 직접 호출에서 옮겼다.
+# 커스텀 JWT 수동 검증(activeUid) → false.
+[functions.juso-search]
+verify_jwt = false
+
 # purge-business-docs: pg_net(크론)이 x-purge-secret 만으로 호출 → 반드시 false.
 [functions.purge-business-docs]
 verify_jwt = false
