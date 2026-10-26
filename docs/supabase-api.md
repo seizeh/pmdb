@@ -417,8 +417,8 @@
 - **응답**:
   - 200 `{ ok: true, processed: n }` / `{ ok: true, sent: 0 }`(대상 없음) / `{ ok: true, skipped: "fcm_not_configured" }`(FCM 미설정 — pending 유지)
   - 401 `unauthorized`, 405, 500 `bad_service_account` / `dispatch_failed`, 502 `oauth_failed` (이때 이미 claim한 알림들은 `push_report`로 전부 `ok:false, error:"oauth_failed"` 실패 보고됨 — pending으로 남지 않음), 503 `not_configured`
-- **내부 로직**: ① `push_dispatch_batch(p_only_id, p_limit=100)` RPC로 pending 알림+대상 디바이스 토큰 클레임 ② `FCM_SERVICE_ACCOUNT`(Google 서비스계정 JSON)의 private_key로 RS256 JWT 서명 → Google OAuth2 토큰 교환(`firebase.messaging` scope, 함수 인스턴스 내 캐시) ③ 각 알림×토큰마다 **FCM HTTP v1** `projects/<id>/messages:send` 호출 — `notification`(제목/본문; 앱 종료 상태에서도 OS 표시) + `data`(type/notification_id/resource_type/resource_id — 탭 라우팅), android priority high / apns-priority 10 ④ `UNREGISTERED`/`INVALID_ARGUMENT`/404 응답 토큰은 dead 처리 ⑤ `push_report(p_results)` RPC로 sent/failed 반영 + 죽은 토큰 비활성화.
-- **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). ~~CORS 헤더에 `x-push-secret` 추가 허용(자체 정의)~~ → 2026-09-21 `_shared/cors.ts` 통합으로 소거 — Allow-Headers 는 브라우저 preflight 에만 영향이 있고 호출 주체(pg_net 크론)는 브라우저가 아니다.
+- **내부 로직**: ① `push_dispatch_batch(p_only_id, p_limit=100)` RPC로 pending 알림+대상 디바이스 토큰 클레임 ② `FCM_SERVICE_ACCOUNT`(Google 서비스계정 JSON)의 private_key로 RS256 JWT 서명 → Google OAuth2 토큰 교환(`firebase.messaging` scope, 함수 인스턴스 내 캐시) ③ 각 알림×토큰마다 **FCM HTTP v1** `projects/<id>/messages:send` 호출 — `notification`(제목/본문; 앱 종료 상태에서도 OS 표시) + `data`(type/notification_id/resource_type/resource_id — 탭 라우팅), android priority high / apns-priority 10, **웹 토큰에만 `webpush.fcm_options.link`**(`_shared/push_link.ts` — `post` → `${WEB_APP_URL}/p/<id>`, `user` → `/u/<id>`, 그 밖은 링크 없음. 웹 서비스워커가 탭 시 열린 탭을 그 주소로 옮긴다, 2026-10-26) ④ `UNREGISTERED`/`INVALID_ARGUMENT`/404 응답 토큰은 dead 처리 ⑤ `push_report(p_results)` RPC로 sent/failed 반영 + 죽은 토큰 비활성화.
+- **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`WEB_APP_URL` — 웹 알림 링크의 기준 주소, 비거나 https 가 아니면 링크 없이 보낸다), (`ALLOW_ORIGIN`). ~~CORS 헤더에 `x-push-secret` 추가 허용(자체 정의)~~ → 2026-09-21 `_shared/cors.ts` 통합으로 소거 — Allow-Headers 는 브라우저 preflight 에만 영향이 있고 호출 주체(pg_net 크론)는 브라우저가 아니다.
 - **정책**: 배치 100건 제한. OAuth 토큰 캐시(만료 60초 전 갱신). FCM 미설정 시 pending 유지 후 skip.
 
 ## 5. 시크릿/환경변수 목록
@@ -436,6 +436,7 @@
 | `PUSH_TRIGGER_SECRET` | send-push | DB 트리거/pg_cron과 공유하는 호출 인증 시크릿 |
 | `DONG_SYNC_SECRET` | sync-dong-centroids | pg_cron `dong-centroid-sweep` 과 공유(`app.dong_sync_config`) — 2026-09-20 JWT 게이트에서 전환 |
 | `FCM_SERVICE_ACCOUNT` | send-push | Google 서비스계정 JSON (FCM HTTP v1 OAuth) |
+| `WEB_APP_URL` | share-view, send-push | 웹앱 주소(`https://app.pawmate.kr`). share-view 는 사람에게 302 할 곳, send-push 는 웹 알림 탭 링크(`/p/<id>`·`/u/<id>`)의 기준 |
 | `JUSO_API_KEY` | juso-search | 행안부 도로명주소 검색 승인키. 종전에는 앱 빌드에 넣었다(공개 번들 노출·빌드 누락 문제로 2026-10-19 서버로 이관) |
 
 `.env.example`(`supabase/functions/.env.example`)에는 `GEMINI_API_KEY_ID`도 있으나 코드에서 미사용. 시크릿 등록은 `supabase secrets set --env-file supabase/functions/.env --project-ref vyatppuxmpulqtxevfpk`.
