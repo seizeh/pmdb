@@ -11,15 +11,14 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import {
   ACCESS_TTL_CAPABLE, ACCESS_TTL_LEGACY, clientIp, clientUa, randomToken,
   rateLimited, sha256Hex, signAccess,
 } from "../_shared/auth.ts";
 import { dummyVerify, hashPassword, isLegacyHash, verifyPassword } from "../_shared/passwords.ts";
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const secret = Deno.env.get("JWT_SECRET");
@@ -129,4 +128,4 @@ Deno.serve(async (req: Request) => {
     expires_in: ttl,
     user: { id: user.id, username: user.username, nickname: user.nickname, user_type: user.user_type },
   });
-});
+}, { enforceOrigin: true }));

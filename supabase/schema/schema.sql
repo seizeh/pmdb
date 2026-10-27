@@ -698,6 +698,15 @@ begin
      where a.alarm_key = p_key
        and a.fired_at > now() - make_interval(mins => p_cooldown_min)
   ) then
+    -- 억제도 발생이다 — 최신 행에 횟수·시각을 남긴다. 이게 없으면 30분 내
+    -- 1회 재발과 29분간 초당 재발이 구분되지 않는다(알림 억제 = 관측 손실).
+    -- clock_timestamp(): now() 는 트랜잭션 시각이라 같은 트랜잭션 안의 연속
+    -- 발화(pgTAP 포함)에서 fired_at 과 구분이 안 된다 — 실제 경과 시각을 쓴다.
+    update app.ops_alarms a
+       set fire_count = a.fire_count + 1, last_seen_at = clock_timestamp()
+     where a.id = (
+       select id from app.ops_alarms
+        where alarm_key = p_key order by fired_at desc limit 1);
     return 0;
   end if;
 
@@ -705,11 +714,18 @@ begin
   values (p_key, p_title, p_body, p_detail);
 
   -- 활성 관리자 전원에게. actor_user_id 가 없으므로 차단 필터(§8.9)에 걸리지 않는다.
+  -- priority·그룹키는 엣지 alertAdmins 가 갖고 있던 것을 통합하며 승계(2026-09-21).
+  -- ON CONFLICT: notifications_group_uq(미읽음 부분 유니크)와의 충돌 — 같은 알람의
+  -- 직전 알림이 아직 미읽음이면 행·푸시를 중복하지 않는다(관측은 원장 fire_count 가
+  -- 담당). 종전 엣지 경로는 이 충돌이 조용한 insert 실패였다 — 의도로 승격.
+  -- 술어는 인덱스 술어를 그대로 함의해야 중재자 추론이 된다(is_read + group_key not null).
   insert into public.notifications
-    (user_id, notification_type, is_system, title, body)
-  select u.id, 'system_notice', true, p_title, p_body
+    (user_id, notification_type, is_system, priority, notification_group_key, title, body)
+  select u.id, 'system_notice', true, 'high', 'ops_alarm:' || p_key, p_title, p_body
     from public.users u
-   where u.user_type = 'admin' and u.status = 'active';
+   where u.user_type = 'admin' and u.status = 'active'
+  on conflict (user_id, notification_group_key)
+    where (is_read = false and notification_group_key is not null) do nothing;
 
   return 1;
 end $$;
@@ -1011,6 +1027,24 @@ end $$;
 --
 
 COMMENT ON FUNCTION app.revoke_device_tokens_on_session_revoke() IS '세션 회수(token_version 증가·비활성 전환) 시 그 사용자의 기기 푸시 토큰을 끈다.';
+
+
+--
+-- Name: spatial_ref_sys_guard(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.spatial_ref_sys_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO ''
+    AS $$
+begin
+  if current_user in ('anon', 'authenticated') then
+    raise exception 'spatial_ref_sys is read-only for API roles'
+      using errcode = '42501';  -- insufficient_privilege — 클라이언트에는 권한 오류로 보인다
+  end if;
+  return null;  -- 문장 트리거의 반환값은 무시된다
+end
+$$;
 
 
 --
@@ -1614,6 +1648,42 @@ begin
   return new;
 end;
 $$;
+
+
+--
+-- Name: tg_facilities_frozen_addr_alert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_facilities_frozen_addr_alert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  perform app.ops_alarm_fire(
+    'facility_frozen_addr:' || new.id,
+    1440,  -- 행별 하루 쿨다운 — 같은 배치를 다시 돌려도 하루 한 번만.
+    '이름 동결 시설의 주소가 바뀜',
+    format('%s — 재적재가 주소를 덮었습니다. 새 가게 분리 등록/이전 처리가 필요한지 확인하세요(0033 §8).', new.name),
+    jsonb_build_object(
+      'facility_id', new.id,
+      'name', new.name,
+      'old_address', old.address,
+      'new_address', new.address
+    )
+  );
+  return new;
+exception when others then
+  -- 알림 실패가 적재 배치 자체를 막으면 안 된다.
+  raise warning 'tg_facilities_frozen_addr_alert failed: %', sqlerrm;
+  return new;
+end $$;
+
+
+--
+-- Name: FUNCTION tg_facilities_frozen_addr_alert(); Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON FUNCTION app.tg_facilities_frozen_addr_alert() IS '이름 동결(owner_updated_at) 시설의 주소가 재적재로 덮이는 순간 관리자에게 알린다(0033 §8 임시 개명 행).';
 
 
 --
@@ -2471,6 +2541,34 @@ $$;
 
 
 --
+-- Name: tg_reports_alert(); Type: FUNCTION; Schema: app; Owner: -
+--
+
+CREATE FUNCTION app.tg_reports_alert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  perform app.ops_alarm_fire(
+    'report:new',
+    30,
+    '신고 접수',
+    format('%s 신고가 접수됐습니다 — 관리자 콘솔에서 확인하세요.', new.target_type),
+    jsonb_build_object(
+      'report_id', new.id,
+      'target_type', new.target_type,
+      'categories', new.categories
+    )
+  );
+  return new;
+exception when others then
+  -- 알림 실패가 신고 접수 자체를 막으면 안 된다.
+  raise warning 'tg_reports_alert failed: %', sqlerrm;
+  return new;
+end $$;
+
+
+--
 -- Name: tg_reviews_aggregate(); Type: FUNCTION; Schema: app; Owner: -
 --
 
@@ -2953,6 +3051,7 @@ begin
     and l.revoked_at is null and l.expires_at > now()
   order by l.created_at desc limit 1;
   if v_token is not null then
+    -- 재사용 반환 — 상태 변경 없음, 감사 기록 없음
     return query select v_token, v_exp;
     return;
   end if;
@@ -2961,6 +3060,11 @@ begin
   v_exp   := now() + make_interval(days => p_days);
   insert into app.share_links (token, kind, ref_id, created_by, expires_at)
   values (v_token, 'facility_preview', p_facility, app.uid(), v_exp);
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'share_link_create', 'facility', p_facility,
+          jsonb_build_object('kind', 'facility_preview',
+                             'token_prefix', left(v_token, 8),
+                             'expires_at', v_exp));
   return query select v_token, v_exp;
 end;
 $$;
@@ -3003,6 +3107,7 @@ begin
     and l.revoked_at is null and l.expires_at > now()
   order by l.created_at desc limit 1;
   if v_token is not null then
+    -- 재사용 반환 — 상태 변경 없음, 감사 기록 없음
     return query select v_token, v_exp;
     return;
   end if;
@@ -3011,6 +3116,11 @@ begin
   v_exp   := now() + make_interval(days => p_days);
   insert into app.share_links (token, kind, ref_id, created_by, expires_at)
   values (v_token, 'starter', p_business, app.uid(), v_exp);
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'share_link_create', 'user', p_business,
+          jsonb_build_object('kind', 'starter',
+                             'token_prefix', left(v_token, 8),
+                             'expires_at', v_exp));
   return query select v_token, v_exp;
 end;
 $$;
@@ -3120,6 +3230,11 @@ begin
   insert into public.chat_room_members(room_id, user_id)
   values (p_room, app.uid())
   on conflict (room_id, user_id) do nothing;
+  if found then
+    -- 실제로 새로 참여한 경우에만 — 중복 재진입은 상태 변경이 없다
+    insert into public.admin_logs (admin_id, action_type, target_type, target_id)
+    values (app.uid(), 'inquiry_join', 'chat_room', p_room);
+  end if;
 end;
 $$;
 
@@ -3390,6 +3505,9 @@ begin
   if not found then
     raise exception 'facility_not_found' using errcode = 'P0001';
   end if;
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'facility_mark_closed', 'facility', p_facility,
+          jsonb_build_object('closed', p_closed));
 end $$;
 
 
@@ -3404,7 +3522,7 @@ COMMENT ON FUNCTION public.admin_mark_facility_closed(p_facility uuid, p_closed 
 -- Name: admin_ops_alarms(integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
-CREATE FUNCTION public.admin_ops_alarms(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, alarm_key text, title text, body text, detail jsonb, fired_at timestamp with time zone)
+CREATE FUNCTION public.admin_ops_alarms(p_limit integer DEFAULT 50, p_offset integer DEFAULT 0) RETURNS TABLE(id bigint, alarm_key text, title text, body text, detail jsonb, fired_at timestamp with time zone, last_seen_at timestamp with time zone, fire_count integer)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -3413,7 +3531,7 @@ begin
     raise exception 'forbidden' using errcode = '42501';
   end if;
   return query
-  select a.id, a.alarm_key, a.title, a.body, a.detail, a.fired_at
+  select a.id, a.alarm_key, a.title, a.body, a.detail, a.fired_at, a.last_seen_at, a.fire_count
     from app.ops_alarms a
    order by a.fired_at desc
    limit greatest(1, least(coalesce(p_limit, 50), 200))
@@ -3612,13 +3730,26 @@ CREATE FUNCTION public.admin_revoke_share_link(p_token character varying) RETURN
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'public'
     AS $$
+declare
+  v_kind   varchar(30);
+  v_ref_id uuid;
 begin
   if not app.is_admin() then
     raise exception 'forbidden' using errcode = '42501';
   end if;
-  update app.share_links set revoked_at = now()
-  where token = p_token and revoked_at is null;
-  return found;
+  update app.share_links
+     set revoked_at = now(),
+         revoked_by = app.uid()
+   where token = p_token and revoked_at is null
+  returning kind, ref_id into v_kind, v_ref_id;
+  if not found then
+    return false;
+  end if;
+  insert into public.admin_logs (admin_id, action_type, target_type, target_id, detail)
+  values (app.uid(), 'share_link_revoke',
+          case when v_kind = 'starter' then 'user' else 'facility' end, v_ref_id,
+          jsonb_build_object('kind', v_kind, 'token_prefix', left(p_token, 8)));
+  return true;
 end;
 $$;
 
@@ -4219,6 +4350,106 @@ begin
   return jsonb_build_object('track', v_track, 'status', v_status, 'score', v_score);
 end;
 $_$;
+
+
+--
+-- Name: attest_challenge_put(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_challenge_put(p_user uuid, p_challenge_b64 text) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  insert into app.attest_challenges (user_id, challenge_b64)
+  values (p_user, p_challenge_b64)
+  on conflict (user_id) do update
+    set challenge_b64 = excluded.challenge_b64, created_at = now();
+$$;
+
+
+--
+-- Name: attest_challenge_take(uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_challenge_take(p_user uuid, p_max_age_sec integer DEFAULT 300) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare v_challenge text; v_at timestamptz;
+begin
+  delete from app.attest_challenges
+   where user_id = p_user
+  returning challenge_b64, created_at into v_challenge, v_at;
+  if v_challenge is null or v_at < now() - make_interval(secs => p_max_age_sec) then
+    return null;
+  end if;
+  return v_challenge;
+end;
+$$;
+
+
+--
+-- Name: attest_check_log(uuid, text, text, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text DEFAULT NULL::text) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  insert into app.attest_checks (user_id, fn, platform, verdict, reason)
+  values (p_user, p_fn, p_platform, p_verdict, left(p_reason, 200));
+$$;
+
+
+--
+-- Name: attest_key_bump(uuid, text, bigint); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_key_bump(p_user uuid, p_key_id text, p_count bigint) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  update app.device_attest_keys
+     set sign_count = greatest(sign_count, p_count), last_used_at = now()
+   where user_id = p_user and key_id = p_key_id;
+$$;
+
+
+--
+-- Name: attest_key_get(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_key_get(p_user uuid, p_key_id text) RETURNS TABLE(spki_b64 text, sign_count bigint)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select k.spki_b64, k.sign_count
+    from app.device_attest_keys k
+   where k.user_id = p_user and k.key_id = p_key_id;
+$$;
+
+
+--
+-- Name: attest_key_register(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  insert into app.device_attest_keys (user_id, key_id, spki_b64)
+  values (p_user, p_key_id, p_spki_b64)
+  on conflict (user_id, key_id) do nothing;
+  delete from app.device_attest_keys k
+   where k.user_id = p_user
+     and k.key_id in (
+       select key_id from app.device_attest_keys
+        where user_id = p_user
+        order by coalesce(last_used_at, created_at) desc
+        offset 20);
+end;
+$$;
 
 
 --
@@ -4938,6 +5169,18 @@ CREATE FUNCTION public.dong_centroid_seeds() RETURNS TABLE(region_code character
      and not exists (select 1 from public.dong_centroids d where d.region_code = u.region_code)
    group by u.region_code
    limit 100;
+$$;
+
+
+--
+-- Name: edge_alert_fire(text, text, text, jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb DEFAULT '{}'::jsonb) RETURNS integer
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select app.ops_alarm_fire('edge:' || p_key, 30, p_title, p_body, p_detail)
 $$;
 
 
@@ -7021,6 +7264,60 @@ SET default_tablespace = '';
 SET default_table_access_method = heap;
 
 --
+-- Name: attest_challenges; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.attest_challenges (
+    user_id uuid NOT NULL,
+    challenge_b64 text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE attest_challenges; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.attest_challenges IS 'iOS App Attest 등록(attestKey)용 1회성 챌린지 — attest-register 가 발급·소진. TTL 5분.';
+
+
+--
+-- Name: attest_checks; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.attest_checks (
+    id bigint NOT NULL,
+    user_id uuid,
+    fn text NOT NULL,
+    platform text NOT NULL,
+    verdict text NOT NULL,
+    reason text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE attest_checks; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.attest_checks IS '기기 증명 섀도 측정 원장 — 강제 전환 판단용. 분모=전 요청, 분자=verdict=fail. 헤더 미첨부(absent)는 구클라이언트 비율, skip 은 시크릿 미설정 등 판정 불가. 180일 파기(cron).';
+
+
+--
+-- Name: attest_checks_id_seq; Type: SEQUENCE; Schema: app; Owner: -
+--
+
+ALTER TABLE app.attest_checks ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
+    SEQUENCE NAME app.attest_checks_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1
+);
+
+
+--
 -- Name: auth_logs; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -7205,6 +7502,44 @@ ALTER TABLE app.client_errors ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
 
 
 --
+-- Name: device_attest_keys; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.device_attest_keys (
+    user_id uuid NOT NULL,
+    key_id text NOT NULL,
+    spki_b64 text NOT NULL,
+    sign_count bigint DEFAULT 0 NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_used_at timestamp with time zone
+);
+
+
+--
+-- Name: TABLE device_attest_keys; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.device_attest_keys IS 'iOS App Attest 키 등록부 — attest-register 가 Apple 루트 CA 체인 검증 후 기록. assertion 검증은 이 공개키 + sign_count 단조 증가로 한다. Android(Play Integrity)는 무상태라 없음.';
+
+
+--
+-- Name: dong_sync_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.dong_sync_config (
+    function_url text NOT NULL,
+    trigger_secret text NOT NULL
+);
+
+
+--
+-- Name: TABLE dong_sync_config; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.dong_sync_config IS 'sync-dong-centroids 크론 호출 설정 싱글턴 — push_config 패턴. 값은 out-of-band 주입';
+
+
+--
 -- Name: funnel_events; Type: TABLE; Schema: app; Owner: -
 --
 
@@ -7237,6 +7572,22 @@ ALTER TABLE app.funnel_events ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     NO MAXVALUE
     CACHE 1
 );
+
+
+--
+-- Name: heartbeat_config; Type: TABLE; Schema: app; Owner: -
+--
+
+CREATE TABLE app.heartbeat_config (
+    ping_url text NOT NULL
+);
+
+
+--
+-- Name: TABLE heartbeat_config; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON TABLE app.heartbeat_config IS 'dead man''s switch 하트비트 대상(healthchecks.io) 싱글턴 — 값은 out-of-band 주입';
 
 
 --
@@ -7296,8 +7647,24 @@ CREATE TABLE app.ops_alarms (
     title text NOT NULL,
     body text NOT NULL,
     detail jsonb,
-    fired_at timestamp with time zone DEFAULT now() NOT NULL
+    fired_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_seen_at timestamp with time zone DEFAULT now() NOT NULL,
+    fire_count integer DEFAULT 1 NOT NULL
 );
+
+
+--
+-- Name: COLUMN ops_alarms.last_seen_at; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON COLUMN app.ops_alarms.last_seen_at IS '같은 key 의 마지막 발생 시각(억제 포함) — fired_at 은 알림이 나간 시각';
+
+
+--
+-- Name: COLUMN ops_alarms.fire_count; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON COLUMN app.ops_alarms.fire_count IS '이 쿨다운 창의 총 발생 횟수(발송 1 + 억제 n). suppressed = fire_count - 1';
 
 
 --
@@ -7379,6 +7746,7 @@ CREATE TABLE app.share_links (
     view_count integer DEFAULT 0 NOT NULL,
     revoked_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    revoked_by uuid,
     CONSTRAINT share_links_kind_check CHECK (((kind)::text = ANY ((ARRAY['facility_preview'::character varying, 'care_report'::character varying, 'starter'::character varying, 'post'::character varying])::text[])))
 );
 
@@ -7388,6 +7756,13 @@ CREATE TABLE app.share_links (
 --
 
 COMMENT ON TABLE app.share_links IS '설치 전 가치 전달용 공유 링크(0028 §3). share-view Edge Function 이 서빙.';
+
+
+--
+-- Name: COLUMN share_links.revoked_by; Type: COMMENT; Schema: app; Owner: -
+--
+
+COMMENT ON COLUMN app.share_links.revoked_by IS '회수한 관리자(app.uid()) — 2026-09-21 신설. 그 이전 회수 행은 NULL(행위자 미상)';
 
 
 --
@@ -8714,6 +9089,22 @@ CREATE VIEW public.v_post_feed AS
 
 
 --
+-- Name: attest_challenges attest_challenges_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.attest_challenges
+    ADD CONSTRAINT attest_challenges_pkey PRIMARY KEY (user_id);
+
+
+--
+-- Name: attest_checks attest_checks_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.attest_checks
+    ADD CONSTRAINT attest_checks_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: auth_logs auth_logs_pkey; Type: CONSTRAINT; Schema: app; Owner: -
 --
 
@@ -8783,6 +9174,14 @@ ALTER TABLE ONLY app.care_threads
 
 ALTER TABLE ONLY app.client_errors
     ADD CONSTRAINT client_errors_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: device_attest_keys device_attest_keys_pkey; Type: CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.device_attest_keys
+    ADD CONSTRAINT device_attest_keys_pkey PRIMARY KEY (user_id, key_id);
 
 
 --
@@ -9295,6 +9694,13 @@ ALTER TABLE ONLY public.user_blocks
 
 ALTER TABLE ONLY public.users
     ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: attest_checks_created_idx; Type: INDEX; Schema: app; Owner: -
+--
+
+CREATE INDEX attest_checks_created_idx ON app.attest_checks USING btree (created_at);
 
 
 --
@@ -10278,6 +10684,20 @@ CREATE TRIGGER trg_device_tokens_updated BEFORE UPDATE ON public.device_tokens F
 
 
 --
+-- Name: facilities trg_facilities_frozen_addr_alert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_facilities_frozen_addr_alert AFTER UPDATE ON public.facilities FOR EACH ROW WHEN (((new.owner_updated_at IS NOT NULL) AND (new.address IS DISTINCT FROM old.address))) EXECUTE FUNCTION app.tg_facilities_frozen_addr_alert();
+
+
+--
+-- Name: TRIGGER trg_facilities_frozen_addr_alert ON facilities; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TRIGGER trg_facilities_frozen_addr_alert ON public.facilities IS '동결 행 주소 변경 감지 — 재적재 때마다 사람이 확인하던 것을 UPDATE 시점 알림으로 대체.';
+
+
+--
 -- Name: facility_reviews trg_facility_review_recall; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10530,6 +10950,13 @@ CREATE TRIGGER trg_posts_validate_transition BEFORE UPDATE ON public.posts FOR E
 
 
 --
+-- Name: reports trg_reports_alert; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_reports_alert AFTER INSERT ON public.reports FOR EACH ROW EXECUTE FUNCTION app.tg_reports_alert();
+
+
+--
 -- Name: reports trg_reports_updated; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -10597,6 +11024,14 @@ CREATE TRIGGER trg_users_updated BEFORE UPDATE ON public.users FOR EACH ROW EXEC
 --
 
 CREATE TRIGGER users_revoke_device_tokens AFTER UPDATE ON public.users FOR EACH ROW WHEN (((new.token_version IS DISTINCT FROM old.token_version) OR (((old.status)::text = 'active'::text) AND ((new.status)::text IS DISTINCT FROM 'active'::text)))) EXECUTE FUNCTION app.revoke_device_tokens_on_session_revoke();
+
+
+--
+-- Name: attest_challenges attest_challenges_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.attest_challenges
+    ADD CONSTRAINT attest_challenges_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -10669,6 +11104,14 @@ ALTER TABLE ONLY app.care_threads
 
 ALTER TABLE ONLY app.client_errors
     ADD CONSTRAINT client_errors_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: device_attest_keys device_attest_keys_user_id_fkey; Type: FK CONSTRAINT; Schema: app; Owner: -
+--
+
+ALTER TABLE ONLY app.device_attest_keys
+    ADD CONSTRAINT device_attest_keys_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -11192,6 +11635,18 @@ ALTER TABLE ONLY public.user_blocks
 
 
 --
+-- Name: attest_challenges; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.attest_challenges ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: attest_checks; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.attest_checks ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: auth_logs; Type: ROW SECURITY; Schema: app; Owner: -
 --
 
@@ -11202,6 +11657,12 @@ ALTER TABLE app.auth_logs ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.business_doc_purge_queue ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: business_licenses; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.business_licenses ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: business_purge_config; Type: ROW SECURITY; Schema: app; Owner: -
@@ -11216,16 +11677,76 @@ ALTER TABLE app.business_purge_config ENABLE ROW LEVEL SECURITY;
 ALTER TABLE app.care_config ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: care_reports; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.care_reports ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: care_threads; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.care_threads ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: client_errors; Type: ROW SECURITY; Schema: app; Owner: -
 --
 
 ALTER TABLE app.client_errors ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: device_attest_keys; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.device_attest_keys ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: dong_sync_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.dong_sync_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: funnel_events; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.funnel_events ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: heartbeat_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.heartbeat_config ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: location_usage_logs; Type: ROW SECURITY; Schema: app; Owner: -
 --
 
 ALTER TABLE app.location_usage_logs ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ops_alarm_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarm_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: ops_alarms; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.ops_alarms ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: push_config; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.push_config ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: rate_limit_trips; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.rate_limit_trips ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: rate_limits; Type: ROW SECURITY; Schema: app; Owner: -
@@ -11238,6 +11759,18 @@ ALTER TABLE app.rate_limits ENABLE ROW LEVEL SECURITY;
 --
 
 ALTER TABLE app.refresh_tokens ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: share_links; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.share_links ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: vaccination_events; Type: ROW SECURITY; Schema: app; Owner: -
+--
+
+ALTER TABLE app.vaccination_events ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: withdrawn_users; Type: ROW SECURITY; Schema: app; Owner: -
@@ -12459,6 +12992,54 @@ GRANT ALL ON FUNCTION public.apply_business_profile(p_user uuid, p_b_no text, p_
 
 
 --
+-- Name: FUNCTION attest_challenge_put(p_user uuid, p_challenge_b64 text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_challenge_put(p_user uuid, p_challenge_b64 text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_challenge_put(p_user uuid, p_challenge_b64 text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_challenge_take(p_user uuid, p_max_age_sec integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_challenge_take(p_user uuid, p_max_age_sec integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_challenge_take(p_user uuid, p_max_age_sec integer) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_check_log(p_user uuid, p_fn text, p_platform text, p_verdict text, p_reason text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_key_bump(p_user uuid, p_key_id text, p_count bigint); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_key_bump(p_user uuid, p_key_id text, p_count bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_key_bump(p_user uuid, p_key_id text, p_count bigint) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_key_get(p_user uuid, p_key_id text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_key_get(p_user uuid, p_key_id text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_key_get(p_user uuid, p_key_id text) TO service_role;
+
+
+--
+-- Name: FUNCTION attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.attest_key_register(p_user uuid, p_key_id text, p_spki_b64 text) TO service_role;
+
+
+--
 -- Name: FUNCTION block_user(p_blocked uuid, p_reason text); Type: ACL; Schema: public; Owner: -
 --
 
@@ -12623,6 +13204,14 @@ GRANT ALL ON FUNCTION public.delete_my_post(p_post uuid) TO service_role;
 
 REVOKE ALL ON FUNCTION public.dong_centroid_seeds() FROM PUBLIC;
 GRANT ALL ON FUNCTION public.dong_centroid_seeds() TO service_role;
+
+
+--
+-- Name: FUNCTION edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.edge_alert_fire(p_key text, p_title text, p_body text, p_detail jsonb) TO service_role;
 
 
 --
@@ -13128,7 +13717,7 @@ GRANT ALL ON FUNCTION public.withdraw_account() TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.admin_logs TO anon;
-GRANT ALL ON TABLE public.admin_logs TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.admin_logs TO authenticated;
 GRANT ALL ON TABLE public.admin_logs TO service_role;
 
 
@@ -13137,7 +13726,7 @@ GRANT ALL ON TABLE public.admin_logs TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.applications TO anon;
-GRANT ALL ON TABLE public.applications TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.applications TO authenticated;
 GRANT ALL ON TABLE public.applications TO service_role;
 
 
@@ -13146,7 +13735,7 @@ GRANT ALL ON TABLE public.applications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.appointments TO anon;
-GRANT ALL ON TABLE public.appointments TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.appointments TO authenticated;
 GRANT ALL ON TABLE public.appointments TO service_role;
 
 
@@ -13154,8 +13743,8 @@ GRANT ALL ON TABLE public.appointments TO service_role;
 -- Name: TABLE business_match_rules; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.business_match_rules TO anon;
-GRANT ALL ON TABLE public.business_match_rules TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.business_match_rules TO anon;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.business_match_rules TO authenticated;
 GRANT ALL ON TABLE public.business_match_rules TO service_role;
 
 
@@ -13163,8 +13752,8 @@ GRANT ALL ON TABLE public.business_match_rules TO service_role;
 -- Name: TABLE business_profiles; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.business_profiles TO anon;
-GRANT ALL ON TABLE public.business_profiles TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.business_profiles TO anon;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.business_profiles TO authenticated;
 GRANT ALL ON TABLE public.business_profiles TO service_role;
 
 
@@ -13173,7 +13762,7 @@ GRANT ALL ON TABLE public.business_profiles TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_message_deletions TO anon;
-GRANT ALL ON TABLE public.chat_message_deletions TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_message_deletions TO authenticated;
 GRANT ALL ON TABLE public.chat_message_deletions TO service_role;
 
 
@@ -13182,7 +13771,7 @@ GRANT ALL ON TABLE public.chat_message_deletions TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_messages TO anon;
-GRANT ALL ON TABLE public.chat_messages TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_messages TO authenticated;
 GRANT ALL ON TABLE public.chat_messages TO service_role;
 
 
@@ -13191,7 +13780,7 @@ GRANT ALL ON TABLE public.chat_messages TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_room_members TO anon;
-GRANT ALL ON TABLE public.chat_room_members TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_room_members TO authenticated;
 GRANT ALL ON TABLE public.chat_room_members TO service_role;
 
 
@@ -13200,7 +13789,7 @@ GRANT ALL ON TABLE public.chat_room_members TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.chat_rooms TO anon;
-GRANT ALL ON TABLE public.chat_rooms TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.chat_rooms TO authenticated;
 GRANT ALL ON TABLE public.chat_rooms TO service_role;
 
 
@@ -13209,7 +13798,7 @@ GRANT ALL ON TABLE public.chat_rooms TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.comments TO anon;
-GRANT ALL ON TABLE public.comments TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.comments TO authenticated;
 GRANT ALL ON TABLE public.comments TO service_role;
 
 
@@ -13226,7 +13815,7 @@ GRANT SELECT(authored_as) ON TABLE public.comments TO anon;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.device_tokens TO anon;
-GRANT ALL ON TABLE public.device_tokens TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.device_tokens TO authenticated;
 GRANT ALL ON TABLE public.device_tokens TO service_role;
 
 
@@ -13253,7 +13842,7 @@ GRANT ALL ON TABLE public.facilities TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.facility_cache TO anon;
-GRANT ALL ON TABLE public.facility_cache TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.facility_cache TO authenticated;
 GRANT ALL ON TABLE public.facility_cache TO service_role;
 
 
@@ -13261,8 +13850,8 @@ GRANT ALL ON TABLE public.facility_cache TO service_role;
 -- Name: TABLE facility_review_comments; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.facility_review_comments TO anon;
-GRANT ALL ON TABLE public.facility_review_comments TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.facility_review_comments TO anon;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.facility_review_comments TO authenticated;
 GRANT ALL ON TABLE public.facility_review_comments TO service_role;
 
 
@@ -13280,7 +13869,7 @@ GRANT ALL ON TABLE public.facility_reviews TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.location_verifications TO anon;
-GRANT ALL ON TABLE public.location_verifications TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.location_verifications TO authenticated;
 GRANT ALL ON TABLE public.location_verifications TO service_role;
 
 
@@ -13289,7 +13878,7 @@ GRANT ALL ON TABLE public.location_verifications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.notification_preferences TO anon;
-GRANT ALL ON TABLE public.notification_preferences TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.notification_preferences TO authenticated;
 GRANT ALL ON TABLE public.notification_preferences TO service_role;
 
 
@@ -13298,7 +13887,7 @@ GRANT ALL ON TABLE public.notification_preferences TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.notifications TO anon;
-GRANT ALL ON TABLE public.notifications TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.notifications TO authenticated;
 GRANT ALL ON TABLE public.notifications TO service_role;
 
 
@@ -13307,7 +13896,7 @@ GRANT ALL ON TABLE public.notifications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pawings TO anon;
-GRANT ALL ON TABLE public.pawings TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.pawings TO authenticated;
 GRANT ALL ON TABLE public.pawings TO service_role;
 
 
@@ -13316,7 +13905,7 @@ GRANT ALL ON TABLE public.pawings TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pet_guardian_invites TO anon;
-GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.pet_guardian_invites TO authenticated;
+GRANT SELECT,DELETE,MAINTAIN,UPDATE ON TABLE public.pet_guardian_invites TO authenticated;
 GRANT ALL ON TABLE public.pet_guardian_invites TO service_role;
 
 
@@ -13325,7 +13914,7 @@ GRANT ALL ON TABLE public.pet_guardian_invites TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pet_guardians TO anon;
-GRANT ALL ON TABLE public.pet_guardians TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.pet_guardians TO authenticated;
 GRANT ALL ON TABLE public.pet_guardians TO service_role;
 
 
@@ -13378,7 +13967,7 @@ GRANT SELECT(created_at) ON TABLE public.pet_identity_frames TO authenticated;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.pets TO anon;
-GRANT SELECT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN ON TABLE public.pets TO authenticated;
+GRANT SELECT,DELETE,MAINTAIN ON TABLE public.pets TO authenticated;
 GRANT ALL ON TABLE public.pets TO service_role;
 
 
@@ -13508,7 +14097,7 @@ GRANT SELECT(verify_post_count) ON TABLE public.pets TO authenticated;
 --
 
 GRANT MAINTAIN ON TABLE public.phone_verifications TO anon;
-GRANT INSERT,REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN,UPDATE ON TABLE public.phone_verifications TO authenticated;
+GRANT INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.phone_verifications TO authenticated;
 GRANT ALL ON TABLE public.phone_verifications TO service_role;
 
 
@@ -13526,7 +14115,7 @@ GRANT ALL ON TABLE public.photo_verifications TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_hearts TO anon;
-GRANT ALL ON TABLE public.post_hearts TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.post_hearts TO authenticated;
 GRANT ALL ON TABLE public.post_hearts TO service_role;
 
 
@@ -13535,7 +14124,7 @@ GRANT ALL ON TABLE public.post_hearts TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_pets TO anon;
-GRANT SELECT,REFERENCES,TRIGGER,MAINTAIN ON TABLE public.post_pets TO authenticated;
+GRANT SELECT,MAINTAIN ON TABLE public.post_pets TO authenticated;
 GRANT ALL ON TABLE public.post_pets TO service_role;
 
 
@@ -13544,7 +14133,7 @@ GRANT ALL ON TABLE public.post_pets TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.post_views TO anon;
-GRANT ALL ON TABLE public.post_views TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.post_views TO authenticated;
 GRANT ALL ON TABLE public.post_views TO service_role;
 
 
@@ -13553,7 +14142,7 @@ GRANT ALL ON TABLE public.post_views TO service_role;
 --
 
 GRANT MAINTAIN ON TABLE public.posts TO anon;
-GRANT REFERENCES,DELETE,TRIGGER,TRUNCATE,MAINTAIN ON TABLE public.posts TO authenticated;
+GRANT DELETE,MAINTAIN ON TABLE public.posts TO authenticated;
 GRANT ALL ON TABLE public.posts TO service_role;
 
 
@@ -13786,7 +14375,7 @@ GRANT SELECT(authored_as) ON TABLE public.posts TO anon;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.reviews TO anon;
-GRANT ALL ON TABLE public.reviews TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.reviews TO authenticated;
 GRANT ALL ON TABLE public.reviews TO service_role;
 
 
@@ -13795,7 +14384,7 @@ GRANT ALL ON TABLE public.reviews TO service_role;
 --
 
 GRANT MAINTAIN ON TABLE public.users TO anon;
-GRANT REFERENCES,TRIGGER,TRUNCATE,MAINTAIN ON TABLE public.users TO authenticated;
+GRANT MAINTAIN ON TABLE public.users TO authenticated;
 GRANT ALL ON TABLE public.users TO service_role;
 
 
@@ -13912,7 +14501,7 @@ GRANT ALL ON TABLE public.public_profiles TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.reports TO anon;
-GRANT ALL ON TABLE public.reports TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.reports TO authenticated;
 GRANT ALL ON TABLE public.reports TO service_role;
 
 
@@ -13921,7 +14510,7 @@ GRANT ALL ON TABLE public.reports TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.review_category_counts TO anon;
-GRANT ALL ON TABLE public.review_category_counts TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.review_category_counts TO authenticated;
 GRANT ALL ON TABLE public.review_category_counts TO service_role;
 
 
@@ -13930,7 +14519,7 @@ GRANT ALL ON TABLE public.review_category_counts TO service_role;
 --
 
 GRANT SELECT,MAINTAIN ON TABLE public.user_blocks TO anon;
-GRANT ALL ON TABLE public.user_blocks TO authenticated;
+GRANT SELECT,INSERT,DELETE,MAINTAIN,UPDATE ON TABLE public.user_blocks TO authenticated;
 GRANT ALL ON TABLE public.user_blocks TO service_role;
 
 

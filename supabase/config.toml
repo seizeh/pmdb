@@ -41,6 +41,7 @@ verify_jwt = false
 [functions.search-petcafe]
 verify_jwt = false
 
+# 시크릿 헤더(x-sync-secret)로 보호한다 — pg_cron 배치 전용(2026-09-20, 종전 로그인 JWT).
 [functions.sync-dong-centroids]
 verify_jwt = false
 
@@ -51,6 +52,10 @@ verify_jwt = false
 [functions.resolve-region]
 verify_jwt = false
 
+# 기기 증명 등록(보안설계 v9.2 §7.5): 커스텀 JWT 수동 검증(activeUid) → false.
+[functions.attest-register]
+verify_jwt = false
+
 [functions.invite-guardian]
 verify_jwt = false
 
@@ -59,6 +64,11 @@ verify_jwt = false
 verify_jwt = false
 
 [functions.apply-business]
+verify_jwt = false
+
+# 사업장 주소 검색(0025 §4.2): juso 승인키를 서버에만 두려고 앱 직접 호출에서 옮겼다.
+# 커스텀 JWT 수동 검증(activeUid) → false.
+[functions.juso-search]
 verify_jwt = false
 
 # purge-business-docs: pg_net(크론)이 x-purge-secret 만으로 호출 → 반드시 false.

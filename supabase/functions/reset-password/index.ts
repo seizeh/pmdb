@@ -7,23 +7,12 @@
 //   verify_jwt=false: 로그인 전 단계. service_role 로만 RPC 호출.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { hashPassword } from "../_shared/passwords.ts";
 import { clientIp, rateLimited } from "../_shared/auth.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
 
 // 국내 휴대폰 번호 정규화: 숫자만 남기고 +82/82 → 0
 function normalizePhone(raw: string): string {
@@ -32,8 +21,7 @@ function normalizePhone(raw: string): string {
   return digits;
 }
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   let p: { phone?: string; new_password?: string };
@@ -84,4 +72,4 @@ Deno.serve(async (req: Request) => {
   }
 
   return json({ ok: true });
-});
+}, { enforceOrigin: true }));

@@ -6,11 +6,10 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { sha256Hex } from "../_shared/auth.ts";
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   let p: { refresh_token?: string };
@@ -29,4 +28,4 @@ Deno.serve(async (req: Request) => {
     if (error) console.error("rt_revoke_family failed", error);
   }
   return json({ ok: true });
-});
+}));

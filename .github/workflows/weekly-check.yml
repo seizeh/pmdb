@@ -10,7 +10,9 @@ name: 주간 점검
 
 on:
   schedule:
-    - cron: "0 0 * * 1" # 매주 월요일 09:00 KST
+    # 매주 월요일 09:17 KST. 정각(0분)은 GitHub 예약 실행이 몰려 밀린다 — "0 0" 일 때
+    # 실제 실행이 1~4시간 늦었다(2026-10-05 는 12:54 KST).
+    - cron: "17 0 * * 1"
   workflow_dispatch:
 
 jobs:
