@@ -999,11 +999,15 @@ AI 반려동물 사진 검증 기록. 실사/생성 이미지 판별 점수, 개
 
 ### public.spatial_ref_sys
 
-PostGIS 확장이 설치하는 좌표계(SRID) 참조 시스템 테이블. 애플리케이션 데이터가 아니므로 상세 생략 (PK: srid).
+PostGIS 확장이 설치하는 좌표계(SRID) 참조 시스템 테이블. 애플리케이션 데이터가 아니므로 상세 생략 (PK: srid). 이 DB 에서 쓰는 곳은 `facilities.geom`(SRID 4326) 의 거리 연산뿐이다.
+
+- **소유자 supabase_admin · RLS off · anon/authenticated 에 INSERT/UPDATE/DELETE/TRUNCATE 그랜트** — Supabase 기본권한 상속. 우리 롤로는 revoke 도 RLS 도 불가(20260630160000 의 revoke 는 no-op 였다). 2026-09-15 실측: anon 롤로 DELETE 가 권한 오류 없이 통과했다 → 4326 행이 지워지면 시설 검색이 깨지는 가용성 구멍.
+- **가드 트리거 `spatial_ref_sys_guard`**(`20260915100000`, BEFORE INSERT/UPDATE/DELETE/TRUNCATE, 문장 단위 → `app.spatial_ref_sys_guard()`): `current_user` 가 anon/authenticated 면 42501 로 거부. postgres·supabase_admin·service_role·SECURITY DEFINER 내부·복원(replica)은 통과. ⚠️ DROP/DISABLE TRIGGER 는 소유자만 가능해 우리 롤로는 못 뗀다 — 끄려면 함수 본문을 `return null` 로 교체. pg_dump 가 확장 테이블의 트리거를 안 담으므로 `schema.sql` 에는 함수만 있고 트리거는 `outofband.txt` 가 잡는다. 테스트 `t27`.
+- advisor `rls_disabled_in_public` 경고는 그대로 남는다(relrowsecurity 만 본다). 지우려면 PostGIS 를 `extensions` 로 옮겨야 하는데 geom 컬럼 드롭·재생성이 필요해 하지 않는다.
 
 ## 3.8 `app` 스키마 테이블
 
-인증 인프라·운영 전용 내부 테이블 19개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. RLS 없이 스키마 격리로 보호.
+인증 인프라·운영 전용 내부 테이블 19개. 클라이언트(PostgREST)에 노출되지 않으며(`app` 스키마는 API 스키마가 아님), SECURITY DEFINER 함수와 Edge Function(service_role)만 접근한다. 1차 방벽은 스키마 미노출 + 테이블 무그랜트(anon/authenticated 는 스키마 USAGE 만 — 정책·RPC 가 app.* **함수**를 부르기 위한 것). 여기에 더해 **2026-09-20 부터 19개 전 테이블 RLS on(정책 없음)** — 종전에는 민감 9개에만 감겨 있고 0028 계열 신생 10개는 빠져 있었다(부분 적용). 정책 없는 RLS 는 실수 그랜트·노출 스키마 설정 변경·신규 INVOKER 함수에 대한 보험이며, 정상 경로(definer=소유자·service_role=BYPASSRLS·pg_cron=postgres)에는 무영향. t28 이 전수 유지를 강제한다.
 
 ### app.refresh_tokens
 
@@ -1080,6 +1084,7 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 | expires_at | timestamptz | NO | | 만료 — facility_preview 기본 365일 |
 | view_count | integer | NO | `0` | 열람 수(share_view_load 가 원자 증가) |
 | revoked_at | timestamptz | YES | | 회수 시각(admin_revoke_share_link) |
+| revoked_by | uuid | YES | | 회수한 관리자(app.uid()) — 2026-09-21 신설, 그 이전 회수 행은 NULL |
 | created_at | timestamptz | NO | `now()` | |
 
 - 인덱스: `share_links_ref_idx` (kind, ref_id) — 대상→링크 역조회.
@@ -1230,7 +1235,7 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 | created_at | timestamptz | NO | `now()` | |
 
 - **인덱스**: `vaccination_events_pet_idx`(pet_id, due_date), `vaccination_events_due_idx`(due_date) **부분**(`done_at is null and notified_at is null`)
-- **이 테이블만 RLS off** — 접근이 전부 SD RPC 경유라 정책을 두지 않았다
+- **RLS on, 정책 없음** — 접근이 전부 SD RPC 경유(2026-09-20 벨트 통일 전에는 off, "이 테이블만 off" 라던 종전 서술도 실측과 달랐다 — 당시 10개가 off)
 - pg_cron `vaccine-reminder-sweep`(매일 00:00 UTC)가 D-1 이내 미완료분을 보호자에게 1회 알림
 - ⚠️ 날짜 판정은 **KST 기준**(`now() at time zone 'Asia/Seoul'`). 테스트가 `current_date`(UTC)로 준비해 **매일 아침 9시간만 실패**하던 사고가 있었다(0032 §6.6)
 
@@ -1290,12 +1295,16 @@ refresh 토큰 저장소 (설계: `docs/refresh-token-flow-design.md`). 원문�
 
 | 컬럼 | 뜻 |
 |---|---|
-| alarm_key | 쿨다운 단위(`client_error:<지점>`, `ratelimit:<계열>`, `push_failed`, `cron_failed`, `purge_overdue`) |
+| alarm_key | 쿨다운 단위(`client_error:<지점>`, `ratelimit:<계열>`, `push_failed`, `cron_failed`, `purge_overdue`, **`edge:<key>`** — 엣지 alertAdmins 발, 2026-09-21 통합) |
 | title / body | 알림에 그대로 나가는 문구 |
 | detail | jsonb — 건수·창 길이 등 근거 |
-| fired_at | 발사 시각 |
+| fired_at | 발사(알림이 나간) 시각 |
+| last_seen_at | 같은 key 의 **마지막 발생** 시각 — 억제 포함 (2026-09-21) |
+| fire_count | 이 쿨다운 창의 총 발생 횟수(발송 1 + 억제 n) — suppressed = fire_count − 1 |
 
 - 이력을 따로 남기는 이유: 알람은 푸시로 나가는데 **푸시 파이프라인이 죽으면 그 알람도 못 온다.** 이력·앱 내 알림·푸시 세 군데에 남겨 한 경로가 죽어도 되짚을 수 있게 한다. 조회는 `admin_ops_alarms`(§7.9).
+- **억제도 기록된다(2026-09-21)**: 쿨다운은 알림 폭주만 접고, 접힌 발생은 `fire_count`·`last_seen_at` 에 남는다 — 30분 내 1회 재발과 폭주가 구분되게(알림 억제 ≠ 관측 손실). 주간 점검 ⑬이 fire_count>1 을 노출한다. 회귀 가드는 t21 §7.
+- 엣지 진입구는 `public.edge_alert_fire`(definer 래퍼, `edge:` 접두) — **service_role 전용**이다. 생성 기본권한 잔재로 authenticated 실행이 열려 있던 것을 회수(`20260928031112`): 본문에 호출자 검사가 없어 로그인 사용자가 임의 문구의 high 알림을 전체 관리자에게 보낼 수 있었고, 알람 키가 호출자 입력이라 쿨다운으로는 못 막는다. 가드는 **주간 점검 ⑭**(운영 함수 EXECUTE 실측 ↔ 스냅샷 ACL 양방향 대조) — pgTAP 스냅샷 복원 DB 는 이미지 기본권한이 authenticated 를 재부여해 회수 단언이 거짓 실패한다(⑫의 T/T/R 과 같은 구조). 재발 구조 자체는 **함수 기본권한 deny-by-default**(`20260929045320`+`20260929050613`)로 닫았다: 스키마 항목의 authenticated 제거 + 전역 항목으로 내장 PUBLIC=EXECUTE 제거(스키마 항목은 내장에 더해질 뿐 못 걷어낸다 — 프로브 실측). 신설 함수 기본 ACL 은 `{postgres, service_role}` 뿐이므로 **사용자용 RPC 신설 마이그레이션에는 명시 `grant execute … to authenticated` 가 필수**(기존 관례 그대로 — 누락은 조용한 구멍 대신 앱에서 즉시 permission denied 로 드러난다). app 스키마 신설 함수를 RLS 정책·invoker 경로에서 쓸 때도 동일하게 명시 grant.
 - 보존 30일(`retention-purge`). `client_errors` 와 같은 기간으로 맞췄다 — 같이 보게 되는 자료라 기간이 다르면 "왜 이때는 알람이 없지" 가 보존 차이인지 실제인지 구분이 안 된다.
 
 ### app.rate_limit_trips
@@ -1757,13 +1766,13 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - `admin_join_inquiry(p_room)` — admin_inquiry 방인지 검증(P0001 `not_inquiry_room`) 후 관리자를 멤버로 추가.
 - `admin_list_logs(p_limit=100, p_offset=0)` — 감사 로그 조회(최대 200).
 - `admin_create_facility_share_link(p_facility, p_days=365) → TABLE(token, expires_at)` — 매장 QR 미리보기 공유 링크 발급(0028 §3). 같은 시설의 유효 링크가 있으면 **그 토큰을 재사용**(재호출로 기존 인쇄 QR 이 무효화되지 않게). 시설 미존재 시 `facility not found`.
-- `admin_revoke_share_link(p_token) → boolean` — 링크 회수(오배포·유출 대응). 회수분은 share-view 가 404 로 응답.
+- `admin_revoke_share_link(p_token) → boolean` — 링크 회수(오배포·유출 대응). 회수분은 share-view 가 404 로 응답. **2026-09-21 부터 `admin_logs`(`share_link_revoke`, token_prefix 8자) + 행의 `revoked_by` 에 행위자 기록** — QR 발급 3종·폐업 판정·문의 개입까지 감사 미기록 admin RPC 5종이 같은 마이그레이션(`20260921072724`)에서 전부 원장에 합류(t29 가드). 방침: 상태 변경 시에만 기록, 토큰 원문은 원장에 싣지 않는다.
 - `admin_create_starter_share_link(p_business, p_days=365)` — 스타터 키트 QR 발급(0028 §1.3). **승인 업체 + `sales`/`production` 허가 승인** 둘 다 있어야 한다(`starter_license_required`). 유효 링크 재사용.
 - `admin_broadcast_system_notice(p_title, p_body)` — 전체 공지를 `system_notice` 알림으로 일괄 INSERT. **정지·휴면 회원도 받는다**(약관 개정 고지는 이용 중지와 무관하게 도달해야 한다) — 제외 대상은 `deleted` 뿐. 제목 80자·본문 1000자 상한.
 - `admin_ops_metrics() → json` — 운영 원가·활동 지표. SMS 9원/AI 20원 단가를 넣어 사진 검증·전화 인증 건수로 비용을 추정하고, 리프레시 토큰·메시지·댓글·글·하트를 합쳐 활성 사용자를 KST 기준 일자로 집계한다.
 - `admin_photo_verification_failures(p_limit=50, p_offset=0)` — 사진 검증 **실패분**만 최신순(최대 200). fail_reason·ai_reason·지역일치·매칭점수·purpose 를 함께 준다 — AI 게이트 오탐률을 눈으로 재는 창구(펫 신원 섀도 운영).
 - `admin_location_usage_logs(p_user, ...)` — 특정 사용자의 위치 이용·제공 기록 열람(위치정보법 §16 대응, §8.10 이 쌓는 것).
-- `admin_ops_alarms(p_limit=50, p_offset=0)` — 발사된 운영 알람 이력(§3.8 `app.ops_alarms`). 푸시를 못 받았거나 지웠을 때 되짚는 창구다 — 알람의 1차 경로가 푸시라서 이 조회가 없으면 파이프라인이 죽었을 때 알람 자체가 사라진다.
+- `admin_ops_alarms(p_limit=50, p_offset=0)` — 발사된 운영 알람 이력(§3.8 `app.ops_alarms`). 푸시를 못 받았거나 지웠을 때 되짚는 창구다 — 알람의 1차 경로가 푸시라서 이 조회가 없으면 파이프라인이 죽었을 때 알람 자체가 사라진다. **2026-09-21 반환에 `last_seen_at`·`fire_count` 추가**(반환형 변경이라 drop 후 재생성 + 재그랜트 + pgrst 리로드 — RPC 섀도잉 규율).
 - `admin_client_errors(p_where?, ...)` / `admin_client_error_summary(p_hours=24)` — 클라이언트 오류 원본 조회와 지점(`where_key`)별 집계(건수·영향 사용자 수·마지막 발생). 수집은 `record_client_error`(§7.12).
 - `admin_list_business_applications(p_status?, p_track?, p_auto_only?, ...)` / `admin_set_business_status(p_user, p_status, p_reason?)` — 업체 신청 심사 큐와 승인/거절. 거절에는 **사유가 필수**(`reason_required`), 같은 상태로의 재설정은 `no_change` 로 막는다(감사 로그 오염 방지).
 - `admin_list_business_licenses(p_status?, ...)` / `admin_review_business_license(p_license, p_status, p_reason?)` — 영업 허가증 심사. 승인은 **업체 프로필이 이미 approved 여야** 가능하다 — 허가만 먼저 통과해 자격이 앞서 나가는 걸 막는다.
@@ -1830,7 +1839,17 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
 - **지점별과 총량을 둘 다 보는 이유**: 지점별만 보면 서버가 죽어 모든 화면이 조금씩 실패하는 경우를 놓친다(지점별로는 임계 미달, 총량은 폭증). 총량만 보면 한 화면이 터진 걸 평상시 잡음에 묻는다.
 - **쿨다운이 필요한 이유**: 급증은 몇 분간 이어진다. 5분마다 같은 알람이 오면 사람은 알림을 꺼 버리고, 그러면 관측 장치가 없는 것과 같아진다.
 - 크론 조건은 `to_regclass('cron.job_run_details')` 로 존재를 먼저 확인한다 — **pg_cron 은 운영에만 있다.** pgTAP CI 는 `prelude + schema.sql`(= `-n public -n app` 덤프)만 복원하므로 cron 스키마가 없고, 그냥 참조하면 알람을 검증하려고 부르는 순간 함수가 통째로 터진다.
-- 한계: **pg_cron 자체가 멈추면 이 스윕도 안 돈다.** 자기 자신의 부재는 감지할 수 없다.
+- ~~한계: **pg_cron 자체가 멈추면 이 스윕도 안 돈다.** 자기 자신의 부재는 감지할 수 없다.~~
+  → **2026-09-20 dead man's switch 로 해소**(`20260920062032`): pg_cron `ops-heartbeat`(5분)가
+  healthchecks.io 로 하트비트(`net.http_get`, 대상은 `app.heartbeat_config` 싱글턴 — ping URL 은
+  capability 라 저장소 밖 주입)을 보내고, 하트비트가 끊기면 **외부**가 운영자에게 알린다.
+  같은 장애 영역 안에서는 자기 부재를 감지할 수 없으므로 방향을 뒤집은 것 — DB 다운·
+  프로젝트 일시정지·pg_cron/pg_net 사망 전부가 "하트비트 유실"으로 드러난다. 남는 사각:
+  엣지 함수만 죽는 경우(DB 생존)는 하트비트이 못 본다 — 외부 프로브 층은 선택 과제.
+- **백업도 같은 방식으로 밖에서 본다(2026-10-06)**: 백업(`scripts/backup.sh`, launchd 주 1회)은
+  운영자 기기에서만 돌아 이 스윕도 주간 점검 CI 도 결과를 볼 수 없다 — launchd 등록 후 5주
+  연속 실패(PATH 에 gpg 없음)를 아무도 몰랐다. `BACKUP_HEARTBEAT_URL`(backup.env, 별도 체크)을
+  주면 성공 시 핑·실패 시 `/fail` 핑을 보내, 실패는 즉시·미실행은 grace 뒤에 드러난다.
 - pgTAP: t21(12건).
 
 #### `rls_auto_enable() → event_trigger` [SD]
@@ -2060,9 +2079,19 @@ RLS 는 "어느 **행**을 볼 수 있나" 만 정한다. "그 행의 어느 **�
 컬럼 단위 GRANT 가 정하고, `users`·`posts`·`pets` 세 테이블이 그걸 쓴다. 아래는
 2026-08-04 `information_schema.column_privileges` 실측이다.
 
+> **TRUNCATE/TRIGGER/REFERENCES 전면 회수 (2026-09-20, `20260920..._revoke_ddlish_table_privs`)**
+> Supabase 기본권한이 새 테이블마다 anon/authenticated 에 ALL 을 부여해, PostgREST 가
+> 결코 쓰지 않는 세 권한이 잔재로 쌓여 있었다(authenticated 33개·anon 6개 — business
+> 계열 2개는 7종 풀셋). 전부 회수했고 default privileges 에서 기본 부여 자체를 껐다.
+> TRUNCATE 는 **RLS 의 적용을 받지 않아** SQL 경로가 생기는 순간 정책과 무관하게 전체
+> 소거가 되는 권한이고, TRIGGER 는 PUBLIC EXECUTE 기본 부여된 기존 함수를 남의
+> 테이블에 붙일 수 있게 한다. 예외: supabase_admin 소유 PostGIS 3종은 우리 롤로 회수
+> 불가(§ spatial_ref_sys 참조). 재발 가드는 주간 점검 ⑫(운영 실측 — pgTAP 스냅샷은
+> 이미지 기본권한이 회수를 되살려 못 잰다, 0032 §6.4).
+
 ### 10.1. users — 컬럼 단위 SELECT/UPDATE (핵심 프라이버시 장치)
 
-`users` 는 **테이블 수준 SELECT/UPDATE/INSERT 권한이 회수**되어 있고(authenticated 에는 REFERENCES/TRIGGER/TRUNCATE 만 잔존), 필요한 컬럼에만 컬럼 단위 GRANT 가 있다.
+`users` 는 **테이블 수준 SELECT/UPDATE/INSERT 권한이 회수**되어 있고(2026-09-20 부터는 REFERENCES/TRIGGER/TRUNCATE 잔존분도 회수 — 테이블 수준 권한 0), 필요한 컬럼에만 컬럼 단위 GRANT 가 있다.
 
 | 권한 | anon | authenticated |
 |---|---|---|

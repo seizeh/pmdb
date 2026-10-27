@@ -2,22 +2,20 @@
 // send-push — pending 알림을 FCM(HTTP v1)로 발송
 //   POST { notification_id? }   header: x-push-secret == PUSH_TRIGGER_SECRET
 //   호출: notifications 트리거(단건) + pg_cron 스윕(배치). service_role 로 RPC 사용.
-//   env: PUSH_TRIGGER_SECRET(트리거/크론과 공유), FCM_SERVICE_ACCOUNT(Google 서비스계정 JSON).
+//   env: PUSH_TRIGGER_SECRET(트리거/크론과 공유), FCM_SERVICE_ACCOUNT(Google 서비스계정 JSON),
+//        WEB_APP_URL(웹 알림 탭 링크의 기준 주소 — 비면 웹 링크 없이 보낸다).
 //   흐름: push_dispatch_batch 로 클레임 → FCM v1 발송 → push_report 로 sent/failed + 죽은토큰 비활성.
 //   notification 페이로드 포함 → 앱이 꺼져있어도 OS 가 표시(백그라운드/종료), data 로 탭 라우팅.
+//   웹 토큰에는 webpush.fcm_options.link 도 싣는다 — 웹 서비스워커가 탭 시 그 주소를 연다.
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { json, withCors } from "../_shared/cors.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { classifyFcmError } from "../_shared/fcm.ts";
 import { alertAdmins } from "../_shared/edge_alert.ts";
+import { secretEq } from "../_shared/auth.ts";
+import { webPushLink } from "../_shared/push_link.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": Deno.env.get("ALLOW_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-push-secret",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-const json = (b: unknown, s = 200) =>
-  new Response(JSON.stringify(b), { status: s, headers: { ...corsHeaders, "Content-Type": "application/json" } });
 
 function b64urlStr(s: string): string {
   return btoa(String.fromCharCode(...new TextEncoder().encode(s)))
@@ -60,13 +58,14 @@ async function getAccessToken(sa: any): Promise<string> {
   return cachedToken!;
 }
 
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   const triggerSecret = Deno.env.get("PUSH_TRIGGER_SECRET");
   if (!triggerSecret) return json({ error: "not_configured" }, 503);
-  if (req.headers.get("x-push-secret") !== triggerSecret) return json({ error: "unauthorized" }, 401);
+  if (!secretEq(req.headers.get("x-push-secret") ?? "", triggerSecret)) {
+    return json({ error: "unauthorized" }, 401);
+  }
 
   const saRaw = Deno.env.get("FCM_SERVICE_ACCOUNT");
   if (!saRaw) return json({ ok: true, skipped: "fcm_not_configured" }); // pending 유지(설정 후 발송)
@@ -97,8 +96,11 @@ Deno.serve(async (req: Request) => {
   // 사람이 봐야 하는 실패(우리 페이로드 버그·APNs 설정)를 배치 전체에서 모았다가
   // 마지막에 한 번만 알린다. 토큰마다 알리면 알림이 알림을 덮는다.
   let attention: string | null = null;
+  const webAppUrl = Deno.env.get("WEB_APP_URL");
   for (const it of list) {
     let anyOk = false; let lastErr: string | null = null; const dead: string[] = [];
+    // 웹 알림 탭의 목적지(웹에 그 화면이 없으면 null) — _shared/push_link.ts
+    const webLink = webPushLink(webAppUrl, it.resource_type, it.resource_id);
     for (const t of (it.tokens ?? [])) {
       const msg = {
         message: {
@@ -110,6 +112,9 @@ Deno.serve(async (req: Request) => {
           },
           android: { priority: "high" },
           apns: { headers: { "apns-priority": "10" }, payload: { aps: { sound: "default" } } },
+          // 웹 토큰에만 — 서비스워커가 알림 탭에서 이 링크를 연다. 네이티브 토큰에는
+          // 붙여도 FCM 이 무시하지만, 링크가 없는 알림과 구분되게 웹에만 둔다.
+          ...(t.platform === "web" && webLink ? { webpush: { fcm_options: { link: webLink } } } : {}),
         },
       };
       const r = await fetch(url, {
@@ -141,4 +146,4 @@ Deno.serve(async (req: Request) => {
     await alertAdmins(supabase, "push_needs_attention", "[운영] 푸시 발송 오류 — 설정/페이로드 확인 필요", attention);
   }
   return json({ ok: true, processed: list.length });
-});
+}));

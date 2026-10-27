@@ -1,7 +1,8 @@
 # Refresh-Token + Session-Version 설계 (v1 "thin full")
 
-> 상태: 설계(미구현). 작성 2026-07-01, 개정 2026-07-01(리뷰 반영). 관련 이슈 #23(MEDIUM #3 후속).
-> 현행: 무상태 HS256 access JWT 1개(exp 30일), 서버측 무효화/유출대응 없음.
+> 상태: **구현·운영 중**(1단계 구현 기록 §11, **현행 rt_rotate 상태 기계 §12** — 본문 §4 의사코드는 v1 원안 그대로 보존).
+> 작성 2026-07-01, 개정 2026-07-01(리뷰 반영) · 2026-09-29(§12 현행 상태 기계 추가). 관련 이슈 #23(MEDIUM #3 후속).
+> 작성 당시 현행: 무상태 HS256 access JWT 1개(exp 30일), 서버측 무효화/유출대응 없음.
 > 정지/차단·삭제는 이미 `app.uid()` status 게이트로 매 요청 즉시 차단됨(`20260630180000`).
 
 ## 0. 범위 결정 ("thin full")
@@ -123,6 +124,10 @@ else:   -- 이미 revoked = 재시도(응답 유실) 또는 탈취
         revoke_family(row.family_id); return 401            -- grace 초과 재사용 = 진짜 탈취
 ```
 > **이 grace 유예가 없으면**: 클라가 회전 응답을 네트워크에서 잃고 old 토큰으로 재시도 → 서버가 "탈취"로 family 회수 → **정상 사용자 강제 로그아웃**(모바일에서 흔함). 타협 불가.
+>
+> ⚠️ **이후 개정 — revoked 재사용 판정은 위 원안과 다르다(§12)**: `recovered` 분기(응답 유실이
+> grace 30초를 넘긴 경우의 제한적 복구)가 추가됐고, family 회수 흔적이 있는 토큰은 grace 창
+> 자체가 열리지 않는다(`20260810093000` — 로그아웃 직후 grace 로 세션이 부활하던 결함 수정).
 
 ### `logout` (신규)
 `POST { refresh_token }` → 그 토큰의 **family 회수**. 멱등.
@@ -180,7 +185,7 @@ refresh 호출량 ≈ `활성 사용자 × (활동시간 ÷ access수명)`. toke
 ## 10. 보안 체크리스트
 - [ ] refresh 원문 미저장(해시만), 로깅 금지
 - [ ] **원자적 회전**(`UPDATE ... WHERE revoked_at IS NULL RETURNING`) + **grace 유예(30s)** — 빠지면 랜덤 로그아웃
-- [ ] grace 초과 재사용만 family 회수(진짜 탈취)
+- [ ] grace 초과 재사용만 family 회수(진짜 탈취) — *현행 판정은 §12: 미사용 후속이면 `recovered` 복구, family 회수 흔적이 있으면 grace 없이 즉시 회수*
 - [ ] `users.token_version` ↔ access `tv` 클레임 비교(즉시 전역 무효화), 클레임 없음=0 하위호환
 - [ ] **새로 발급하는 모든 토큰(레거시 분기 포함)에 현재 `tv` stamp** — "클레임 없음=0"은 과거 토큰 구제용일 뿐(미stamp 시 bump된 사용자 재로그인 즉시 잠김)
 - [ ] **`change_password` 는 엣지 경로**(현기기 토큰 재발급에 JWT 서명 필요 — 현행 RPC를 엣지로 감쌈)
@@ -210,3 +215,56 @@ refresh 호출량 ≈ `활성 사용자 × (활동시간 ÷ access수명)`. toke
 - (B) **IP 제한은 보조·스푸핑 가능**: `x-forwarded-for` leftmost 는 클라 주입 가능. `clientIp` 은 신뢰 헤더(cf-connecting-ip/x-real-ip) 우선, 미상 시 null→IP 버킷 스킵(전역 'unknown' 버킷 방지). **1차 방어는 스푸핑 불가한 토큰해시·계정 버킷**. (C) 계정 버킷은 표적 락아웃 여지(10/5분, 수용된 절충).
 
 **후속(미구현)**: change-password 비원자성(2~4단계 단일 RPC화), 마이그레이션 기록 드리프트 정정(no-op), `pg_cron` 정리잡, phase 2 앱 연동.
+
+## 12. 현행 rt_rotate 상태 기계 (2026-09-29 기준)
+
+§4 의사코드(v1 원안)와 달라진 지점을 포함한 **현재 운영 정의**. 구현 정본은
+`public.rt_rotate`(스냅샷 `supabase/schema/schema.sql`), 설계서 세트에서는 인증인가
+설계서 §3.4 가 같은 내용을 다룬다. 반환은 `(result, user_id, token_version)` 한 행 —
+엣지 `refresh` 는 `rotated`/`grace`/`recovered` 면 새 쌍(access 는 반환된 tv 로 서명)을
+발급하고, 나머지는 전부 단일 코드 `invalid_refresh` 401 이다(상태 구분 비노출, §11).
+
+### 12.1 일곱 가지 결과
+
+| result | 조건 | 처리 |
+|---|---|---|
+| `invalid` | 해시 미상(토큰이 원장에 없음) | 아무것도 안 함 |
+| `inactive` | 사용자가 `status='active'` 아님(정지·휴면·삭제) | **family 전체 회수** |
+| `expired` | `absolute_expires_at`(family 90일) 또는 `expires_at`(롤링 30일) 경과 | 없음 — 재로그인 |
+| `rotated` | 미회수 토큰의 정상 회전(원자 UPDATE 승자) | 구 토큰 revoke + `replaced_by` 연결, 같은 family 후속 발급 |
+| `grace` | 회전으로 회수된 토큰의 **30초 이내** 재사용 — family 가 살아 있을 때만 | family 회수 없이 같은 family 로 추가 토큰 1개 발급 |
+| `recovered` | grace 초과지만 **후속 토큰이 미회수·미회전**(한 번도 안 쓰임) + `rtrec:<family_id>` 5회/일 이내 | 회전 응답 유실 재시도로 판정 — 미사용 후속을 회수하고 재발급(`replaced_by` 연결) |
+| `reuse_revoked` | 아래 판정 순서의 ②·③, 또는 후속이 이미 사용됨·복구 한도 초과 | **탈취 의심 — family 전체 회수** |
+
+### 12.2 판정 순서 — 핵심은 "회전사(死)와 회수사(死)의 구분"
+
+revoked 토큰이 다시 제출됐을 때, **`replaced_by` 와 후속 토큰의 상태**로 그 토큰이
+"회전으로 죽었는지(정상 수명) / 회수로 죽었는지(로그아웃·비번변경·정지)" 를 가른 뒤
+전자에게만 관용(grace·recovered)을 준다:
+
+1. 미상 → `invalid` / 비active → `inactive` / 만료 → `expired`
+2. 미회수면 원자 회전 → `rotated` (경쟁 패배 시 재조회 후 아래로)
+3. **② `replaced_by` 가 없는 revoked** = 회전이 아니라 로그아웃·family 회수로 죽은 토큰
+   → grace 없이 즉시 `reuse_revoked` (로그아웃 직후 재사용으로 세션 부활 방지)
+4. **③ 후속 토큰이 "`replaced_by` 없이 revoked"** = 이 family 는 회수당했다
+   → 이 토큰도 죽은 세션의 일부이므로 grace·recovered 없이 즉시 `reuse_revoked`
+5. 회수 후 30초 이내 → `grace`
+6. 후속이 미사용(미회수·미회전)이고 `rtrec` 5회/일 이내 → `recovered`
+7. 그 외(후속이 이미 회전됨 = 구 토큰을 낼 수 있는 건 제3자뿐) → `reuse_revoked`
+
+②·③ 은 `20260810093000` 에서 확정된 순서다 — v1 원안대로면 "로그아웃 직전에 회전된
+토큰"이 로그아웃 후 30초 안에 grace 로 부활할 수 있었다(인증인가 설계서 개정 이력의
+"로그아웃 직전 회전 토큰의 grace 부활" 결함). `recovered` 는 v1 의 "grace 초과 = 무조건
+탈취" 를 완화한 것: 후속이 한 번도 안 쓰였다면 구 토큰을 다시 낼 수 있는 건 응답을 못
+받은 정상 클라뿐이라는 관찰에 기반하되, `rtrec:<family_id>` 5회/일 캡으로 남용을 막는다
+(엣지가 아니라 `rt_rotate` 내부에서 `rate_limit_hit` 를 직접 호출하는 DB 버킷 —
+인증인가 설계서 §8 리미터 표 참조).
+
+### 12.3 v1 원안과의 차이 요약
+
+| 주제 | v1 원안(§4) | 현행 |
+|---|---|---|
+| grace 진입 조건 | revoked + 30초 이내면 무조건 | **family 회수 흔적(②·③) 선행 검사** 통과 시에만 |
+| grace 초과 재사용 | 전부 탈취 판정 → family 회수 | 미사용 후속이면 `recovered` 복구(5회/일), 그 외만 회수 |
+| 비active 사용자 | 401 + family 회수 | 동일하되 `inactive` 로 구분 반환(엣지 매핑은 동일 401) |
+| 반환 형태 | 토큰 쌍 / 401 | `(result, user_id, token_version)` — tv 를 함께 반환해 엣지가 현재 tv 로 서명 |

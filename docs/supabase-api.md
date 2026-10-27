@@ -29,17 +29,19 @@
 | `search-petcafe` | 애견카페 실시간 검색 (네이버 지역검색 프록시) | 커스텀 JWT Bearer | false | ACTIVE v9 |
 | `resolve-region` | 좌표 → 행정동 역지오코딩 (부수효과 없음) | 커스텀 JWT Bearer | false | ACTIVE v3 |
 | `invite-guardian` | 공동보호자 초대 (가입자: 인앱 알림 / 미가입: 초대 SMS). **응답은 가입 여부와 무관하게 `{ok:true}` 로 통일**(2026-08-04) — 예전 `registered` 필드는 회원 여부 오라클이었다. 상한: 모든 시도 20/일·초대자, SMS 10/일·초대자 + 1/일·번호. 직접 INSERT 는 DB 에서 REVOKE | 커스텀 JWT Bearer | false | ACTIVE v1 |
-| `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) | 커스텀 JWT Bearer | false | ACTIVE v3 |
+| `sync-dong-centroids` | 행정동 중심좌표 채우기 (지오코딩 배치, 멱등) — 호출: pg_cron `dong-centroid-sweep`(매시, `app.dong_sync_config`). **2026-09-20 로그인 JWT → 시크릿 게이트 전환**(사용자 신원이 판정에 무역할인 유지보수 작업, 앱 lazy backfill 호출 제거) | `x-sync-secret` 공유 시크릿 (`DONG_SYNC_SECRET`) | false | ACTIVE |
 | `send-push` | pending 알림 FCM(HTTP v1) 발송. **죽은 토큰 판정은 토큰 원인이 확실할 때만**(2026-08-04) — `INVALID_ARGUMENT` 는 페이로드 오류로도 나와서, 종전에는 우리 버그 하나로 수신자의 모든 기기가 꺼졌다. 분류는 `_shared/fcm.ts` | `x-push-secret` 공유 시크릿 | false | ACTIVE v3 |
 
-위 표는 17개. **원격 배포는 21개**로, 아래 4개는 이 문서에 아직 항목이 없다(0028 업체 인증·공유 뷰어 계열, 2026-07-27 확인).
+**원격 배포는 23개**(2026-08-31 확인). 아래는 위 표에 아직 항목이 없는 함수들이다 — 개수를 적어 두면 표가 바뀔 때마다 어긋나므로 슬러그만 기록한다.
 
 | 슬러그 | 용도 | verify_jwt | 배포 상태 | 설계 문서 |
 |---|---|---|---|---|
 | `apply-business` | 업체 인증 신청 | false | ACTIVE v6 | 0025 |
 | `check-business-no` | 사업자등록번호 국세청 조회 | false | ACTIVE v6 | 0025 |
+| `juso-search` | 사업장 주소 검색 (행안부 juso 프록시 — 승인키를 서버에만 둔다. 검색어 거절 422·키 오류는 관리자 알림, `_shared/juso.ts`) | false | 신규(2026-10-19) | 0025 §4.2 |
 | `purge-business-docs` | 업체 증빙 서류 파기 배치 (pg_cron, `x-purge-secret`) | false | ACTIVE v6 | 0025 |
 | `share-view` | 공유 링크 뷰어 (QR·카톡 — 사람은 302, 크롤러는 서버 렌더링) | false | ACTIVE v18 | 0028 · 0029 |
+| `sync-facilities` | LOCALDATA 시설 주기 적재 (`x-sync-secret`, 운영 배치 — 수동 실행) | false | ACTIVE | 0033 |
 
 참고: `supabase/functions/supabase/` 디렉터리는 **함수가 아니라** Supabase CLI가 남긴 `.temp/linked-project.json`(프로젝트 링크 캐시) 아티팩트다. `verify-phone-code/supabase/.temp/`에도 동일 아티팩트가 하나 더 있다(함수 폴더 안에서 CLI를 실행한 흔적).
 
@@ -66,7 +68,7 @@
 - **`bearer(req)`** — `Authorization: Bearer <token>` 파싱.
 - **`clientUa(req)`** — `user-agent`를 300자로 절단(refresh_tokens.user_agent 저장용, 비대화 방지).
 - **`clientIp(req)`** — 레이트리밋 키용 IP. **`cf-connecting-ip` 하나만 쓰고 폴백하지 않는다.** 이 헤더는 위조하면 Cloudflare 엣지가 요청 자체를 거부하고(에러 1000), 이 배포에서는 항상 붙는다 — 2026-08-01 ADR-0011 증상 4 실측, 2026-08-03 Edge Function 경로 재확인. 따라서 **IP 버킷은 '보조선' 이 아니라 실제로 지켜지는 상한이다.** `x-real-ip`/`x-forwarded-for` 폴백은 제거했다 — 폴백이 곧 우회로가 되기 때문이고(헤더 하나로 매 요청 다른 IP), DB 경로가 같은 이유로 이미 지웠다(`20260801140000_ratelimit_trusted_client_ip.sql`). 헤더가 없으면 `null` → 호출부는 IP 버킷을 건너뛰고, 스푸핑 불가한 1차 버킷(계정·토큰해시·전화번호)과 전역 상한이 받는다.
-- **`activeUid(req, secret, supabase)`** — **service_role 로 진행하는 함수의 인증 관문.** DB 의 `app.uid()` 와 같은 판정을 Edge 쪽에서 재현한다: 서명·`exp` 검증 → `users.status = 'active'` → `token_version == tv` 클레임 → `lite` 클레임 없음. 통과하면 uid, 아니면 `null`(호출부는 401). 조회 실패는 **fail-closed**(`rateLimited` 의 fail-open 과 반대 — 이쪽은 인증이라 열어 둘 이유가 없다). 사용처: `verify-location` · `verify-post-photo` · `enroll-pet-identity` · `resolve-region` · `search-petcafe` · `sync-dong-centroids` · `apply-business` · `check-business-no`.
+- **`activeUid(req, secret, supabase)`** — **service_role 로 진행하는 함수의 인증 관문.** DB 의 `app.uid()` 와 같은 판정을 Edge 쪽에서 재현한다: 서명·`exp` 검증 → `users.status = 'active'` → `token_version == tv` 클레임 → `lite` 클레임 없음. 통과하면 uid, 아니면 `null`(호출부는 401). 조회 실패는 **fail-closed**(`rateLimited` 의 fail-open 과 반대 — 이쪽은 인증이라 열어 둘 이유가 없다). 사용처: `verify-location` · `verify-post-photo` · `enroll-pet-identity` · `resolve-region` · `search-petcafe` · `sync-dong-centroids` · `apply-business` · `check-business-no` · `juso-search`.
 - **`rateLimited(supabase, key, max, windowSeconds)`** — RPC `rate_limit_hit(p_key, p_max, p_window_seconds)` 1회 소모. `true`=제한 초과(차단). **리미터 자체 오류는 fail-open**(가용성 우선 — 로그인/갱신을 막지 않음). `rate_limit_hit`은 ~2% 확률로 만료행을 기회적으로 삭제(백스톱). 초과분은 `app.rate_limit_trips` 에 **계열·분 단위로 접혀** 기록되고(2026-08-04) 운영 알람이 그걸 본다 — 전체 버킷 목록은 아래 §2.5.
 - **`sha256Hex(input)`** — refresh 토큰 저장용 해시(원문 저장 금지).
 - **`randomToken(bytes=32)`** — 불투명 refresh 토큰 원문(256bit, `crypto.getRandomValues` → base64url).
@@ -78,8 +80,11 @@
 
 ### 2.2 `_shared/cors.ts` — CORS + JSON 응답 헬퍼
 
-- `corsHeaders`: `Access-Control-Allow-Origin: $ALLOW_ORIGIN`(미설정 시 `*`), 허용 헤더 `authorization, x-client-info, apikey, content-type, x-client-refresh`, 허용 메서드 `POST, OPTIONS`.
-- `json(body, status=200)`: CORS 헤더 + `Content-Type: application/json` Response 생성.
+**2026-09-21 허용 목록 에코 방식으로 전환** — 종전에는 정적 `Access-Control-Allow-Origin: $ALLOW_ORIGIN`(미설정 시 `*`)이었고 **운영도 미설정 = `*`** 이었다. `*` 는 임의 사이트가 방문자 브라우저로 무인증 엔드포인트를 두드려 IP 레이트리밋 버킷을 방문자 IP 로 분산시키는 것을 허용한다 — 이 시스템에서 CORS 는 인증 방어가 아니라(Bearer 헤더·무쿠키) 레이트리밋 보조선이다. 향후 쿠키(credentials) 전환 시에도 `*` 는 브라우저가 거부하므로 에코 방식이 선행 조건.
+
+- `ALLOW_ORIGIN`: 콤마 구분 오리진 목록. **운영 = `https://app.pawmate.kr`** (2026-09-21 설정). 요청 Origin 이 목록에 있으면 에코 + `Vary: Origin`, 목록 밖이면 ACAO 미포함. 미설정(테스트 서버)이면 종전처럼 `*`.
+- `withCors(handler, {enforceOrigin?})`: `Deno.serve` 래퍼 — OPTIONS 응답 + 모든 응답에 CORS 헤더 주입(주입 지점을 하나로 모아 부분 적용 방지. 종전의 signup·send-push·reset-password 로컬 복제 3벌도 이리로 통합). `enforceOrigin`: Origin 헤더가 있는데 목록 밖이면 **403** — preflight 없는 simple request(text/plain POST)의 발사까지 서버측에서 차단. 전화 OTP·가입·로그인 계열 7개(send-phone-code, verify-phone-code, signup, signup-lite, login, reset-password, refresh)에 적용. Origin 없는 요청(네이티브 앱·pg_net·curl)은 통과.
+- `json(body, status=200)`: `Content-Type: application/json` Response 생성 — CORS 헤더는 래퍼가 주입.
 
 ### 2.3 `_shared/solapi.ts` — Solapi(구 CoolSMS) SMS 클라이언트
 
@@ -91,7 +96,7 @@
 
 ### 2.4 `_shared/edge_alert.ts` — 엣지 실패 관리자 알림 (pmdart#157 베타 관측성)
 
-- **`alertAdmins(admin, key, title, body)`** — 활성 관리자(`user_type='admin'`) 전원에게 `notifications` INSERT(→ 기존 트리거로 인앱+FCM 푸시). 타입은 기존 `system_notice` 재사용(새 타입은 CHECK·클라 매핑 동시 수정 필요 — 실수 여지 회피). 같은 `key` 는 **30분 1회** 스로틀(`rate_limit_hit('edgealert:<key>')`) — 장애 폭주가 알림 폭주로 번지지 않게. 절대 throw 하지 않음(알림 실패는 본 흐름에 무영향). 사용처: `enroll-pet-identity`(`ai_unavailable`/`video_too_large`/`internal_error`), `verify-post-photo`(`ai_unavailable`/`internal_error`).
+- **`alertAdmins(admin, key, title, body)`** — **2026-09-21 원장 통합**: `public.edge_alert_fire(key, …)`(service_role 전용 definer 래퍼 → `app.ops_alarm_fire('edge:'+key, 30분, …)`) 한 줄로 위임한다. 쿨다운(30분 1회)·관리자 알림(`system_notice`, priority high, 그룹키 `ops_alarm:edge:<key>`)·**억제 기록(fire_count/last_seen_at)** 전부 원장이 담당 — 종전에는 스로틀(`rate_limit_hit`)과 notifications INSERT 를 여기서 직접 했고 ops_alarms 에는 발송 시에도 안 남았다(이중 구현 — 2026-08-08 스로틀 판정 반전 사고가 난 곳). 절대 throw 하지 않음(알림 실패는 본 흐름에 무영향). 사용처: `enroll-pet-identity`(`ai_unavailable`/`video_too_large`/`internal_error`), `verify-post-photo`(`ai_unavailable`/`internal_error`), `rateLimited()` fail-open(`rate_limiter_down`).
 
 ### 2.5 레이트리밋 버킷 전체 목록 (2026-08-05 실측)
 
@@ -108,6 +113,8 @@
 | | `sms:global` | 200 | 1시간 | send-phone-code — 전역 안전판(문자 비용) |
 | `pwreset` | `pwreset:phone:<번호>` | 10 | 10분 | reset-password |
 | | `pwreset:ip:<ip>` | 30 | 10분 | reset-password |
+| `pwchange` | `pwchange:user:<uid>` | 5 | 10분 | change-password — 현재 비번 대입 상한(해시 검증 **앞**에서 계수) |
+| | `pwchange:day:<uid>` | 20 | 1일 | change-password — 토큰 보유자의 장기 대입 상한 |
 | `lite` | `lite:phone:<번호>` | 10 | 10분 | signup-lite |
 | | `lite:ip:<ip>` | 30 | 10분 | signup-lite |
 | `ginv` | `ginv:any:<uid>` | 20 | 1일 | invite-guardian — **모든 초대 시도**(가입 여부 무관, 열거 방지) |
@@ -121,6 +128,7 @@
 | `dongsync` | `dongsync:<uid>` | 5 | 1시간 | sync-dong-centroids (배치) |
 | `bizapply` | `bizapply:<uid>` | 10 | 1시간 | apply-business |
 | `ntscheck` | `ntscheck:<uid>` | 30 | 1시간 | check-business-no (국세청 조회) |
+| `juso` | `juso:<uid>` | 60 | 1시간 | juso-search (행안부 주소 검색) |
 | `edgealert` | `edgealert:<key>` | 1 | 30분 | `_shared/edge_alert.ts` — 알림 폭주 억제 |
 | `cerr` | `cerr:<uid>` / `cerr:ip:<md5>` / `cerr:anon` | 30 | 1분 | **DB 쪽** `record_client_error` |
 | | `cerr:anon:all` | 300 | 1분 | 익명 전역 안전판 |
@@ -230,7 +238,7 @@
   - 409 `username_taken` / `nickname_taken` / `phone_taken`
   - 500 `internal_error`
 - **내부 로직**: 입력 검증 → **argon2id 해싱(_shared/passwords, hash-wasm)** → `signup_user` RPC(SECURITY DEFINER) 호출 — 전화 인증 완료 확인, `users` INSERT(terms_agreed_at·마케팅 동의 기록). RPC가 raise한 커스텀 에러코드를 HTTP 코드로 매핑.
-- **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS/json 헬퍼를 파일 내 자체 정의(_shared 미사용).
+- **시크릿**: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). ~~CORS/json 헬퍼를 파일 내 자체 정의(_shared 미사용)~~ → 2026-09-21 `_shared/cors.ts` 로 통합.
 - **정책**: `verify-phone-code(purpose='signup')` 완료된 번호만 가입 가능.
 - **간이 회원 승격(0029)**: 같은 번호가 이미 있고 `status='lite'`면 `phone_taken` 대신 그 행을 **UPDATE로 승격**한다(username/password_hash/nickname/user_type 채우고 `status='active'`). 이게 없으면 간이로 후기를 쓴 사람이 **정식 가입을 아예 못 한다**(`users_phone_uq` 때문). 승격이므로 기존 후기·방문 회차가 그대로 이어진다. `lite`가 아닌 기존 계정은 종전대로 409 `phone_taken`.
 
@@ -302,10 +310,11 @@
   - 200 `{ ok: true, token, refresh_token, expires_in: 28800 }` — 현재 기기용 새 쌍
   - 400 `invalid_json` / `missing_fields` / `weak_password`
   - 401 `unauthorized`(JWT 무효 또는 RPC `not_authenticated` = tv 불일치/정지) / `invalid_current`
+  - 429 `rate_limited` — `pwchange` 버킷 초과(§2.5). 앱은 이미 "요청이 많아요" 로 매핑돼 있다
   - 500 `server_misconfigured` / `internal_error`
-- **내부 로직**: ① JWT 검증 → uid, tv ② 새 refresh 원문 생성 ③ `get_password_hash` 조회 → 엣지에서 현재 비번 검증 → `change_password_and_rotate(p_user, p_current_hash, p_new_hash, p_tv, p_new_token_hash, p_user_agent)` RPC — **단일 트랜잭션**: 세션(status+tv) 검증 → 해시 CAS 갱신(불일치 = invalid_current 롤백) → `token_version` bump + refresh 전량 회수 → 현재 기기용 새 family 발급. 새 tv 반환 ④ 새 tv로 access 서명해 새 쌍 응답.
+- **내부 로직**: ① JWT 검증 → uid, tv ② 입력 검사 뒤 `pwchange:user`(5/10분)·`pwchange:day`(20/1일) 소모 ③ 새 refresh 원문 생성 ④ `get_password_hash` 조회 → 엣지에서 현재 비번 검증 → `change_password_and_rotate(p_user, p_current_hash, p_new_hash, p_tv, p_new_token_hash, p_user_agent)` RPC — **단일 트랜잭션**: 세션(status+tv) 검증 → 해시 CAS 갱신(불일치 = invalid_current 롤백) → `token_version` bump + refresh 전량 회수 → 현재 기기용 새 family 발급. 새 tv 반환 ⑤ 새 tv로 access 서명해 새 쌍 응답.
 - **시크릿**: `JWT_SECRET`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`)
-- **정책**: 성공 시 다른 모든 기기 즉시 로그아웃(access는 tv 게이트로 즉사, refresh 회수), 현재 기기만 유지. 레이트리밋 없음(유효 access 필요가 게이트).
+- **정책**: 성공 시 다른 모든 기기 즉시 로그아웃(access는 tv 게이트로 즉사, refresh 회수), 현재 기기만 유지. **레이트리밋 계정당 5/10분 + 20/1일**(2026-10-19 신설 — 종전 "유효 access 필요가 게이트" 판단은 이 함수의 위협이 바로 토큰 탈취자라 성립하지 않았다. 탈취 토큰으로 현재 비번을 무제한 대입 → 비번 변경으로 영구 탈취가 가능했고, 토큰에는 아이디가 없어 login 의 계정 버킷도 안 걸렸다). IP 버킷 없음 — 키가 서명 검증된 uid 라 스푸핑 불가.
 
 ### reset-password
 
@@ -408,8 +417,8 @@
 - **응답**:
   - 200 `{ ok: true, processed: n }` / `{ ok: true, sent: 0 }`(대상 없음) / `{ ok: true, skipped: "fcm_not_configured" }`(FCM 미설정 — pending 유지)
   - 401 `unauthorized`, 405, 500 `bad_service_account` / `dispatch_failed`, 502 `oauth_failed` (이때 이미 claim한 알림들은 `push_report`로 전부 `ok:false, error:"oauth_failed"` 실패 보고됨 — pending으로 남지 않음), 503 `not_configured`
-- **내부 로직**: ① `push_dispatch_batch(p_only_id, p_limit=100)` RPC로 pending 알림+대상 디바이스 토큰 클레임 ② `FCM_SERVICE_ACCOUNT`(Google 서비스계정 JSON)의 private_key로 RS256 JWT 서명 → Google OAuth2 토큰 교환(`firebase.messaging` scope, 함수 인스턴스 내 캐시) ③ 각 알림×토큰마다 **FCM HTTP v1** `projects/<id>/messages:send` 호출 — `notification`(제목/본문; 앱 종료 상태에서도 OS 표시) + `data`(type/notification_id/resource_type/resource_id — 탭 라우팅), android priority high / apns-priority 10 ④ `UNREGISTERED`/`INVALID_ARGUMENT`/404 응답 토큰은 dead 처리 ⑤ `push_report(p_results)` RPC로 sent/failed 반영 + 죽은 토큰 비활성화.
-- **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`ALLOW_ORIGIN`). CORS 헤더에 `x-push-secret` 추가 허용(자체 정의).
+- **내부 로직**: ① `push_dispatch_batch(p_only_id, p_limit=100)` RPC로 pending 알림+대상 디바이스 토큰 클레임 ② `FCM_SERVICE_ACCOUNT`(Google 서비스계정 JSON)의 private_key로 RS256 JWT 서명 → Google OAuth2 토큰 교환(`firebase.messaging` scope, 함수 인스턴스 내 캐시) ③ 각 알림×토큰마다 **FCM HTTP v1** `projects/<id>/messages:send` 호출 — `notification`(제목/본문; 앱 종료 상태에서도 OS 표시) + `data`(type/notification_id/resource_type/resource_id — 탭 라우팅), android priority high / apns-priority 10, **웹 토큰에만 `webpush.fcm_options.link`**(`_shared/push_link.ts` — `post` → `${WEB_APP_URL}/p/<id>`, `user` → `/u/<id>`, 그 밖은 링크 없음. 웹 서비스워커가 탭 시 열린 탭을 그 주소로 옮긴다, 2026-10-26) ④ `UNREGISTERED`/`INVALID_ARGUMENT`/404 응답 토큰은 dead 처리 ⑤ `push_report(p_results)` RPC로 sent/failed 반영 + 죽은 토큰 비활성화.
+- **시크릿**: `PUSH_TRIGGER_SECRET`, `FCM_SERVICE_ACCOUNT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, (`WEB_APP_URL` — 웹 알림 링크의 기준 주소, 비거나 https 가 아니면 링크 없이 보낸다), (`ALLOW_ORIGIN`). ~~CORS 헤더에 `x-push-secret` 추가 허용(자체 정의)~~ → 2026-09-21 `_shared/cors.ts` 통합으로 소거 — Allow-Headers 는 브라우저 preflight 에만 영향이 있고 호출 주체(pg_net 크론)는 브라우저가 아니다.
 - **정책**: 배치 100건 제한. OAuth 토큰 캐시(만료 60초 전 갱신). FCM 미설정 시 pending 유지 후 skip.
 
 ## 5. 시크릿/환경변수 목록
@@ -423,9 +432,12 @@
 | `SOLAPI_API_KEY` / `SOLAPI_API_SECRET` / `SOLAPI_SENDER` | send-phone-code | Solapi SMS (SENDER는 콘솔 사전등록 발신번호) |
 | `NAVER_MAP_KEY_ID` / `NAVER_MAP_KEY` | verify-location, verify-post-photo, search-petcafe, resolve-region, sync-dong-centroids | NCP Maps Reverse/Forward Geocoding (Client ID/Secret) |
 | `NAVER_CLIENT_ID` / `NAVER_CLIENT_SECRET` | search-petcafe | 네이버 오픈API 지역검색 |
-| `GEMINI_API_KEY` | verify-post-photo, enroll-pet-identity | Google Gemini 2.5 Pro (유료 등급/billing) |
+| `GEMINI_API_KEY` | verify-post-photo, enroll-pet-identity | Google Gemini 2.5 Pro (유료 등급/billing — **2026-09-07 소유자가 결제 설정에서 유료 등급 확인**. 유료 서비스는 Gemini API 약관상 입력 데이터가 모델 학습에 사용되지 않는다 — 처리방침 §6·§7의 "판별 목적으로만 처리·별도 보관 없음" 기술이 성립하는 전제이므로, 무료 등급 강등은 개인정보 고지 위반이 된다. 결제 해지·프로젝트 변경 시 이 항목을 다시 확인할 것) |
 | `PUSH_TRIGGER_SECRET` | send-push | DB 트리거/pg_cron과 공유하는 호출 인증 시크릿 |
+| `DONG_SYNC_SECRET` | sync-dong-centroids | pg_cron `dong-centroid-sweep` 과 공유(`app.dong_sync_config`) — 2026-09-20 JWT 게이트에서 전환 |
 | `FCM_SERVICE_ACCOUNT` | send-push | Google 서비스계정 JSON (FCM HTTP v1 OAuth) |
+| `WEB_APP_URL` | share-view, send-push | 웹앱 주소(`https://app.pawmate.kr`). share-view 는 사람에게 302 할 곳, send-push 는 웹 알림 탭 링크(`/p/<id>`·`/u/<id>`)의 기준 |
+| `JUSO_API_KEY` | juso-search | 행안부 도로명주소 검색 승인키. 종전에는 앱 빌드에 넣었다(공개 번들 노출·빌드 누락 문제로 2026-10-19 서버로 이관) |
 
 `.env.example`(`supabase/functions/.env.example`)에는 `GEMINI_API_KEY_ID`도 있으나 코드에서 미사용. 시크릿 등록은 `supabase secrets set --env-file supabase/functions/.env --project-ref vyatppuxmpulqtxevfpk`.
 

@@ -15,7 +15,8 @@
 // ============================================================================
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import { corsHeaders, json } from "../_shared/cors.ts";
+import { json, withCors } from "../_shared/cors.ts";
+import { secretEq } from "../_shared/auth.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -32,16 +33,7 @@ const CATEGORIES = new Set([
   "pet_sales",
 ]);
 
-/** 타이밍 노출 없는 문자열 비교 — 시크릿 대조용. */
-function secretEq(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
-
-Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+Deno.serve(withCors(async (req: Request) => {
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
   if (!SYNC_SECRET) return json({ error: "server_misconfigured" }, 500);
 
@@ -77,4 +69,4 @@ Deno.serve(async (req: Request) => {
     return json({ error: "upsert_failed", detail: String(error.message ?? error).slice(0, 200) }, 500);
   }
   return json(data ?? {});
-});
+}));
