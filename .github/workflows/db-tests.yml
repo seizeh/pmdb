@@ -38,7 +38,7 @@ jobs:
           # 고정한다 — 새 Deno 가 검사를 조이면 우리 코드와 무관하게 빨간불이 된다.
           deno-version: v2.9.4
 
-      - name: 타입 검사 (래칫 ≤1)
+      - name: 타입 검사 (래칫 ≤0)
         shell: bash
         run: |
           set -uo pipefail
@@ -46,7 +46,9 @@ jobs:
           # 여기서만 끈다 — 안 끄면 deno check 가 실패하는 순간 스크립트가 죽어
           # 상한 비교에 도달하지도 못한다(집계가 아니라 무조건 빨간불이 된다).
           set +e
-          MAX=1
+          # 0 이 됐다(2026-08-22). 마지막 1건이던 _shared/auth.ts 의 BufferSource
+          # 불일치를 고쳤다 — 0 은 래칫의 종착점이라 이제부터는 **새 오류가 곧 실패**다.
+          MAX=0
           out=$(deno check supabase/functions/*/index.ts 2>&1)
           rc=$?
           # 색상 이스케이프를 걷어내고 `TS####  [ERROR]` 헤더 줄을 센다.
