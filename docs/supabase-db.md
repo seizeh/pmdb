@@ -1850,6 +1850,13 @@ Refresh token 회전(재사용 감지 + 유실 복구 포함). 반환 `result` �
   운영자 기기에서만 돌아 이 스윕도 주간 점검 CI 도 결과를 볼 수 없다 — launchd 등록 후 5주
   연속 실패(PATH 에 gpg 없음)를 아무도 몰랐다. `BACKUP_HEARTBEAT_URL`(backup.env, 별도 체크)을
   주면 성공 시 핑·실패 시 `/fail` 핑을 보내, 실패는 즉시·미실행은 grace 뒤에 드러난다.
+- **예약은 "정각 1회" 가 아니라 "자주 묻고 될 때"(2026-11-09)**: 월 09:30 정각 예약은 맥이 잠든
+  시각에 걸리면 다음 DarkWake(2~5초, 네트워크 없음·곧 재잠자기)에 작업을 띄워 10-12~11-09
+  예약 실행 5회가 전부 실패했다(DNS 실패 4·덤프 도중 잠자기 1). launchd 는 30분마다
+  `scripts/backup_scheduled.sh` 를 부르고, 마지막 성공 6일 경과·재시도 간격 3시간·완전히
+  깨어 있음(`pmset -g systemstate` 에 Graphics)·DB 풀러 TCP 연결이 모두 맞을 때만 `backup.sh`
+  를 돌린다. 실행 중엔 `caffeinate -i`, 검증 전 실패 산출물은 삭제(빈·반쪽 `.gpg` 가 완성본
+  이름으로 남던 것), 성공 표식은 `backups/.last_success`.
 - pgTAP: t21(12건).
 
 #### `rls_auto_enable() → event_trigger` [SD]

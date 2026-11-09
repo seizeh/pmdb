@@ -16,6 +16,7 @@
 #
 # 사용법: scripts/backup.env 에 SUPABASE_DB_URL(세션 풀러 5432)·BACKUP_PASSPHRASE 설정 후 실행.
 #         (backup.command 더블클릭 또는 ./scripts/backup.sh)
+#         자동 실행은 launchd → backup_scheduled.sh(만기·깨어 있음·네트워크 확인) → 이 스크립트.
 #
 # 복원(참고) — 새 Supabase 프로젝트 기준:
 #   1) 필요한 확장 먼저 설치: create extension postgis, pg_cron, pgcrypto 등
@@ -57,7 +58,20 @@ ping_hb() {  # ping_hb [/fail]
   curl -fsS -m 10 --retry 3 -o /dev/null "${BACKUP_HEARTBEAT_URL}${1:-}" \
     || log "⚠ 하트비트 전송 실패(${1:-성공 핑})"
 }
-trap 'rc=$?; [ "$rc" -eq 0 ] || ping_hb /fail' EXIT
+# 실패 시 검증 전 산출물은 지운다. 덤프가 끊겨도 gpg 는 받은 만큼 암호화본을 남기므로
+# 70바이트짜리 빈 파일(DNS 실패)이나 1.7MB 반쪽(덤프 도중 잠자기)이 완성본 이름으로 남았다
+# (2026-10-12~11-09) — 복구 때 고를 수 있는 "백업처럼 보이는 파일" 은 없느니만 못하다.
+# 검증을 통과한 뒤의 실패(사본·폐기 단계)는 산출물이 온전하므로 남긴다.
+on_exit() {
+  local rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  if [ -n "${DB_FINAL:-}" ] && [ -z "${DB_VERIFIED:-}" ] && [ -f "$DB_FINAL" ]; then
+    rm -f "$DB_FINAL"
+    log "검증 전 실패 — 불완전한 산출물 삭제: $(basename "$DB_FINAL")"
+  fi
+  ping_hb /fail
+}
+trap on_exit EXIT
 
 # --- 사전 점검 ----------------------------------------------------------
 [ -n "${SUPABASE_DB_URL:-}" ] || die "SUPABASE_DB_URL 미설정 (세션 풀러 5432 연결문자열 필요)"
@@ -66,6 +80,12 @@ command -v pg_restore >/dev/null 2>&1 || die "pg_restore 없음 (무결성 검�
 
 mkdir -p "$BACKUP_DIR"
 DUMP_ARGS=(-Fc --no-owner -n public -n app -d "$SUPABASE_DB_URL")
+
+# 실행 중에는 유휴 잠자기를 막는다(이 프로세스가 끝나면 caffeinate 도 끝난다).
+# 덮개를 닫는 등 강제 잠자기까지는 못 막는다 — 그 경우는 실패로 알리고 예약 쪽이 재시도한다.
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -i -w $$ &
+fi
 
 # --- 1) DB 덤프 (+무결성 검증), 암호화 시 파이프로 평문 디스크 미접촉 ---
 if [ -n "${BACKUP_PASSPHRASE:-}" ]; then
@@ -95,6 +115,7 @@ else
   log "무결성 검증(아카이브 목차)"
   pg_restore --list "$DB_FINAL" >/dev/null || die "덤프 무결성 검증 실패(손상/절단)"
 fi
+DB_VERIFIED=1
 log "DB 백업 산출물: $DB_FINAL ($(du -h "$DB_FINAL" | cut -f1))"
 
 # --- 2) (선택) Storage 동기화 (원격 → 로컬) -----------------------------
@@ -119,6 +140,11 @@ if [ -n "${BACKUP_OFFSITE_DIR:-}" ]; then
 else
   log "⚠ 오프사이트 사본 건너뜀 (BACKUP_OFFSITE_DIR 미설정 — 백업이 이 기기 한 대에만 있음)"
 fi
+
+# 성공 표식 — backup_scheduled.sh 가 다음 만기를 이 시각에서 센다(수동 실행도 갱신).
+# 폐기 단계 전에 찍는 이유: 검증된 백업과 사본은 이미 있다. 폐기가 실패하면 /fail 로 알리되,
+# 예약 쪽이 같은 실패를 반복하며 덤프를 쌓지는 않게 한다.
+touch "$BACKUP_DIR/.last_success"
 
 # --- 3) 보존주기 폐기 ---------------------------------------------------
 # 사본 쪽도 같은 보존주기로 회전한다(파기 정책이 두 위치에 동일하게 적용되어야 한다).
