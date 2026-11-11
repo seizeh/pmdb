@@ -68,6 +68,7 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 | 파일 | 역할 |
 |---|---|
 | `supabase/schema/prelude.sql` | 확장(postgis·pg_net·pgcrypto…)과 Supabase 기본 롤 |
+| `supabase/schema/replay-platform-grants.sql` | 플랫폼이 확장 소유 테이블(`spatial_ref_sys`)에 주는 권한 — 수퍼유저(`supabase_admin`)로 적용 |
 | `supabase/schema/replay-stubs.sql` | 컨테이너에 없는 플랫폼 객체 흉내(storage 버킷/정책, realtime 퍼블리케이션) |
 | `supabase/schema/baseline.sql` | 2026-06-08 이전, 저장소 밖에서 적용됐던 기반 스키마 |
 | `supabase/schema/replay-default-privs.sql` | Supabase 기본 권한(마이그레이션이 만드는 객체의 ACL 재현) |
@@ -89,13 +90,15 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 - `storage.buckets` 설정 (공개 여부·용량·MIME 제한)
 - `storage.objects` RLS 정책 (**사용자 사진의 접근 제어**)
 - `cron.job` (**보존기간 파기 배치**)
+- 확장 소유 테이블에 건 트리거 (`spatial_ref_sys` 쓰기 가드, 20260915100000 — 테이블은
+  `public` 에 있지만 확장 소속이라 `pg_dump` 가 트리거를 싣지 않는다)
 
 즉 "직접 친 DDL 을 즉시 잡는다" 는 보증이 사진 접근 제어와 파기 배치에는 **적용되지
 않았다.** 실제로 퍼블리케이션 드리프트가 하나 있었고(`notifications`, 20260804120000)
 그동안 아무도 몰랐다 — 마이그레이션만으로 세운 DB 에서는 알림 realtime 이 조용히
 죽는 상태였다.
 
-그래서 그 넷만 골라 텍스트로 뽑아 `outofband.txt` 에 두고(`dump_schema.sh` 가 생성),
+그래서 이것들만 골라 텍스트로 뽑아 `outofband.txt` 에 두고(`dump_schema.sh` 가 생성),
 `replay` 잡이 리플레이 DB 와 대조한다. 스냅샷 DB 가 아니라 **커밋된 파일**과 대는
 이유는 `schema.sql` 에 이 객체들이 아예 없어서 복원해도 아무것도 안 생기기 때문이다.
 
