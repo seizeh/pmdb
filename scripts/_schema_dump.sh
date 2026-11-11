@@ -37,6 +37,8 @@ normalize_dump() {
 #   · storage.buckets 설정                   (공개 여부·용량·MIME 제한)
 #   · storage.objects RLS 정책               (사용자 사진의 접근 제어)
 #   · cron.job                               (보존기간 파기 배치)
+#   · 확장 소유 테이블에 건 트리거           (spatial_ref_sys 쓰기 가드 — 테이블은
+#                                             public 에 있지만 확장 소속이라 덤프에서 빠진다)
 #
 # 즉 "마이그레이션 없이 친 DDL 을 즉시 잡는다" 는 이 저장소의 보증이 **사진 접근
 # 제어와 파기 배치에는 적용되지 않았다**. 실제로 publication 드리프트가 하나 있었고
@@ -83,5 +85,17 @@ select 'CRON ' || jobname
        || '  active=' || active::text
        || '  :: ' || regexp_replace(btrim(command), '\s+', ' ', 'g')
   from cron.job order by jobname;
+
+-- 확장 소유 테이블에 우리가 건 트리거. pg_dump 는 확장 소유 테이블의 트리거를
+-- 덤프하지 않아 schema.sql 에 실리지 않는다(20260915100000 spatial_ref_sys 가드).
+select 'TRIGGER ' || n.nspname || '.' || c.relname || ' ' || t.tgname
+       || '  enabled=' || t.tgenabled::text
+       || '  :: ' || pg_get_triggerdef(t.oid)
+  from pg_trigger t
+  join pg_class c     on c.oid = t.tgrelid
+  join pg_namespace n on n.oid = c.relnamespace
+ where not t.tgisinternal
+   and n.nspname = 'public' and c.relname = 'spatial_ref_sys'
+ order by t.tgname;
 SQL
 }

@@ -6,8 +6,9 @@
 #
 # 작업용 DB 두 개를 새로 만들어 같은 조건에서 각각 채운 뒤, 양쪽을 pg_dump 해서 비교한다.
 #
-#   A(스냅샷)  prelude → schema.sql
-#   B(리플레이) prelude → replay-stubs → baseline.sql → replay-default-privs → migrations/*.sql
+#   A(스냅샷)  prelude → platform-grants → schema.sql
+#   B(리플레이) prelude → platform-grants → replay-stubs → baseline.sql → replay-default-privs
+#              → migrations/*.sql
 #
 # 스냅샷을 파일 그대로 비교하지 않고 A 로 한 번 복원했다 다시 덤프하는 이유:
 # pg_dump 출력은 되먹였을 때 글자 그대로 재현되지 않는다. 예컨대
@@ -51,6 +52,20 @@ trap 'rm -rf "$WORK"' EXIT
 
 apply() { psql "$1" -X -q -v ON_ERROR_STOP=1 -f "$2"; }
 
+# 같은 DB 에 수퍼유저로 붙어 적용한다 — 확장 소유 테이블의 권한처럼 postgres 롤로는
+# 손댈 수 없는 것에만 쓴다(replay-platform-grants.sql). supabase/postgres 이미지는
+# supabase_admin 의 비밀번호를 POSTGRES_PASSWORD 로 맞춰 두므로 연결문자열의 사용자
+# 이름만 갈아끼우면 된다. 다른 환경이면 REPLAY_SUPERUSER 로 수퍼유저 이름을 넘긴다.
+apply_as_superuser() {
+  local su="${REPLAY_SUPERUSER:-supabase_admin}" url
+  url="$(sed -E "s#^([a-z]+://)[^:/@]+#\\1${su}#" <<<"$1")"
+  if ! psql "$url" -X -q -v ON_ERROR_STOP=1 -f "$2"; then
+    echo "-- 수퍼유저(${su}) 적용 실패: $2" >&2
+    echo "   supabase/postgres 이미지가 아니면 REPLAY_SUPERUSER 로 수퍼유저 이름을 넘길 것" >&2
+    exit 1
+  fi
+}
+
 echo "== 1/5 작업용 DB 재생성 ($SNAPSHOT_DB, $REPLAY_DB)"
 psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
   -c "drop database if exists ${SNAPSHOT_DB} with (force)" \
@@ -64,10 +79,13 @@ psql "$ADMIN_URL" -X -q -v ON_ERROR_STOP=1 \
 # A 에 기본 권한을 걸면 그 위에 또 얹혀 운영보다 넓은 권한이 되어 버린다.
 echo "== 2/5 A: 스냅샷 복원"
 apply "$SNAPSHOT_URL" "$SCHEMA_DIR/prelude.sql"
+# 확장을 만든 직후에, 양쪽에 똑같이 — 이유는 그 파일 주석 참고.
+apply_as_superuser "$SNAPSHOT_URL" "$SCHEMA_DIR/replay-platform-grants.sql"
 apply "$SNAPSHOT_URL" "$SCHEMA_DIR/schema.sql"
 
 echo "== 3/5 B: 베이스라인 + 마이그레이션 리플레이"
 apply "$REPLAY_URL" "$SCHEMA_DIR/prelude.sql"
+apply_as_superuser "$REPLAY_URL" "$SCHEMA_DIR/replay-platform-grants.sql"
 apply "$REPLAY_URL" "$SCHEMA_DIR/replay-stubs.sql"
 apply "$REPLAY_URL" "$SCHEMA_DIR/baseline.sql"
 # 기본 권한은 베이스라인 '다음' 에 건다 — 이유는 그 파일 주석 참고.
@@ -103,15 +121,15 @@ if diff -u "$WORK/a.sql" "$WORK/b.sql" > "$WORK/diff.txt"; then
   # 리플레이 DB 를 직접 댄다. baseline.sql 과 같은 성격의 생성물이다.
   OOB_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../supabase/schema/outofband.txt"
   if [ -f "$OOB_FILE" ]; then
-    echo "== 5b/5 퍼블리케이션·storage·cron 대조"
+    echo "== 5b/5 퍼블리케이션·storage·cron·확장 테이블 트리거 대조"
     dump_outofband_to "$REPLAY_URL" "$WORK/oob_replay.txt"
     if diff -u "$OOB_FILE" "$WORK/oob_replay.txt" > "$WORK/oob_diff.txt"; then
-      echo "✅ 퍼블리케이션·storage·cron 도 일치 ($(wc -l < "$WORK/oob_replay.txt" | tr -d ' ') 줄)"
+      echo "✅ 퍼블리케이션·storage·cron·확장 테이블 트리거도 일치 ($(wc -l < "$WORK/oob_replay.txt" | tr -d ' ') 줄)"
       exit 0
     fi
     cat "$WORK/oob_diff.txt" >> "$OUT_DIFF"
     echo "❌ public·app **밖** 객체가 다름 — 스키마는 맞는데 여기서 갈렸다."
-    echo "   대상: supabase_realtime 퍼블리케이션 · storage 버킷/정책 · cron 잡"
+    echo "   대상: supabase_realtime 퍼블리케이션 · storage 버킷/정책 · cron 잡 · 확장 테이블 트리거"
     echo "   · 운영에 직접 친 것이면 마이그레이션으로 남길 것"
     echo "   · 마이그레이션이 맞다면 ./scripts/dump_schema.sh 로 스냅샷 갱신"
     echo

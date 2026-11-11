@@ -1,0 +1,22 @@
+-- 플랫폼이 확장 소유 테이블에 주는 권한 — prelude.sql 다음에 **수퍼유저로** 적용한다.
+--
+-- Supabase 프로젝트의 DB 에는 "supabase_admin 이 public 에 만드는 테이블은
+-- postgres·anon·authenticated·service_role 에 ALL" 이라는 기본 권한이 걸려 있다
+-- (pg_default_acl, defaclrole = supabase_admin). postgis 는 supabase_admin 이 설치하므로
+-- 운영의 spatial_ref_sys ACL 은 다음과 같다(2026-11-11 실측):
+--
+--   supabase_admin=arwdDxtm  postgres=arwdDxtm  anon=arwdDxtm
+--   authenticated=arwdDxtm   service_role=arwdDxtm  PUBLIC=r
+--
+-- 20260915100000 은 이 중 postgres 의 TRIGGER 권한으로 쓰기 가드 트리거를 걸고,
+-- t27 은 "anon/authenticated 에 쓰기 권한이 있는데도 트리거가 막는다" 를 본다.
+--
+-- 리플레이가 쓰는 작업용 DB 는 새로 만든 DB 라 그 기본 권한이 없다(pg_default_acl 은
+-- DB 별 카탈로그다). 그대로면 create trigger 가 permission denied 로 멈추고, 트리거가
+-- 걸리더라도 anon 의 쓰기는 가드가 아니라 테이블 권한에서 먼저 막혀 t27 이 다른 것을
+-- 재게 된다. 테이블 소유자가 supabase_admin 이라 postgres 로는 스스로 줄 수 없어
+-- 수퍼유저 접속이 필요하다(replay_check.sh 의 apply_as_superuser).
+--
+-- 스냅샷 쪽(A)과 리플레이 쪽(B)에 똑같이 적용한다 — 그래야 이 GRANT 가 덤프에 실리든
+-- 안 실리든 양쪽 덤프가 같아 비교 결과에 섞이지 않는다.
+grant all on table public.spatial_ref_sys to postgres, anon, authenticated, service_role;
