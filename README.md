@@ -136,6 +136,34 @@ docker run -d --name pm -e POSTGRES_PASSWORD=postgres -p 54323:5432 \
 - 스냅샷 갱신: 스키마 변경 마이그레이션 적용 후 `./scripts/dump_schema.sh` 실행해
   함께 커밋(안 하면 CI 가 구스키마로 돈다). `baseline.sql` 도 같이 재생성된다.
 
+## 테스트 서버 권한 정렬
+
+스냅샷(`schema.sql`)을 호스팅 프로젝트에 복원하면 **운영에서 회수한 권한이 되살아난다.**
+`pg_dump` 는 GRANT 만 내보내고 REVOKE 는 내보내지 않는데, Supabase 프로젝트의 public
+스키마에는 "새 테이블·함수·시퀀스는 anon·authenticated·service_role 에 ALL" 기본 권한이
+걸려 있어서 객체가 만들어지는 순간 그 권한이 붙기 때문이다. pgTAP 스냅샷 DB 에서 권한
+회수 단언을 못 쓰는 것과 같은 원인이다 — 다만 테스트 서버는 인터넷에 열려 있다.
+
+```bash
+./scripts/align_test_privs.py            # 대조만 — 권한 차이가 있으면 exit 1
+./scripts/align_test_privs.py --apply    # 리허설(롤백) → 적용 → 재대조
+```
+
+- 기준은 운영(`scripts/backup.env`), 대상은 테스트(`scripts/test-server.env`)로 **고정**이다.
+  운영에는 읽기 전용 트랜잭션으로만 붙는다.
+- 맞추는 것: 양쪽에 모두 있는 함수·테이블·뷰·시퀀스의 PUBLIC/anon/authenticated/
+  service_role 권한(컬럼 권한 포함), RLS 스위치, postgres 롤의 기본 권한,
+  `spatial_ref_sys` 쓰기 가드 트리거.
+- 스키마 차이(테스트에 없는 객체·옛 본문·옛 정책)는 **세어서 보여 주기만 한다** —
+  마이그레이션을 적용해서 메울 일이다. 출력의 "스키마 차이" 가 비어 있지 않으면 테스트
+  서버가 운영보다 뒤처진 것이다.
+- `--apply` 는 먼저 같은 문장을 트랜잭션 안에서 돌려 보고, anon·authenticated 로 모든
+  테이블·뷰를 읽은 결과가 운영과 같을 때만 적용한다. 적용한 SQL 과 되돌리는 SQL 은
+  `backups/test-privs/<UTC 시각>/` 에 남는다.
+- **테스트 서버를 스냅샷으로 세우거나 다시 세운 직후에는 반드시 돌린다.**
+- CI: `replay` 잡의 마지막 단계(`align_test_privs_selftest.sh`)가 "새 프로젝트 기본 권한
+  위에 스냅샷 복원 → 정렬 → 차이 0" 을 매번 검증한다.
+
 ## 배포
 
 ```bash
