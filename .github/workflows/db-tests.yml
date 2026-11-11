@@ -107,6 +107,9 @@ jobs:
       - name: 스키마 스냅샷 복원 (prelude → schema)
         run: |
           psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/schema/prelude.sql
+          # DIAG(임시 — 다음 커밋에서 제거)
+          echo "DIAG 기본 DB: $(psql "$DB_URL" -X -At -c "select 'owner=' || pg_get_userbyid(relowner) || '  acl=' || coalesce(relacl::text, '(null)') || '  postgres_TRIGGER=' || has_table_privilege('postgres', oid, 'TRIGGER') || '  anon_DELETE=' || has_table_privilege('anon', oid, 'DELETE') from pg_class where oid = 'public.spatial_ref_sys'::regclass")"
+          echo "DIAG 기본 DB supabase_admin 의 public 테이블 기본 권한: $(psql "$DB_URL" -X -At -c "select coalesce((select defaclacl::text from pg_default_acl where defaclrole = 'supabase_admin'::regrole and defaclnamespace = 'public'::regnamespace and defaclobjtype = 'r'), '(없음)')")"
           psql "$DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/schema/schema.sql
 
       - name: pgTAP 테스트
