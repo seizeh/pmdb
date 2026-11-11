@@ -206,6 +206,12 @@ select current_setting('align.smoke');
 """
 
 
+def show(path: str) -> str:
+    """화면에 찍을 경로 — 현재 폴더 아래면 상대 경로, 밖이면 절대 경로."""
+    ap = os.path.abspath(path)
+    return os.path.relpath(ap) if ap.startswith(os.getcwd() + os.sep) else ap
+
+
 def die(msg: str, code: int = 3):
     print(f"❌ {msg}", file=sys.stderr)
     sys.exit(code)
@@ -604,7 +610,7 @@ def main():
                 + "\n".join(plan.undo) + "\n"
                 + ("\n-- 가드 트리거는 테이블 소유자만 뗄 수 있다. 끄려면 app.spatial_ref_sys_guard() 의\n"
                    "-- 본문을 `return null` 만 남기게 교체한다(20260915100000 주석 참고).\n" if plan.need_guard else ""))
-    print(f"── 적용할 문장 {sum(1 for l in body.splitlines() if l.strip() and not l.startswith('--'))}줄 → {os.path.relpath(out_dir, os.getcwd())}/sync.sql")
+    print(f"── 적용할 문장 {sum(1 for l in body.splitlines() if l.strip() and not l.startswith('--'))}줄 → {show(out_dir)}/sync.sql")
 
     print("── 리허설: 대상에서 적용 → 읽기 점검 → 롤백")
     after = smoke(tgt_url, "대상 리허설", prefix="\\set ON_ERROR_STOP on\n" + body)
@@ -627,7 +633,7 @@ def main():
         print_report(again, label(src_url), label(tgt_url), n_fn, n_rel, True)
         print("❌ 적용했지만 차이가 남았다 — 다른 롤이 준 권한이거나 소유자가 다른 객체일 수 있다")
         sys.exit(1)
-    print(f"✅ 적용 완료 — 권한 일치. 되돌리기: {os.path.relpath(out_dir, os.getcwd())}/undo.sql")
+    print(f"✅ 적용 완료 — 권한 일치. 되돌리기: {show(out_dir)}/undo.sql")
 
 
 if __name__ == "__main__":

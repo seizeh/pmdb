@@ -67,7 +67,7 @@ alter default privileges for role postgres in schema public
 alter default privileges for role postgres in schema public
   grant all on sequences to postgres, anon, authenticated, service_role;
 SQL
-apply "$TGT" supabase/schema/schema.sql
+apply "$TGT" supabase/schema/schema.sql > /dev/null   # 덤프 머리의 set_config 결과가 로그를 채운다
 
 echo "== 2/4 대조 — 차이가 나야 한다"
 set +e
