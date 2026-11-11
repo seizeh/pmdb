@@ -85,13 +85,7 @@ apply "$SNAPSHOT_URL" "$SCHEMA_DIR/schema.sql"
 
 echo "== 3/5 B: 베이스라인 + 마이그레이션 리플레이"
 apply "$REPLAY_URL" "$SCHEMA_DIR/prelude.sql"
-# ── DIAG(임시 — 다음 커밋에서 제거) ─────────────────────────────────────────
-DIAG_Q="select 'owner=' || pg_get_userbyid(relowner) || '  acl=' || coalesce(relacl::text, '(null)') || '  postgres_TRIGGER=' || has_table_privilege('postgres', oid, 'TRIGGER') || '  anon_DELETE=' || has_table_privilege('anon', oid, 'DELETE') from pg_class where oid = 'public.spatial_ref_sys'::regclass"
-echo "DIAG B(새 DB) 권한 주기 전: $(psql "$REPLAY_URL" -X -At -c "$DIAG_Q" 2>&1)"
-echo "DIAG B(새 DB) 권한 주기 전 create trigger: $(psql "$REPLAY_URL" -X -q -v ON_ERROR_STOP=1 -c "begin" -c "create function public._diag_trg() returns trigger language plpgsql as 'begin return null; end'" -c "create trigger _diag before insert on public.spatial_ref_sys for each statement execute function public._diag_trg()" -c "rollback" 2>&1 | tr '\n' ' ' || true) [끝]"
-echo "DIAG B(새 DB) pg_default_acl 행 수: $(psql "$REPLAY_URL" -X -At -c "select count(*) from pg_default_acl" 2>&1)"
 apply_as_superuser "$REPLAY_URL" "$SCHEMA_DIR/replay-platform-grants.sql"
-echo "DIAG B(새 DB) 권한 준 뒤: $(psql "$REPLAY_URL" -X -At -c "$DIAG_Q" 2>&1)"
 apply "$REPLAY_URL" "$SCHEMA_DIR/replay-stubs.sql"
 apply "$REPLAY_URL" "$SCHEMA_DIR/baseline.sql"
 # 기본 권한은 베이스라인 '다음' 에 건다 — 이유는 그 파일 주석 참고.

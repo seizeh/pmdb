@@ -12,10 +12,15 @@
 -- t27 은 "anon/authenticated 에 쓰기 권한이 있는데도 트리거가 막는다" 를 본다.
 --
 -- 리플레이가 쓰는 작업용 DB 는 새로 만든 DB 라 그 기본 권한이 없다(pg_default_acl 은
--- DB 별 카탈로그다). 그대로면 create trigger 가 permission denied 로 멈추고, 트리거가
--- 걸리더라도 anon 의 쓰기는 가드가 아니라 테이블 권한에서 먼저 막혀 t27 이 다른 것을
--- 재게 된다. 테이블 소유자가 supabase_admin 이라 postgres 로는 스스로 줄 수 없어
--- 수퍼유저 접속이 필요하다(replay_check.sh 의 apply_as_superuser).
+-- DB 별 카탈로그다). CI 실측(2026-11-11, supabase/postgres 17.6.1.121):
+--
+--   새 작업용 DB   pg_default_acl 0행, ACL = supabase_admin=arwdDxtm + PUBLIC=r 뿐
+--                  → postgres 의 create trigger 는 permission denied for table spatial_ref_sys
+--   이미지 기본 DB 운영과 같은 ACL(기본 권한이 이미 걸려 있다) → pgtap 잡은 이 파일이 필요 없다
+--
+-- 트리거가 걸리더라도 anon 에 쓰기 권한이 없으면 가드가 아니라 테이블 권한에서 먼저
+-- 막혀 t27 이 다른 것을 재게 된다. 테이블 소유자가 supabase_admin 이라 postgres 로는
+-- 스스로 줄 수 없어 수퍼유저 접속이 필요하다(replay_check.sh 의 apply_as_superuser).
 --
 -- 스냅샷 쪽(A)과 리플레이 쪽(B)에 똑같이 적용한다 — 그래야 이 GRANT 가 덤프에 실리든
 -- 안 실리든 양쪽 덤프가 같아 비교 결과에 섞이지 않는다.
