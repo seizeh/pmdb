@@ -202,3 +202,9 @@ jobs:
       # 같은 불변식 테스트를 리플레이 결과 DB 에도 한 번 더 돌린다.
       - name: 재생된 DB 에서 pgTAP 테스트
         run: ./scripts/run_db_tests.sh "$REPLAY_URL"
+
+      # 스냅샷을 '새 Supabase 프로젝트의 기본 권한' 위에 복원해 권한이 풀린 DB 를 만들고,
+      # 정렬 도구(align_test_privs.py)가 그것을 리플레이 DB(= 운영과 같은 ACL)와 같게
+      # 만드는지 본다 — 테스트 서버를 스냅샷으로 세웠을 때 실제로 벌어지는 일이다.
+      - name: 권한 정렬 도구 자체 검증
+        run: ./scripts/align_test_privs_selftest.sh "$DB_URL"
