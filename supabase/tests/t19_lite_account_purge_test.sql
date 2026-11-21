@@ -9,10 +9,15 @@ set local search_path = public, app, extensions;
 select plan(6);
 
 -- 간이 계정 3종 — 후기 있음 / 후기 없음(어제) / 후기 없음(방금).
+--
+-- 전화번호는 helpers/seed.sql 과 같은 010-0000 대역에서 고른다(뒷자리 190x = t19).
+-- 종전의 010-9999-000x 는 테스트 서버(PAWMATE-TEST)의 데모 계정 번호와 겹쳐 시드
+-- INSERT 가 users_phone_uq 에 막혔다 — 스위트 중 이 파일만 그 서버에서 실패했다
+-- (2026-11-11). 실사용 번호처럼 생긴 값은 어느 DB 의 데이터와도 언제든 겹칠 수 있다.
 with u as (
   insert into public.users (username, password_hash, nickname, user_type, phone,
                             phone_verified, status, created_at)
-  values ('t_lite_kept', '!', 'lite_kept', 'no_pet', '01099990001',
+  values ('t_lite_kept', '!', 'lite_kept', 'no_pet', '01000001901',
           true, 'lite', now() - interval '2 days')
   returning id
 ) insert into seed select 'lite_kept', id from u;
@@ -20,7 +25,7 @@ with u as (
 with u as (
   insert into public.users (username, password_hash, nickname, user_type, phone,
                             phone_verified, status, created_at)
-  values ('t_lite_gone', '!', 'lite_gone', 'no_pet', '01099990002',
+  values ('t_lite_gone', '!', 'lite_gone', 'no_pet', '01000001902',
           true, 'lite', now() - interval '2 days')
   returning id
 ) insert into seed select 'lite_gone', id from u;
@@ -29,7 +34,7 @@ with u as (
 with u as (
   insert into public.users (username, password_hash, nickname, user_type, phone,
                             phone_verified, status, created_at)
-  values ('t_lite_fresh', '!', 'lite_fresh', 'no_pet', '01099990003',
+  values ('t_lite_fresh', '!', 'lite_fresh', 'no_pet', '01000001903',
           true, 'lite', now())
   returning id
 ) insert into seed select 'lite_fresh', id from u;
@@ -55,7 +60,7 @@ select app.cleanup_retention();
 -- ① 후기가 남아 있으면 보존 — 작성자 식별·정식 전환 연결에 계속 쓰인다.
 select is(
   (select phone from public.users where id = (select id from seed where k='lite_kept')),
-  '01099990001', '후기가 있는 간이 계정은 전화번호를 보존한다');
+  '01000001901', '후기가 있는 간이 계정은 전화번호를 보존한다');
 
 -- ② 후기가 하나도 없으면 파기 — 이용조건 §3 이 약속한 바로 그 동작.
 select is(
@@ -68,7 +73,7 @@ select is(
 -- ③ 유예 안(방금 생성)은 건드리지 않는다 — 후기를 쓰는 중일 수 있다.
 select is(
   (select phone from public.users where id = (select id from seed where k='lite_fresh')),
-  '01099990003', '생성 직후 간이 계정은 유예 기간이라 보존한다');
+  '01000001903', '생성 직후 간이 계정은 유예 기간이라 보존한다');
 
 -- ④ 정식 회원은 후기 유무와 무관하게 대상이 아니다.
 select is(
